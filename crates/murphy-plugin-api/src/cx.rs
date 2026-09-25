@@ -1384,6 +1384,15 @@ impl<'a> Cx<'a> {
         matches!(self.kind(id), NodeKind::Csend { .. })
     }
 
+    /// `csend_type?` — exact `on_csend` semantics (murphy-6ln): a
+    /// safe-navigation call (`a&.b`). Alias of [`Self::is_safe_navigation`]
+    /// under the RuboCop hook name so ports can filter without
+    /// reimplementing the kind check; subscribe to `kind = "csend"` for
+    /// precise dispatch (Murphy models `csend` as its own variant).
+    pub fn is_csend(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Csend { .. })
+    }
+
     /// `parenthesized?` — the call's argument list is wrapped in parens.
     /// Mirrors RuboCop's `parenthesized?` (`loc_is?(:end, ')')`) using
     /// Prism's parser-provided `CallNode::closing_loc()` recorded by the
@@ -1656,6 +1665,25 @@ impl<'a> Cx<'a> {
         )
     }
 
+    /// `while_post?` — exact `on_while_post` semantics (murphy-6ln): a
+    /// post-condition `while` (`begin ... end while cond`). Murphy folds
+    /// `while_post` into [`NodeKind::While`] with `post: true`, so a cop
+    /// porting RuboCop's `on_while_post` should subscribe to
+    /// `kind = "while"` and filter with this helper instead of
+    /// reimplementing the `post` check.
+    pub fn is_while_post(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::While { post: true, .. })
+    }
+
+    /// `until_post?` — exact `on_until_post` semantics (murphy-6ln): a
+    /// post-condition `until` (`begin ... end until cond`). Murphy folds
+    /// `until_post` into [`NodeKind::Until`] with `post: true`, so a cop
+    /// porting RuboCop's `on_until_post` should subscribe to
+    /// `kind = "until"` and filter with this helper.
+    pub fn is_until_post(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Until { post: true, .. })
+    }
+
     /// `loop_keyword?` — RuboCop's `LOOP_TYPES` (`while until for` + the post
     /// forms): any `while`/`until`/`for`, regardless of pre/post form.
     pub fn is_loop_keyword(&self, id: NodeId) -> bool {
@@ -1759,6 +1787,34 @@ impl<'a> Cx<'a> {
     /// `any_def_type?` — RuboCop's `:any_def` group (`def`, `defs`).
     pub fn is_any_def_type(&self, id: NodeId) -> bool {
         matches!(self.kind(id), NodeKind::Def { .. } | NodeKind::Defs { .. })
+    }
+
+    /// `defs_type?` — exact `on_defs` semantics (murphy-6ln): a singleton
+    /// method definition (`def self.foo`, `def obj.foo`, `def Foo.bar`).
+    /// Murphy folds all singleton defs into [`NodeKind::Def`] with a
+    /// `receiver` (Prism has no separate singleton-def node; the explicit
+    /// [`NodeKind::Defs`] variant is parser-only and never produced from
+    /// real source), so a cop porting RuboCop's `on_defs` should subscribe
+    /// to both `kind = "def"` and `kind = "defs"` and filter with this
+    /// helper instead of reimplementing the receiver check.
+    pub fn is_defs(&self, id: NodeId) -> bool {
+        match *self.kind(id) {
+            NodeKind::Defs { .. } => true,
+            NodeKind::Def { receiver, .. } => receiver.get().is_some(),
+            _ => false,
+        }
+    }
+
+    /// `def_type?` — exact `on_def` semantics (murphy-6ln): a plain instance
+    /// method definition (`def foo`, no receiver). Murphy's [`NodeKind::Def`]
+    /// covers both plain and singleton defs, so a cop porting RuboCop's
+    /// `on_def` (which does NOT fire on `defs`) should subscribe to
+    /// `kind = "def"` and filter with this helper.
+    pub fn is_plain_def(&self, id: NodeId) -> bool {
+        match *self.kind(id) {
+            NodeKind::Def { receiver, .. } => receiver.is_none(),
+            _ => false,
+        }
     }
 
     /// `variable?` — RuboCop's `VARIABLES` (`ivar gvar cvar lvar`): a
@@ -2665,6 +2721,35 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `empty_else?` — exact `on_empty_else` semantics (murphy-6ln).
+    /// Parser-gem emits `(empty_else)` for `case ... in ...; else; end`
+    /// (an `else` keyword with an empty body). Murphy folds both absent-else
+    /// and empty-else to `else_body == NONE`, so this distinguishes them via
+    /// the `else` keyword token: true iff this is a `CaseMatch` with no else
+    /// body AND a directly-owned `else` token (the same outside-children scan
+    /// [`Self::is_else`] uses for `If`). A `nil` else (`else; nil`) has a body
+    /// and returns false, matching parser-gem's `(nil)` (not `empty_else`).
+    /// Subscribe to `kind = "case_match"` and filter with this helper.
+    pub fn has_empty_else(&self, id: NodeId) -> bool {
+        if !matches!(self.kind(id), NodeKind::CaseMatch { .. }) {
+            return false;
+        }
+        if self.case_match_else_branch(id).get().is_some() {
+            return false;
+        }
+        let children = self.children(id);
+        for tok in self.tokens_in(self.range(id)) {
+            let outside_children = children.iter().all(|&child| {
+                let r = self.range(child);
+                tok.range.start < r.start || tok.range.end > r.end
+            });
+            if outside_children && self.token_text(*tok) == "else" {
+                return true;
+            }
+        }
+        false
+    }
+
     /// `InPatternNode#pattern` — the pattern matched by an `in` clause.
     /// `OptNodeId::NONE` for a non-`InPattern` node.
     pub fn in_pattern_pattern(&self, id: NodeId) -> OptNodeId {
@@ -2684,6 +2769,25 @@ impl<'a> Cx<'a> {
             NodeKind::InPattern { guard, .. } => guard,
             _ => OptNodeId::NONE,
         }
+    }
+
+    /// `if_guard?` — exact `on_if_guard` semantics (murphy-6ln): an
+    /// `if`-guard wrapper (`in <pat> if <cond>`). Murphy models this as the
+    /// distinct [`NodeKind::IfGuard`] variant, so subscribe to
+    /// `kind = "if_guard"` for precise dispatch; this helper lets a cop
+    /// sharing one method across guard kinds filter without reimplementing
+    /// the kind check.
+    pub fn is_if_guard(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::IfGuard(_))
+    }
+
+    /// `unless_guard?` — exact `on_unless_guard` semantics (murphy-6ln): an
+    /// `unless`-guard wrapper (`in <pat> unless <cond>`). Murphy models this
+    /// as the distinct [`NodeKind::UnlessGuard`] variant, so subscribe to
+    /// `kind = "unless_guard"` for precise dispatch; this helper covers the
+    /// shared-method filter case.
+    pub fn is_unless_guard(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::UnlessGuard(_))
     }
 
     /// `InPatternNode#body` — the branch body, or `OptNodeId::NONE` for an
@@ -6515,6 +6619,167 @@ mod tests {
             assert!(cx.is_loop_keyword(root), "for is a loop keyword");
             assert!(!cx.is_post_condition_loop(root));
             assert!(!cx.is_basic_conditional(root), "for is not a conditional");
+        });
+    }
+
+    #[test]
+    fn derived_hook_while_until_post_predicates() {
+        // murphy-6ln: exact on_while_post / on_until_post semantics.
+        with_parsed("begin; x; end while y", |cx, root| {
+            assert!(cx.is_while_post(root), "post while is while_post");
+            assert!(!cx.is_until_post(root));
+            assert!(cx.is_post_condition_loop(root));
+        });
+        with_parsed("begin; x; end until y", |cx, root| {
+            assert!(cx.is_until_post(root), "post until is until_post");
+            assert!(!cx.is_while_post(root));
+            assert!(cx.is_post_condition_loop(root));
+        });
+        with_parsed("x while y", |cx, root| {
+            assert!(!cx.is_while_post(root), "pre while is not while_post");
+            assert!(!cx.is_until_post(root));
+            assert!(!cx.is_post_condition_loop(root));
+        });
+        with_parsed("x until y", |cx, root| {
+            assert!(!cx.is_until_post(root), "pre until is not until_post");
+            assert!(!cx.is_while_post(root));
+        });
+        with_parsed("if a; end", |cx, root| {
+            assert!(!cx.is_while_post(root));
+            assert!(!cx.is_until_post(root));
+        });
+    }
+
+    #[test]
+    fn derived_hook_csend_predicate() {
+        // murphy-6ln: exact on_csend semantics.
+        with_parsed("a&.b", |cx, root| {
+            assert!(cx.is_csend(root), "a&.b is csend");
+            assert!(cx.is_safe_navigation(root));
+        });
+        with_parsed("a.b", |cx, root| {
+            assert!(!cx.is_csend(root), "a.b is send, not csend");
+            assert!(!cx.is_safe_navigation(root));
+        });
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_csend(root));
+        });
+    }
+
+    #[test]
+    fn derived_hook_defs_predicates() {
+        // murphy-6ln: exact on_defs (singleton) vs on_def (plain) semantics.
+        // Prism folds `def self.foo` into Def with a receiver.
+        with_parsed("def foo; end", |cx, root| {
+            assert!(cx.is_plain_def(root), "plain def is on_def");
+            assert!(!cx.is_defs(root), "plain def is not on_defs");
+            assert!(cx.is_any_def_type(root));
+        });
+        with_parsed("def self.foo; end", |cx, root| {
+            assert!(cx.is_defs(root), "def self.foo is on_defs");
+            assert!(!cx.is_plain_def(root));
+            assert!(cx.is_any_def_type(root));
+        });
+        with_parsed("def obj.foo; end", |cx, root| {
+            assert!(cx.is_defs(root), "def obj.foo is on_defs");
+            assert!(!cx.is_plain_def(root));
+        });
+        with_parsed("a&.b", |cx, root| {
+            assert!(!cx.is_defs(root));
+            assert!(!cx.is_plain_def(root));
+        });
+        // Explicit Defs variant (parser-only) also counts as defs.
+        {
+            use murphy_ast::{AstBuilder, NodeKind, NodeList, OptNodeId, Range};
+            let mut b = AstBuilder::new("def self.foo; end", "t.rb".to_string());
+            let recv = b.push(NodeKind::SelfExpr, Range { start: 4, end: 8 });
+            let args = b.push(
+                NodeKind::Args(NodeList::EMPTY),
+                Range { start: 12, end: 12 },
+            );
+            let name = b.intern_symbol("foo");
+            let root = b.push(
+                NodeKind::Defs {
+                    receiver: recv,
+                    name,
+                    args,
+                    body: OptNodeId::NONE,
+                },
+                Range { start: 0, end: 17 },
+            );
+            let ast = b.finish(root);
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let raw = cx_raw_for(&ast, &fns);
+            let cx = unsafe { Cx::from_raw(&raw) };
+            assert!(cx.is_defs(root), "explicit Defs counts as on_defs");
+            assert!(!cx.is_plain_def(root));
+            assert!(cx.is_any_def_type(root));
+        }
+    }
+
+    #[test]
+    fn derived_hook_guard_predicates() {
+        // murphy-6ln: exact on_if_guard / on_unless_guard semantics.
+        with_parsed("case x\nin Integer if x > 0\n  :pos\nend\n", |cx, root| {
+            let guard = cx
+                .descendants(root)
+                .into_iter()
+                .find(|&id| cx.is_if_guard(id))
+                .expect("if_guard node");
+            assert!(cx.is_if_guard(guard));
+            assert!(!cx.is_unless_guard(guard));
+        });
+        with_parsed(
+            "case x\nin Integer unless x.nil?\n  :present\nend\n",
+            |cx, root| {
+                let guard = cx
+                    .descendants(root)
+                    .into_iter()
+                    .find(|&id| cx.is_unless_guard(id))
+                    .expect("unless_guard node");
+                assert!(cx.is_unless_guard(guard));
+                assert!(!cx.is_if_guard(guard));
+            },
+        );
+        with_parsed("if a; end", |cx, root| {
+            assert!(!cx.is_if_guard(root));
+            assert!(!cx.is_unless_guard(root));
+        });
+    }
+
+    #[test]
+    fn derived_hook_empty_else_predicate() {
+        // murphy-6ln: exact on_empty_else semantics (case_match empty else).
+        // Parser-gem emits (empty_else) only here; Murphy folds absent and
+        // empty to NONE, so has_empty_else scans for the else keyword.
+        with_parsed("case x; in a then b; else; end", |cx, root| {
+            assert!(
+                matches!(cx.kind(root), NodeKind::CaseMatch { .. }),
+                "expected CaseMatch, got {:?}",
+                cx.kind(root)
+            );
+            assert!(
+                cx.has_empty_else(root),
+                "else with empty body is empty_else"
+            );
+        });
+        with_parsed("case x; in a then b; end", |cx, root| {
+            assert!(!cx.has_empty_else(root), "absent else is not empty_else");
+        });
+        with_parsed("case x; in a then b; else nil; end", |cx, root| {
+            assert!(
+                !cx.has_empty_else(root),
+                "else nil has a body, not empty_else"
+            );
+        });
+        with_parsed("if a; b; end", |cx, root| {
+            assert!(
+                !cx.has_empty_else(root),
+                "non-CaseMatch is never empty_else"
+            );
         });
     }
 
