@@ -1653,6 +1653,66 @@ fn exact_node_accepts_children(
     has_list || children.len() == fixed_count
 }
 
+/// Whether the structural schema for `tag` can accept `children` in a
+/// bool-expression context (`{}` / `!` / `` ` `` / `<...>` probe): exactly the
+/// fixed slots, with no `List`-slot children. This mirrors the success
+/// condition of [`lower_bool_exact_node`] /
+/// [`lower_bool_anyorder_probe_exact_node`] as a non-erroring predicate, so a
+/// `Head::OneOf` union member that cannot fit the children gets no dispatch
+/// arm and falls through to the `false` arm (murphy-6q71). A kind with no v1
+/// pattern schema never accepts.
+fn exact_bool_node_accepts_children(
+    tag: murphy_ast::NodeKindTag,
+    children: &[murphy_pattern::Pat],
+) -> bool {
+    let Some(schema) = schema_for(tag.0) else {
+        return false;
+    };
+    let has_list = schema
+        .slots
+        .last()
+        .is_some_and(|s| matches!(s.ty, SlotTy::List));
+    let fixed_count = schema.slots.len() - usize::from(has_list);
+    children.len() == fixed_count
+}
+
+/// Whether any union member in `tags` would need `List`-slot dispatch for
+/// `children` (more children than fixed slots with a trailing `List` slot).
+/// Such patterns stay a compile error in bool-expression contexts — the
+/// pre-existing v1 list restriction that the C interpreter handles
+/// generically — rather than silently becoming `false` (murphy-6q71).
+fn oneof_bool_needs_list_children(
+    tags: &[murphy_ast::NodeKindTag],
+    children: &[murphy_pattern::Pat],
+) -> bool {
+    for tag in tags {
+        let Some(schema) = schema_for(tag.0) else {
+            continue;
+        };
+        let has_list = schema
+            .slots
+            .last()
+            .is_some_and(|s| matches!(s.ty, SlotTy::List));
+        let fixed_count = schema.slots.len() - usize::from(has_list);
+        if has_list && children.len() > fixed_count {
+            return true;
+        }
+    }
+    false
+}
+
+/// The `compile_error` for a node pattern that supplies `List`-slot children
+/// inside a bool-expression context (`{}` / `!` / `` ` `` / `<...>` probe).
+/// Shared by the `Exact` lowerings and the `OneOf` dispatch below so the
+/// message stays identical.
+fn bool_list_children_error() -> syn::Error {
+    syn::Error::new(
+        Span::call_site(),
+        "def_node_matcher!: a node pattern with a variable-length child \
+         list is not supported inside `{}` / `!` / `` ` `` in v1",
+    )
+}
+
 /// Lower a `(head child...)` node match against `subject`.
 ///
 /// `Head::Any` (`(_ ...)`) and `Head::OneOf` (`({a b} ...)`) are kind-only
@@ -2797,14 +2857,55 @@ fn lower_bool_anyorder_probe_node(
             Ok(quote!(true))
         }
         Head::OneOf(tags) => {
-            check_kind_only_children(children)?;
-            let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
-            Ok(quote! {
-                ( ::core::matches!(cx.kind(#subject).tag().0, #(#tag_u8s)|*) )
-            })
+            if is_kind_only_children(children) {
+                let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
+                Ok(quote! {
+                    ( ::core::matches!(cx.kind(#subject).tag().0, #(#tag_u8s)|*) )
+                })
+            } else {
+                // `({send csend} _ :foo)` etc. inside `<...>` — concrete
+                // children: dispatch them per union-variant schema as a probe
+                // bool expression (murphy-6q71).
+                lower_bool_anyorder_probe_oneof_with_children(tags, children, subject, ctx)
+            }
         }
         Head::Exact(t) => lower_bool_anyorder_probe_exact_node(*t, children, subject, ctx),
     }
+}
+
+/// Probe-mode counterpart of [`lower_bool_oneof_node_with_children`].
+///
+/// Mirrors its structure but routes fixed-slot children through
+/// [`lower_bool_anyorder_probe_exact_node`] instead of
+/// [`lower_bool_exact_node`], so that a `Capture` nested inside a slot child
+/// writes its probe-scope binding (`__pcap{slot}`) during phase-1.
+fn lower_bool_anyorder_probe_oneof_with_children(
+    tags: &[murphy_ast::NodeKindTag],
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    if oneof_bool_needs_list_children(tags, children) {
+        return Err(bool_list_children_error());
+    }
+    let mut arms: Vec<TokenStream> = Vec::new();
+    for tag in tags {
+        if !exact_bool_node_accepts_children(*tag, children) {
+            continue;
+        }
+        let tag_u8 = tag.0;
+        let body = lower_bool_anyorder_probe_exact_node(*tag, children, subject, ctx)?;
+        arms.push(quote!(#tag_u8 => #body));
+    }
+    if arms.is_empty() {
+        return Ok(quote!((false)));
+    }
+    Ok(quote! {
+        (match cx.kind(#subject).tag().0 {
+            #(#arms,)*
+            _ => false
+        })
+    })
 }
 
 /// Probe-mode counterpart of [`lower_bool_exact_node`].
@@ -3412,8 +3513,10 @@ fn lower_bool_regex(
 
 /// Lower a `(head child...)` node match into a `return`-free bool expression.
 ///
-/// `Head::Any` / `Head::OneOf` are kind-only matches (children must be empty
-/// or a single `...`, reusing [`check_kind_only_children`]). `Head::Exact`
+/// `Head::Any` stays kind-only (children must be empty or a single `...`,
+/// reusing [`check_kind_only_children`]). `Head::OneOf` with concrete children
+/// dispatches them per union-variant schema via
+/// [`lower_bool_oneof_node_with_children`] (murphy-6q71). `Head::Exact`
 /// destructures the kind and `&&`-chains a per-fixed-slot bool sub-expression.
 /// A node whose pattern carries `List`-slot children is rejected — see the
 /// v1 restriction documented on [`lower_bool`].
@@ -3430,14 +3533,67 @@ fn lower_bool_node(
             Ok(quote!(true))
         }
         Head::OneOf(tags) => {
-            check_kind_only_children(children)?;
-            let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
-            Ok(quote! {
-                ( ::core::matches!(cx.kind(#subject).tag().0, #(#tag_u8s)|*) )
-            })
+            if is_kind_only_children(children) {
+                let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
+                Ok(quote! {
+                    ( ::core::matches!(cx.kind(#subject).tag().0, #(#tag_u8s)|*) )
+                })
+            } else {
+                // `({send csend} _ :foo)` etc. — concrete children: dispatch
+                // them per union-variant schema as a bool expression
+                // (murphy-6q71).
+                lower_bool_oneof_node_with_children(tags, children, subject, ctx)
+            }
         }
         Head::Exact(t) => lower_bool_exact_node(*t, children, subject, ctx),
     }
+}
+
+/// Lower a `Head::OneOf` node match whose child list carries *concrete*
+/// children (not kind-only) into a `return`-free bool expression — e.g.
+/// `!({send csend} _ :foo)` or `{({send csend} _ :foo) nil}` (murphy-6q71).
+///
+/// Emits a `match` on the runtime tag, dispatching the *same* child sequence
+/// onto each member's schema via [`lower_bool_exact_node`] — the bool-form
+/// sibling of [`lower_oneof_node_with_children`]. A union member whose schema
+/// cannot fit the children ([`exact_bool_node_accepts_children`] is `false`)
+/// gets no arm and falls through to the `false` arm, mirroring the C
+/// interpreter's per-node `false`.
+///
+/// A pattern that would need `List`-slot dispatch for any member stays a
+/// compile error (the pre-existing v1 list restriction), rather than silently
+/// becoming `false` and diverging from the C interpreter which handles lists
+/// generically.
+fn lower_bool_oneof_node_with_children(
+    tags: &[murphy_ast::NodeKindTag],
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    if oneof_bool_needs_list_children(tags, children) {
+        return Err(bool_list_children_error());
+    }
+    let mut arms: Vec<TokenStream> = Vec::new();
+    for tag in tags {
+        if !exact_bool_node_accepts_children(*tag, children) {
+            continue;
+        }
+        let tag_u8 = tag.0;
+        let body = lower_bool_exact_node(*tag, children, subject, ctx)?;
+        arms.push(quote!(#tag_u8 => #body));
+    }
+    if arms.is_empty() {
+        // No union member can accept these children — the pattern can never
+        // match. Yield `false` (B==C: the C interpreter returns `false` for
+        // the same shape).
+        return Ok(quote!((false)));
+    }
+    Ok(quote! {
+        (match cx.kind(#subject).tag().0 {
+            #(#arms,)*
+            _ => false
+        })
+    })
 }
 
 /// Lower a `Head::Exact` node match into a `return`-free bool expression.
