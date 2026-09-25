@@ -22,6 +22,7 @@
 //! perf-gate follow-up).
 
 mod cops;
+mod explain;
 mod lsp;
 mod plugins;
 
@@ -120,6 +121,8 @@ struct Cli {
 enum CliCommand {
     /// Lint Ruby files or discover files from the current directory.
     Lint(LintArgs),
+    /// Explain one cop (docs URL + rationale + fix example, AI-readable).
+    Explain(ExplainArgs),
     /// Convert a .rubocop.yml file to Murphy TOML.
     Migrate(MigrateArgs),
     /// Inspect Murphy's arena AST.
@@ -155,6 +158,11 @@ struct LintArgs {
     /// Output format.
     #[arg(long, value_enum, default_value = "human")]
     format: LintOutputFormatArg,
+    /// Explain one cop instead of linting (docs URL + rationale + example).
+    /// Alias for `murphy explain <COP>`; kept as a lint flag per B4 spec
+    /// (`--explain <cop_id>`).
+    #[arg(long, value_name = "COP")]
+    explain: Option<String>,
     /// Files or directories to lint. With no paths, Murphy discovers from cwd.
     #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
     paths: Vec<String>,
@@ -185,6 +193,31 @@ impl From<LintOutputFormatArg> for OutputFormat {
             LintOutputFormatArg::Github => OutputFormat::Github,
             LintOutputFormatArg::Gnu => OutputFormat::Gnu,
             LintOutputFormatArg::Tap => OutputFormat::Tap,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct ExplainArgs {
+    /// Fully-qualified cop name, e.g. `Lint/Debugger`.
+    #[arg(value_name = "COP")]
+    cop: String,
+    /// Output format.
+    #[arg(long, value_enum, default_value = "human")]
+    format: ExplainFormatArg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ExplainFormatArg {
+    Human,
+    Json,
+}
+
+impl From<ExplainFormatArg> for explain::Format {
+    fn from(format: ExplainFormatArg) -> Self {
+        match format {
+            ExplainFormatArg::Human => explain::Format::Human,
+            ExplainFormatArg::Json => explain::Format::Json,
         }
     }
 }
@@ -1197,6 +1230,9 @@ fn run(args: &[String]) -> Result<u8, AppError> {
 
     match cli.command {
         CliCommand::Lint(lint_args) => run_lint(&lint_args),
+        CliCommand::Explain(explain_args) => {
+            explain::run_explain(&explain_args.cop, explain_args.format.into())
+        }
         CliCommand::Migrate(migrate_args) => run_migrate(&migrate_args),
         CliCommand::Ast(ast_args) => run_ast(&ast_args),
         CliCommand::Cops(cops_args) => run_cops(&cops_args),
@@ -1238,6 +1274,11 @@ fn run_plugins(args: &PluginsArgs) -> Result<u8, AppError> {
 }
 
 fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
+    // B4 `--explain <cop_id>` alias: behave exactly like
+    // `murphy explain <cop_id>` (human format), ignoring lint paths.
+    if let Some(cop_id) = &args.explain {
+        return explain::run_explain(cop_id, explain::Format::Human);
+    }
     let fix_mode = if args.fix_all {
         Some(FixMode::All)
     } else if args.fix {
@@ -1472,7 +1513,20 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     } else {
         lint_files_memoized(&sources_for_lint, cops, mruby_cops, &config, cache_ref)
     };
-    let offenses = aggregate_with_config(flat_offenses, &config);
+    let mut offenses = aggregate_with_config(flat_offenses, &config);
+    // B4 enrichment (murphy-fmw.2.4): attach fixed-template
+    // `documentation_url` / `rationale` / `fix_example` to every offense.
+    // Descriptions come from the cop registry (author-controlled), never
+    // from offense messages or source text, so this is prompt-injection
+    // safe. Extend-only: new keys, no existing key changes (ADR 0006).
+    {
+        let desc_map = explain::description_map(&registry);
+        for offense in &mut offenses {
+            let desc =
+                explain::lookup_description(&desc_map, &offense.cop_name).unwrap_or_default();
+            murphy_core::enrich_offense(offense, &desc);
+        }
+    }
     if debug {
         eprintln!(
             "murphy: debug: lint pass done offenses={} elapsed_ms={}",
