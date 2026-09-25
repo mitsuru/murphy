@@ -1,0 +1,26 @@
+# Reference pack manifest for the plugin pack format (ADR 0046).
+#
+# This file is the canonical `murphy-plugin.toml` example: pack identity,
+# the required host ABI, and the statically-declared cop catalogue. The
+# manifest lives at the pack root; an installed pack pairs it with
+# `lib/<arch>/lib<name>.{so,dylib}` binaries:
+#
+#   murphy-example-pack/
+#   |-- murphy-plugin.toml
+#   `-- lib/
+#       `-- linux-x86_64/libmurphy_example_pack.so
+#
+# `murphy-api-version` must equal the host's MURPHY_PLUGIN_ABI_VERSION
+# (currently 4). `[cops].provided` must match the cops the cdylib
+# registers (checked by `plugin_manifest` tests in murphy-core).
+
+[plugin]
+name = "murphy-example-pack"
+version = "0.1.0"
+murphy-api-version = 4
+authors = ["Murphy contributors"]
+license = "MIT"
+description = "Demo plugin pack for the single-surface plugin ABI (ADR 0038) — two cops (Example/NoEval, Example/TodoFormat)."
+
+[cops]
+provided = ["Example/NoEval", "Example/TodoFormat"]

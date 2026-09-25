@@ -328,3 +328,114 @@ fn name_and_detailed_same_name_loads_once_via_detailed_path() {
         "expected Example/TodoFormat in {names:?}"
     );
 }
+
+/// Install the example pack as a pack dir (`murphy-plugin.toml` + `lib/`,
+/// ADR 0046) under `pack_root/murphy-example-pack/`, symlinking the Cargo-built
+/// cdylib into `lib/<arch>/`. Returns the pack dir.
+fn stage_pack_dir(pack_root: &std::path::Path, pack: &std::path::Path) -> std::path::PathBuf {
+    let pack_dir = pack_root.join("murphy-example-pack");
+    let arch_dir = pack_dir.join("lib").join("linux-x86_64");
+    std::fs::create_dir_all(&arch_dir).expect("mkdir lib/<arch>");
+    let manifest_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../murphy-example-pack/murphy-plugin.toml");
+    let manifest = std::fs::read(&manifest_src)
+        .unwrap_or_else(|e| panic!("read reference manifest {}: {e}", manifest_src.display()));
+    std::fs::write(pack_dir.join("murphy-plugin.toml"), manifest).expect("write manifest");
+    // Cargo cdylib naming: libmurphy_example_pack.{so,dylib}.
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    std::os::unix::fs::symlink(pack, arch_dir.join(format!("libmurphy_example_pack.{ext}")))
+        .expect("symlink cdylib into lib/<arch>");
+    pack_dir
+}
+
+#[test]
+fn detailed_form_pack_dir_loads_and_emits_offenses() {
+    // `Detailed { path }` pointing at a pack dir (not a direct `.so`)
+    // resolves via the manifest to the cdylib under `lib/` (ADR 0046 §3).
+    let pack = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist (Cargo dep graph)");
+
+    let dir = tempdir().expect("tempdir");
+    let pack_dir = stage_pack_dir(&dir.path().join("packs"), &pack);
+
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "# TODO: x\neval(\"x\")\n").expect("write rb");
+    let yml = format!(
+        "plugins:\n  - name: murphy-example-pack\n    path: {:?}\n",
+        pack_dir.display().to_string()
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .env_remove("MURPHY_PLUGIN_PATH")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1); // offenses found, NOT setup-error (would be code 2)
+    let stdout = &assert.get_output().stdout;
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("stdout JSON");
+    let names: Vec<String> = offenses
+        .iter()
+        .filter_map(|o| o["cop_name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        names.contains(&"Example/NoEval".to_string()),
+        "expected Example/NoEval in {names:?}"
+    );
+    assert!(
+        names.contains(&"Example/TodoFormat".to_string()),
+        "expected Example/TodoFormat in {names:?}"
+    );
+}
+
+#[test]
+fn name_form_resolves_pack_dir_in_project_local_plugins() {
+    // `plugins: [murphy-example-pack]` finds
+    // `<project>/.murphy/plugins/murphy-example-pack/` (manifest + lib/)
+    // via the pack-dir probe, with env cleared so only the project-local
+    // dir is searched (ADR 0046 §3).
+    let pack = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist (Cargo dep graph)");
+
+    let dir = tempdir().expect("tempdir");
+    stage_pack_dir(&dir.path().join(".murphy/plugins"), &pack);
+
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "# TODO: x\n").expect("write rb");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "plugins:\n  - murphy-example-pack\n",
+    )
+    .expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .env_remove("MURPHY_PLUGIN_PATH")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1);
+    let stdout = &assert.get_output().stdout;
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("stdout JSON");
+    let names: Vec<String> = offenses
+        .iter()
+        .filter_map(|o| o["cop_name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        names.contains(&"Example/TodoFormat".to_string()),
+        "expected Example/TodoFormat in {names:?}"
+    );
+}
