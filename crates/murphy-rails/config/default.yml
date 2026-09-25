@@ -269,6 +269,21 @@ Rails/RedundantTravelBack:
     - '**/spec/**/*.rb'
     - '**/test/**/*.rb'
 
+Rails/ResponseParsedBody:
+  Include:
+    - '**/spec/controllers/**/*.rb'
+    - '**/spec/requests/**/*.rb'
+    - '**/test/controllers/**/*.rb'
+    - '**/test/integration/**/*.rb'
+
+Rails/ReversibleMigration:
+  Include:
+    - 'db/**/*.rb'
+
+Rails/ReversibleMigrationMethodDefinition:
+  Include:
+    - 'db/**/*.rb'
+
 # --- Ported `Rails/*` opt-out defaults (subset of upstream defaults) ---
 # Cops below are opt-in upstream (`Enabled: false`); the pack layer must
 # reproduce that so they stay silent unless the user enables them
