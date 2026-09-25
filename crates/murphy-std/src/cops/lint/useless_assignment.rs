@@ -2099,6 +2099,27 @@ end
     }
 
     #[test]
+    fn bare_binding_marks_var_as_referenced() {
+        // RuboCop parity (murphy-0vbj): bare `binding` captures all
+        // accessible locals, so `x = 1` is observed even with no later read.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            x = 1
+            binding
+        "#});
+    }
+
+    #[test]
+    fn bare_binding_marks_all_vars_as_referenced() {
+        // Both writes are observed by the bare `binding` call.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            x = 1
+            y = 2
+            binding
+            puts x
+        "#});
+    }
+
+    #[test]
     fn retry_read_keeps_accumulator_live_but_flags_unrelated_write() {
         // Reads of `attempts` in the retry loop keep its writes live, but must
         // not hide the unrelated never-read `x` assignment in the outer resbody.
