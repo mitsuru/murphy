@@ -1,0 +1,23 @@
+name: murphy-lint
+# Dogfood: lint this repo's own changed Ruby files on every PR via the
+# B5 reusable workflow (./murphy.yml). SARIF lands in Code Scanning;
+# offenses also appear as PR annotations.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  murphy:
+    uses: ./.github/workflows/murphy.yml
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      since: origin/main

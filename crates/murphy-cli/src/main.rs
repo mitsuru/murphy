@@ -31,6 +31,7 @@ mod install;
 mod lsp;
 mod plugins;
 mod profile;
+mod since;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use murphy_cache::Cache;
@@ -186,6 +187,13 @@ struct LintArgs {
     /// are reported. All `--format` outputs see the filtered list.
     #[arg(long, value_name = "PATH", conflicts_with = "generate_baseline")]
     baseline: Option<PathBuf>,
+    /// Diff-driven lint: only lint files changed since <REF> (PR/CI fast path).
+    /// Diffs the worktree (staged, unstaged, plus untracked files) against the
+    /// merge-base with HEAD when available, else directly against <REF>.
+    /// Intersects with explicit paths / discovery roots; a non-git directory
+    /// or unknown ref fails with exit 2.
+    #[arg(long, value_name = "REF")]
+    since: Option<String>,
     /// Freeze current offenses into a baseline TOML file (legacy adoption:
     /// generate once, then lint with `--baseline`). The run still reports
     /// all offenses; the file records them for the next run.
@@ -1642,6 +1650,26 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
                 run_started.elapsed().as_millis()
             );
         }
+    }
+
+    // ── --since: diff-driven restriction (Phase 9 B5) ──────────────────────
+    // Restricts the file list up front, so unchanged files are never parsed
+    // or linted. Composes with --baseline/--format (they see the diff subset)
+    // and with explicit paths (intersection: an unchanged explicit path is
+    // skipped). Output-only restriction — the ADR 0006 JSON shape is unchanged.
+    if let Some(git_ref) = &args.since {
+        let changed =
+            since::resolve_changed_files(git_ref).map_err(|e| AppError::setup(e.to_string()))?;
+        if debug {
+            eprintln!(
+                "murphy: debug: since {git_ref:?} changed={} candidates={}",
+                changed.len(),
+                all_paths.len(),
+            );
+        }
+        all_paths = since::restrict_to_changed(&all_paths, &changed)
+            .into_iter()
+            .collect();
     }
 
     let paths: Vec<String> = all_paths.into_iter().collect();
