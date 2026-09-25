@@ -165,6 +165,12 @@ enum LintOutputFormatArg {
     Human,
     Json,
     Progress,
+    Checkstyle,
+    Sarif,
+    Junit,
+    Github,
+    Gnu,
+    Tap,
 }
 
 impl From<LintOutputFormatArg> for OutputFormat {
@@ -173,6 +179,12 @@ impl From<LintOutputFormatArg> for OutputFormat {
             LintOutputFormatArg::Human => OutputFormat::Human,
             LintOutputFormatArg::Json => OutputFormat::Json,
             LintOutputFormatArg::Progress => OutputFormat::Progress,
+            LintOutputFormatArg::Checkstyle => OutputFormat::Checkstyle,
+            LintOutputFormatArg::Sarif => OutputFormat::Sarif,
+            LintOutputFormatArg::Junit => OutputFormat::Junit,
+            LintOutputFormatArg::Github => OutputFormat::Github,
+            LintOutputFormatArg::Gnu => OutputFormat::Gnu,
+            LintOutputFormatArg::Tap => OutputFormat::Tap,
         }
     }
 }

@@ -998,7 +998,17 @@ fn lint_help_describes_key_flags() {
             "lint help should mention {expected:?}, got:\n{stdout}"
         );
     }
-    for expected in ["human", "json", "progress"] {
+    for expected in [
+        "human",
+        "json",
+        "progress",
+        "checkstyle",
+        "sarif",
+        "junit",
+        "github",
+        "gnu",
+        "tap",
+    ] {
         assert!(
             stdout.contains(expected),
             "lint help should mention format {expected:?}, got:\n{stdout}"
