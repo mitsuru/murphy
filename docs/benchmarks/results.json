@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-09-25T17:14:50Z",
+  "commit": "ee93b588",
+  "runner": "dev-vm (x86_64-linux, local)",
+  "method": {
+    "tool": "hyperfine",
+    "warmup": 2,
+    "corpus": "crates/murphy-cli/tests/fixtures/builtin_only_project",
+    "scales": [
+      1,
+      20,
+      100
+    ]
+  },
+  "scales": {
+    "1": {
+      "murphy_mean_s": 0.020453087406478877,
+      "murphy_stddev_s": 0.0005785415212996425,
+      "rubocop_mean_s": 0.9044015245599999,
+      "rubocop_stddev_s": 0.014247173765254351,
+      "speedup": 44.2183376321716
+    },
+    "20": {
+      "murphy_mean_s": 0.021447938427999996,
+      "murphy_stddev_s": 0.0010090815666464925,
+      "rubocop_mean_s": 1.16715964064,
+      "rubocop_stddev_s": 0.0188582034689335,
+      "speedup": 54.4182670310303
+    },
+    "100": {
+      "murphy_mean_s": 0.02546264506181818,
+      "murphy_stddev_s": 0.0009840644108437026,
+      "rubocop_mean_s": 1.2322321256799997,
+      "rubocop_stddev_s": 0.031113198172249883,
+      "speedup": 48.39372039661975
+    }
+  }
+}

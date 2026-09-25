@@ -4,13 +4,27 @@ on:
   push:
     branches:
       - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  perf-scripts-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax check
+        run: bash -n scripts/perf/phase6_hyperfine.sh
+
+      - name: Benchmark renderer unit tests
+        run: python3 scripts/perf/tests/test_render_benchmarks.py
+
   perf-regression:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -34,3 +48,57 @@ jobs:
 
       - name: Run phase 6 perf gate
         run: ./scripts/perf/phase6_hyperfine.sh
+
+  # C6: publish fresh numbers to the docs on every main push.
+  publish:
+    needs: [perf-scripts-check, perf-regression]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install RuboCop
+        run: gem install rubocop
+
+      - name: Install Hyperfine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y hyperfine
+
+      - name: Run benchmark with exports
+        run: ./scripts/perf/phase6_hyperfine.sh --export-dir bench-exports
+
+      - name: Render benchmark docs
+        run: >
+          python3 scripts/perf/render_benchmarks.py --input-dir bench-exports
+          --out-json docs/benchmarks/results.json
+          --docs-page docs/guides/benchmarks.md
+          --commit ${{ github.sha }} --runner ubuntu-latest
+
+      - name: Upload raw exports
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-hyperfine-exports
+          path: |
+            bench-exports/
+            docs/benchmarks/results.json
+
+      - name: Commit refreshed docs
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -f docs/guides/benchmarks.md docs/benchmarks/results.json
+          git diff --cached --quiet && echo 'benchmark docs unchanged' && exit 0
+          git commit -m 'docs(bench): refresh benchmark snapshot [skip ci]'
+          git push

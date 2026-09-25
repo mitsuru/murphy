@@ -92,7 +92,8 @@ murphy lint --profile --profile-format speedscope app.rb > /tmp/profile.json
 
 `scripts/perf/phase6_hyperfine.sh` measures end-to-end wall time
 (murphy vs rubocop) from outside; `--profile` explains it from inside with
-the per-cop breakdown. Use them together: hyperfine says "how slow",
+the per-cop breakdown. The published headline numbers live at
+[benchmarks.md](benchmarks.md) (C6, refreshed by CI). Use them together: hyperfine says "how slow",
 the profile matrix says "which cop x file". Both report microseconds /
 wall time, so profile `cop_wall_micros` sums are directly comparable
 against hyperfine totals minus parse/discovery overhead.

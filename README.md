@@ -111,6 +111,8 @@ reparse-rerun fixpoint loop, and idempotency guarantees (ADR 0013). There is
 intentionally **not** consulted. Full RuboCop parity, formatter `murphy format`,
 and sandboxing remain later. Phase 6 adds local quality/perf scripts:
 `scripts/perf/phase6_hyperfine.sh` and `scripts/diff/phase6_rubocop_diff.sh`.
+Published murphy-vs-RuboCop numbers live at
+[`docs/guides/benchmarks.md`](docs/guides/benchmarks.md) (refreshed by CI on every `main` push).
 See
 [`docs/plans/2026-05-19-murphy-design.md`](docs/plans/2026-05-19-murphy-design.md)
 for the full design,
