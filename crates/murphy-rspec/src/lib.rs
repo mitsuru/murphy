@@ -9,6 +9,10 @@
 //! - `RSpec/Focus` — flags focused specs (murphy-4gd.3.1).
 //! - `RSpec/EmptyHook` — flags empty hooks (murphy-4gd.3.1).
 //! - `RSpec/MultipleDescribes` — multiple top-level groups (murphy-4gd.3.1).
+//! - `RSpec/ContextMethod` — `context` should not describe methods (murphy-4gd.3.2).
+//! - `RSpec/BeforeAfterAll` — avoid `before(:all)` / `after(:context)` (murphy-4gd.3.2).
+//! - `RSpec/Be` — flag bare `be` without argument (murphy-4gd.3.2).
+//! - `RSpec/BeEql` — prefer `be` over `eql` for identity literals (murphy-4gd.3.2).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
@@ -23,7 +27,8 @@ pub mod cops;
 ///
 /// Carries the file-scope defaults that cannot be expressed through
 /// `#[cop]` / `#[option]` metadata — currently `RSpec/DescribeClass: Exclude`
-/// for the non-class spec directories. The host merges this below user config
+/// for the non-class spec directories and `RSpec/BeforeAfterAll: Exclude`
+/// for helper/support files. The host merges this below user config
 /// via `MurphyConfig::apply_pack_default_layers` in `murphy-core`.
 pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
 
