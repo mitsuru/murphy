@@ -83,34 +83,6 @@ submit_cop!(ActionControllerFlashBeforeRender);
 ///
 /// ```murphy-parity
 /// upstream: rubocop-rails
-/// upstream_cop: Rails/ActionControllerTestCase
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActionControllerTestCase;
-
-#[cop(
-    name = "Rails/ActionControllerTestCase",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActionControllerTestCase {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActionControllerTestCase);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
 /// upstream_cop: Rails/ActionFilter
 /// upstream_version_checked: 2.35.0
 /// status: stub
@@ -162,34 +134,6 @@ impl ActionOrder {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 submit_cop!(ActionOrder);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActiveRecordAliases
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActiveRecordAliases;
-
-#[cop(
-    name = "Rails/ActiveRecordAliases",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActiveRecordAliases {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActiveRecordAliases);
 
 /// ## RuboCop parity
 ///
@@ -363,34 +307,6 @@ submit_cop!(AfterCommitOverride);
 ///
 /// ```murphy-parity
 /// upstream: rubocop-rails
-/// upstream_cop: Rails/ApplicationController
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ApplicationController;
-
-#[cop(
-    name = "Rails/ApplicationController",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ApplicationController {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ApplicationController);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
 /// upstream_cop: Rails/ApplicationJob
 /// upstream_version_checked: 2.35.0
 /// status: stub
@@ -442,62 +358,6 @@ impl ApplicationMailer {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 submit_cop!(ApplicationMailer);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ApplicationRecord
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ApplicationRecord;
-
-#[cop(
-    name = "Rails/ApplicationRecord",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ApplicationRecord {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ApplicationRecord);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ArelStar
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ArelStar;
-
-#[cop(
-    name = "Rails/ArelStar",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ArelStar {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ArelStar);
 
 /// ## RuboCop parity
 ///
