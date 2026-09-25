@@ -397,6 +397,397 @@ fn default_target_ruby_version() -> RubyVersion {
     RubyVersion::new(3, 1)
 }
 
+/// RuboCop's known Ruby versions (`TargetRuby::KNOWN_RUBIES` in RuboCop 1.87).
+/// Used to resolve a gemspec `required_ruby_version` requirement to the minimal
+/// satisfying version, mirroring `Gem::Requirement#satisfied_by?` against
+/// `"X.Y.99"`.
+const KNOWN_RUBIES: &[(u16, u16)] = &[
+    (2, 0),
+    (2, 1),
+    (2, 2),
+    (2, 3),
+    (2, 4),
+    (2, 5),
+    (2, 6),
+    (2, 7),
+    (3, 0),
+    (3, 1),
+    (3, 2),
+    (3, 3),
+    (3, 4),
+    (4, 0),
+    (4, 1),
+];
+
+/// Detect `TargetRubyVersion` from project files, mirroring RuboCop's
+/// `TargetRuby::SOURCES` precedence. Explicit `.murphy.yml`
+/// `AllCops.TargetRubyVersion` always wins and is handled by the caller —
+/// this only runs when unset.
+///
+/// Precedence (first hit wins, each source searched upwards from `root`):
+///
+/// 1. `*.gemspec` `required_ruby_version` (first directory upwards containing
+///    exactly one `*.gemspec`, mirroring RuboCop's `traverse_directories_upwards`
+///    + `candidates.one?` guard)
+/// 2. `.ruby-version`
+/// 3. `mise.toml` (`ruby = "X.Y"`)
+/// 4. `.tool-versions` (`ruby X.Y` line)
+/// 5. `Gemfile.lock` / `gems.locked` (`RUBY VERSION` section)
+///
+/// Returns `None` when nothing is found (caller keeps the default 3.1).
+/// I/O errors are treated as "not found" — detection never fails a run.
+pub fn detect_target_ruby_version(root: &Path) -> Option<RubyVersion> {
+    if let Some(v) = detect_from_gemspec(root) {
+        return Some(v);
+    }
+    if let Some(v) = detect_from_ruby_version_file(root) {
+        return Some(v);
+    }
+    if let Some(v) = detect_from_mise_toml(root) {
+        return Some(v);
+    }
+    if let Some(v) = detect_from_tool_versions(root) {
+        return Some(v);
+    }
+    if let Some(v) = detect_from_bundler_lock(root) {
+        return Some(v);
+    }
+    None
+}
+
+fn absolute_start_dir(root: &Path) -> PathBuf {
+    let joined = if root.is_absolute() {
+        root.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(root)
+    } else {
+        root.to_path_buf()
+    };
+    std::fs::canonicalize(&joined).unwrap_or(joined)
+}
+
+fn find_file_upwards(root: &Path, filename: &str) -> Option<PathBuf> {
+    let start = absolute_start_dir(root);
+    for dir in start.ancestors() {
+        let candidate = dir.join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn parse_major_minor(text: &str) -> Option<RubyVersion> {
+    let s = text.trim();
+    let s = s.strip_prefix("ruby-").unwrap_or(s);
+    let mut parts = s.split('.');
+    let major_raw = parts.next()?;
+    let minor_raw = parts.next()?;
+    let major: u16 = leading_digits(major_raw)?.parse().ok()?;
+    let minor: u16 = leading_digits(minor_raw)?.parse().ok()?;
+    if major_raw.is_empty() || minor_raw.is_empty() {
+        return None;
+    }
+    Some(RubyVersion::new(major, minor))
+}
+
+fn leading_digits(s: &str) -> Option<&str> {
+    let end = s
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&s[..end])
+}
+
+fn detect_from_ruby_version_file(root: &Path) -> Option<RubyVersion> {
+    let path = find_file_upwards(root, ".ruby-version")?;
+    let content = std::fs::read_to_string(path).ok()?;
+    // RuboCop: /\A(?:ruby-)?(?<version>\d+\.\d+)/
+    parse_major_minor(content.trim())
+}
+
+fn detect_from_tool_versions(root: &Path) -> Option<RubyVersion> {
+    let path = find_file_upwards(root, ".tool-versions")?;
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        // RuboCop: /^(?:ruby )(?<version>\d+\.\d+)/
+        if let Some(rest) = line.strip_prefix("ruby ")
+            && let Some(v) = parse_major_minor(rest.trim())
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn detect_from_mise_toml(root: &Path) -> Option<RubyVersion> {
+    let path = find_file_upwards(root, "mise.toml")?;
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        // Tolerate whitespace and single/double quotes; RuboCop is strict
+        // (`^ruby = "X.Y`) but mise files vary (`ruby="X.Y"`, `'X.Y'`).
+        let trimmed = line.trim();
+        if !trimmed.starts_with("ruby") {
+            continue;
+        }
+        let Some(eq) = trimmed.find('=') else {
+            continue;
+        };
+        let rhs = trimmed[eq + 1..].trim();
+        let quote = rhs.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            continue;
+        }
+        let inner = rhs[1..].split(quote).next()?;
+        if let Some(v) = parse_major_minor(inner.trim()) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn detect_from_bundler_lock(root: &Path) -> Option<RubyVersion> {
+    for name in ["Gemfile.lock", "gems.locked"] {
+        if let Some(path) = find_file_upwards(root, name)
+            && let Some(v) = parse_bundler_lock_file(&path)
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn parse_bundler_lock_file(path: &Path) -> Option<RubyVersion> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut in_ruby_section = false;
+    for line in content.lines() {
+        if line.trim().eq_ignore_ascii_case("RUBY VERSION") {
+            in_ruby_section = true;
+            continue;
+        }
+        if !in_ruby_section {
+            continue;
+        }
+        let trimmed = line.trim();
+        // Expect `ruby W.X.Y...` (MRI only; jruby lines carry a trailing
+        // parenthetical and are ignored, mirroring RuboCop's regex).
+        if let Some(rest) = trimmed.strip_prefix("ruby ") {
+            let rest = rest.trim();
+            if rest.contains('(') || rest.contains(' ') {
+                continue;
+            }
+            if let Some(v) = parse_major_minor(rest) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn detect_from_gemspec(root: &Path) -> Option<RubyVersion> {
+    let path = find_gemspec_path(root)?;
+    parse_gemspec_required_ruby_version(&path)
+}
+
+fn find_gemspec_path(root: &Path) -> Option<PathBuf> {
+    let start = absolute_start_dir(root);
+    for dir in start.ancestors() {
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut candidates = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.extension().is_some_and(|e| e == "gemspec") {
+                candidates.push(p);
+            }
+        }
+        // RuboCop: `break candidates.first if candidates.one?` — zero or
+        // multiple gemspecs mean "keep walking upwards".
+        if candidates.len() == 1 {
+            return candidates.into_iter().next();
+        }
+    }
+    None
+}
+
+fn parse_gemspec_required_ruby_version(path: &Path) -> Option<RubyVersion> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let requirements = extract_gemspec_requirement_strings(&content)?;
+    find_minimal_known_ruby(&requirements)
+}
+
+fn extract_gemspec_requirement_strings(file_text: &str) -> Option<Vec<String>> {
+    let needle = "required_ruby_version";
+    let idx = file_text.find(needle)?;
+    let after_needle = &file_text[idx + needle.len()..];
+    let eq_rel = after_needle.find('=')?;
+    let mut rhs = after_needle[eq_rel + 1..].trim_start();
+    // Bound the snippet so following assignments (e.g. `rubygems_version`)
+    // are not swallowed: array literal -> to `]`; `Gem::Requirement.new(..)`
+    // -> to `)`; otherwise a single line.
+    let snippet = if let Some(rest) = rhs.strip_prefix('[') {
+        let _ = rest;
+        let end = rhs.find(']')?;
+        &rhs[..end + 1]
+    } else if rhs.starts_with("Gem::Requirement") {
+        let open_rel = rhs.find('(')?;
+        let after_open = &rhs[open_rel + 1..];
+        let close_rel = after_open.find(')')?;
+        &rhs[..open_rel + 1 + close_rel + 1]
+    } else {
+        let end = rhs.find('\n').unwrap_or(rhs.len());
+        &rhs[..end]
+    };
+    let _ = &mut rhs;
+    let strings = extract_quoted_strings(snippet);
+    if strings.is_empty() {
+        None
+    } else {
+        Some(strings)
+    }
+}
+
+fn extract_quoted_strings(snippet: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = snippet.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c == '\'' || c == '"' {
+            let quote = c;
+            i += 1;
+            let mut buf = String::new();
+            while i < bytes.len() {
+                let d = bytes[i] as char;
+                if d == '\\' && i + 1 < bytes.len() {
+                    buf.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                if d == quote {
+                    i += 1;
+                    break;
+                }
+                buf.push(d);
+                i += 1;
+            }
+            // Skip `.freeze`-style trailing call noise; keep the literal.
+            out.push(buf);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn find_minimal_known_ruby(requirements: &[String]) -> Option<RubyVersion> {
+    let mut constraints: Vec<(String, Vec<u64>)> = Vec::new();
+    for req in requirements {
+        for part in req.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (op, ver) = split_requirement_op(part)?;
+            let parsed = parse_gem_version(ver)?;
+            constraints.push((op, parsed));
+        }
+    }
+    if constraints.is_empty() {
+        return None;
+    }
+    for (major, minor) in KNOWN_RUBIES.iter().copied() {
+        let candidate = vec![u64::from(major), u64::from(minor), 99];
+        if constraints
+            .iter()
+            .all(|(op, req)| satisfies_gem_constraint(&candidate, op, req))
+        {
+            return Some(RubyVersion::new(major, minor));
+        }
+    }
+    None
+}
+
+fn split_requirement_op(part: &str) -> Option<(String, &str)> {
+    for op in [">=", "<=", "!=", "~>", ">", "<", "="] {
+        if let Some(rest) = part.strip_prefix(op) {
+            let ver = rest.trim();
+            if ver.is_empty() {
+                return None;
+            }
+            return Some((op.to_string(), ver));
+        }
+    }
+    // Bare version implies `=`.
+    Some(("=".to_string(), part.trim()))
+}
+
+fn parse_gem_version(s: &str) -> Option<Vec<u64>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut segs = Vec::new();
+    for part in s.split('.') {
+        let digits = leading_digits(part)?;
+        segs.push(digits.parse::<u64>().ok()?);
+    }
+    if segs.is_empty() {
+        return None;
+    }
+    Some(segs)
+}
+
+fn compare_gem_versions(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    let len = a.len().max(b.len());
+    for i in 0..len {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        match x.cmp(&y) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn pessimistic_upper_bound(req: &[u64]) -> Vec<u64> {
+    if req.len() <= 1 {
+        return vec![req.first().copied().unwrap_or(0) + 1];
+    }
+    let mut upper = req[..req.len() - 1].to_vec();
+    if let Some(last) = upper.last_mut() {
+        *last += 1;
+    }
+    upper
+}
+
+fn satisfies_gem_constraint(candidate: &[u64], op: &str, req: &[u64]) -> bool {
+    use std::cmp::Ordering;
+    match op {
+        "=" => compare_gem_versions(candidate, req) == Ordering::Equal,
+        "!=" => compare_gem_versions(candidate, req) != Ordering::Equal,
+        ">" => compare_gem_versions(candidate, req) == Ordering::Greater,
+        ">=" => matches!(
+            compare_gem_versions(candidate, req),
+            Ordering::Greater | Ordering::Equal
+        ),
+        "<" => compare_gem_versions(candidate, req) == Ordering::Less,
+        "<=" => matches!(
+            compare_gem_versions(candidate, req),
+            Ordering::Less | Ordering::Equal
+        ),
+        "~>" => {
+            compare_gem_versions(candidate, req) != Ordering::Less
+                && compare_gem_versions(candidate, &pessimistic_upper_bound(req)) == Ordering::Less
+        }
+        _ => false,
+    }
+}
+
 /// Internal representation of a parsed YAML config file.
 ///
 /// All fields are `Option<T>` so "explicitly set" is distinguished from "not
@@ -636,10 +1027,20 @@ impl MurphyConfig {
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
         let config_path = root.join(".murphy.yml");
         if !config_path.exists() {
-            return Ok(Self::default());
+            let mut cfg = Self::default();
+            // No explicit config: fall back to RuboCop-style detection
+            // (.ruby-version / gemspec / .tool-versions / mise.toml / lockfile).
+            if let Some(detected) = detect_target_ruby_version(root) {
+                cfg.target_ruby_version = detected;
+            }
+            return Ok(cfg);
         }
         let parsed = load_resolving_inherit(&config_path, &std::collections::HashSet::new())?;
-        let (cfg, _, _) = parsed.into_murphy_config();
+        let explicit = parsed.target_ruby_version.is_some();
+        let (mut cfg, _, _) = parsed.into_murphy_config();
+        if !explicit && let Some(detected) = detect_target_ruby_version(root) {
+            cfg.target_ruby_version = detected;
+        }
         Ok(cfg)
     }
 
@@ -652,7 +1053,11 @@ impl MurphyConfig {
         } else {
             ParsedYaml::default()
         };
+        let explicit = parsed.target_ruby_version.is_some();
         let (mut cfg, saw_include, _saw_exclude) = parsed.into_murphy_config();
+        if !explicit && let Some(detected) = detect_target_ruby_version(root) {
+            cfg.target_ruby_version = detected;
+        }
         let defaults = DefaultCopsData::from_yaml(defaults_yaml);
         if !saw_include && !defaults.allcops_include.is_empty() {
             cfg.files.include = defaults.allcops_include.clone();
@@ -2891,5 +3296,215 @@ Style/StringLiterals:
         assert!(cfg.files.exclude.contains(&"Vagrantfile".to_string()));
         cfg.apply_pack_default_layers(&[]);
         assert!(cfg.files.exclude.contains(&"vendor/**/*".to_string()));
+    }
+
+    // --- TargetRubyVersion detection (murphy-os2b) ---
+
+    fn write_file(dir: &Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).expect("write fixture");
+    }
+
+    #[test]
+    fn detects_from_ruby_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.3.5\n");
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 3))
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 3));
+    }
+
+    #[test]
+    fn detects_ruby_version_with_prefix_and_patch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "ruby-3.2.2\n");
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn detects_from_tool_versions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".tool-versions", "nodejs 20.11.0\nruby 3.4.1\n");
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 4))
+        );
+    }
+
+    #[test]
+    fn detects_from_mise_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), "mise.toml", "[tools]\nruby = \"3.3.5\"\n");
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 3))
+        );
+    }
+
+    #[test]
+    fn detects_from_gemfile_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "Gemfile.lock",
+            "GEM\n  specs:\n\nRUBY VERSION\n   ruby 3.2.2p53\n",
+        );
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn detects_from_gemspec_ge() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "foo.gemspec",
+            "Gem::Specification.new do |s|\n  s.required_ruby_version = \">= 3.0\"\nend\n",
+        );
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 0))
+        );
+    }
+
+    #[test]
+    fn detects_from_gemspec_requirement_new() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "foo.gemspec",
+            "Gem::Specification.new do |s|\n  s.required_ruby_version = Gem::Requirement.new(\">= 2.7.0\")\nend\n",
+        );
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(2, 7))
+        );
+    }
+
+    #[test]
+    fn detects_from_gemspec_pessimistic() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "foo.gemspec",
+            "Gem::Specification.new do |s|\n  s.required_ruby_version = \"~> 3.2.0\"\nend\n",
+        );
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn detects_from_gemspec_array() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "foo.gemspec",
+            "Gem::Specification.new do |s|\n  s.required_ruby_version = [\">= 2.5\", \"< 3.0\"]\nend\n",
+        );
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(2, 5))
+        );
+    }
+
+    #[test]
+    fn gemspec_wins_over_ruby_version() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.3.5\n");
+        write_file(
+            dir.path(),
+            "foo.gemspec",
+            "Gem::Specification.new do |s|\n  s.required_ruby_version = \">= 3.0\"\nend\n",
+        );
+        // RuboCop SOURCES order: gemspec before .ruby-version.
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 0))
+        );
+    }
+
+    #[test]
+    fn ruby_version_wins_over_tool_versions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.3.5\n");
+        write_file(dir.path(), ".tool-versions", "ruby 3.2.0\n");
+        // RuboCop SOURCES order: .ruby-version before .tool-versions.
+        assert_eq!(
+            detect_target_ruby_version(dir.path()),
+            Some(RubyVersion::new(3, 3))
+        );
+    }
+
+    #[test]
+    fn explicit_config_wins_over_detection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.3.5\n");
+        write_file(
+            dir.path(),
+            ".murphy.yml",
+            "AllCops:\n  TargetRubyVersion: 3.1\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 1));
+    }
+
+    #[test]
+    fn explicit_config_via_inherit_wins_over_detection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.3.5\n");
+        write_file(
+            dir.path(),
+            "base.yml",
+            "AllCops:\n  TargetRubyVersion: 2.7\n",
+        );
+        write_file(dir.path(), ".murphy.yml", "inherit_from: base.yml\n");
+        let cfg = MurphyConfig::load(dir.path()).expect("load");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(2, 7));
+    }
+
+    #[test]
+    fn defaults_when_nothing_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(detect_target_ruby_version(dir.path()), None);
+        let cfg = MurphyConfig::load(dir.path()).expect("load");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 1));
+    }
+
+    #[test]
+    fn invalid_version_files_fall_through() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "not-a-version\n");
+        write_file(dir.path(), ".tool-versions", "nodejs 20\n");
+        assert_eq!(detect_target_ruby_version(dir.path()), None);
+    }
+
+    #[test]
+    fn finds_version_file_in_parent_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.2.0\n");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(
+            detect_target_ruby_version(&sub),
+            Some(RubyVersion::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn load_with_defaults_detects_without_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_file(dir.path(), ".ruby-version", "3.4.0\n");
+        let cfg =
+            MurphyConfig::load_with_defaults(dir.path(), "AllCops:\n  Exclude: []\n").unwrap();
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 4));
     }
 }
