@@ -237,6 +237,7 @@ fn build_cx_raw(
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
         block_braces_space: ctx.block_braces_space,
+        hash_literal_braces_space: ctx.hash_literal_braces_space,
         max_line_length: ctx.max_line_length_wire(),
         parse_diagnostics: if parse_diagnostics.is_empty() {
             std::ptr::null()
@@ -762,6 +763,73 @@ mod tests {
         );
 
         assert_eq!(MAX_LINE_LENGTH_SEEN.load(Ordering::SeqCst), 80);
+    }
+
+    // Per-test atomic for the murphy-ilrx hash-literal-braces signal.
+    static HASH_LITERAL_BRACES_SPACE_SEEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(true);
+    unsafe extern "C" fn hash_literal_braces_space_dispatch(
+        _node: NodeId,
+        cx: *const CxRaw,
+    ) -> i32 {
+        let cx = unsafe { &*cx };
+        HASH_LITERAL_BRACES_SPACE_SEEN.store(cx.hash_literal_braces_space, Ordering::SeqCst);
+        0
+    }
+    static HASH_LITERAL_BRACES_SPACE_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/HashLiteralBracesSpace"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        maximum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: hash_literal_braces_space_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_hash_literal_braces_space_to_cx_raw() {
+        // The resolved `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle` flag
+        // threaded through the context reaches the cop's `CxRaw` (murphy-ilrx).
+        HASH_LITERAL_BRACES_SPACE_SEEN.store(true, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&HASH_LITERAL_BRACES_SPACE_COP],
+            &mut sink,
+            AllCopsContext {
+                hash_literal_braces_space: false,
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(!HASH_LITERAL_BRACES_SPACE_SEEN.load(Ordering::SeqCst));
+
+        // And the default (true, RuboCop's `space`) is faithfully threaded too.
+        HASH_LITERAL_BRACES_SPACE_SEEN.store(false, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options_and_context(
+            &ast,
+            &[&HASH_LITERAL_BRACES_SPACE_COP],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(HASH_LITERAL_BRACES_SPACE_SEEN.load(Ordering::SeqCst));
     }
 
     // Per-test atomic (one tagged per test) so context-threading tests stay

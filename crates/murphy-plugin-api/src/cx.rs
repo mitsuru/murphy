@@ -623,6 +623,74 @@ impl<'a> Cx<'a> {
         self.raw.block_braces_space
     }
 
+    /// The run-wide resolved `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle`
+    /// != `"no_space"` flag (murphy-ilrx).
+    ///
+    /// RuboCop's `Layout/SpaceAfterComma#space_style_before_rcurly` reads
+    /// `config.for_cop('Layout/SpaceInsideHashLiteralBraces')['EnforcedStyle']`
+    /// (fallback `'space'`) and treats only `'no_space'` as space-forbidden
+    /// before `}`; `space` (the default) and `compact` both require the space.
+    /// This is that value: `false` only when the sibling style is `no_space`,
+    /// `true` otherwise (including unset, which falls back to `'space'`).
+    /// Default `true` (RuboCop's `space` default, and the value raw-ABI test
+    /// harnesses observe when they build `CxRaw` by hand). When `false`, a
+    /// comma directly before `}` is exempt (no space required); when `true`,
+    /// the trailing `,}` gap is flagged.
+    pub fn hash_literal_braces_space(&self) -> bool {
+        self.raw.hash_literal_braces_space
+    }
+
+    /// RuboCop's `SpaceAfterPunctuation#space_forbidden_before_rcurly?`
+    /// for the comma case — `true` when `Layout/SpaceInsideHashLiteralBraces`
+    /// resolves to `no_space`, i.e. a comma directly before `}` needs no space.
+    pub fn space_forbidden_before_rcurly_for_comma(&self) -> bool {
+        !self.raw.hash_literal_braces_space
+    }
+
+    /// RuboCop's `SpaceAfterPunctuation#space_forbidden_before_rcurly?`
+    /// for the semicolon case — `true` when `Layout/SpaceInsideBlockBraces`
+    /// resolves to `no_space`, i.e. a semicolon directly before `}` needs no
+    /// space. Reuses the existing `block_braces_space` signal (murphy-4qhr);
+    /// no new ABI field was needed for `Layout/SpaceAfterSemicolon`
+    /// (murphy-ilrx).
+    pub fn space_forbidden_before_rcurly_for_semicolon(&self) -> bool {
+        !self.raw.block_braces_space
+    }
+
+    /// Record that the running cop observed its configured `EnforcedStyle`
+    /// (RuboCop's `ConfigurableEnforcedStyle#correct_style_detected`).
+    ///
+    /// Intentionally a no-op: RuboCop's style-tracking only feeds
+    /// `--auto-gen-config` (`DisabledConfigFormatter.detected_styles`) and
+    /// cross-file style-ambiguity bookkeeping, neither of which exists in
+    /// Murphy (stateless per-file, no config formatter). It never changes
+    /// which offenses fire, so Murphy cops call this to mirror the upstream
+    /// `check_*` structure without persisting any state (murphy-ilrx;
+    /// same precedent as `Layout/FirstParameterIndentation`'s discarded
+    /// `_detected` and `Layout/SpaceAroundEqualsInParameterDefault`'s
+    /// documented non-portability). Provided as a named surface so the
+    /// mapping stays visible and unit-testable.
+    pub fn correct_style_detected(&self) {}
+
+    /// Record that the running cop observed the opposite of its configured
+    /// `EnforcedStyle` (RuboCop's `ConfigurableEnforcedStyle#opposite_style_detected`).
+    ///
+    /// Same no-op contract as [`Cx::correct_style_detected`]: only feeds
+    /// RuboCop's `--auto-gen-config` inference, never changes offenses.
+    /// Called alongside the offense emission to mirror upstream's
+    /// `incorrect_style_detected` shape (murphy-ilrx).
+    pub fn opposite_style_detected(&self) {}
+
+    /// Record an ambiguous style observation (RuboCop's
+    /// `ConfigurableEnforcedStyle#ambiguous_style_detected`).
+    ///
+    /// Same no-op contract as [`Cx::correct_style_detected`]: only feeds
+    /// RuboCop's style-inference diagnostics, never changes offenses.
+    /// Provided for cops whose upstream mixin reports multiple candidate
+    /// styles (e.g. `MultilineElementIndentation#check_first`); the
+    /// possibilities are accepted and intentionally discarded (murphy-ilrx).
+    pub fn ambiguous_style_detected(&self, _possibilities: &[&str]) {}
+
     /// Parser diagnostics for `Lint/Syntax` parity (murphy-zpgm).
     ///
     /// One entry per prism error, in source order; empty when the file
@@ -3667,6 +3735,7 @@ mod tests {
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
             block_braces_space: true,
+            hash_literal_braces_space: true,
             max_line_length: 120,
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
@@ -3761,6 +3830,64 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(!cx.block_braces_space());
         assert!(!cx.space_required_after_lcurly());
+    }
+
+    #[test]
+    fn hash_literal_braces_space_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        raw.hash_literal_braces_space = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.hash_literal_braces_space());
+        assert!(!cx.space_forbidden_before_rcurly_for_comma());
+
+        raw.hash_literal_braces_space = false;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.hash_literal_braces_space());
+        assert!(cx.space_forbidden_before_rcurly_for_comma());
+    }
+
+    #[test]
+    fn space_forbidden_helpers_mirror_rubocop_predicates() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        // Semicolon case reuses the block-braces signal (no new ABI field).
+        raw.block_braces_space = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.space_forbidden_before_rcurly_for_semicolon());
+        raw.block_braces_space = false;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.space_forbidden_before_rcurly_for_semicolon());
+    }
+
+    #[test]
+    fn style_tracking_surface_is_noop() {
+        // `correct_style_detected` / `opposite_style_detected` /
+        // `ambiguous_style_detected` (murphy-ilrx) only feed RuboCop's
+        // `--auto-gen-config` inference and never change offenses — calling
+        // them must not panic and must leave the context observable state
+        // unchanged.
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        cx.correct_style_detected();
+        cx.opposite_style_detected();
+        cx.ambiguous_style_detected(&["space", "no_space"]);
+        cx.ambiguous_style_detected(&[]);
     }
 
     #[test]

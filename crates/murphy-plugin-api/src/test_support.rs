@@ -357,6 +357,17 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set the run-wide `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle`
+    /// != `"no_space"` flag — what `Cx::hash_literal_braces_space()` returns
+    /// (murphy-ilrx). Use this to exercise `Layout/SpaceAfterComma`'s dynamic
+    /// `,}`-exemption (`space_forbidden_before_rcurly?`): `false` (`no_space`
+    /// sibling style) exempts a comma directly before `}`; `true` (default
+    /// `space`, or `compact`) flags the missing space.
+    pub fn with_hash_literal_braces_space(mut self, space: bool) -> Self {
+        self.context.hash_literal_braces_space = space;
+        self
+    }
+
     /// Set the run-wide resolved `Layout/LineLength.Max` for this cop test —
     /// what `Cx::max_line_length()` returns (murphy-y3h2). Use this to exercise
     /// a cop's cross-cop read of the shared line-length budget.
@@ -1187,6 +1198,7 @@ fn cx_raw_for(
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
         block_braces_space: ctx.block_braces_space,
+        hash_literal_braces_space: ctx.hash_literal_braces_space,
         max_line_length: ctx.max_line_length_wire(),
         parse_diagnostics: if parse_diagnostics.is_empty() {
             std::ptr::null()

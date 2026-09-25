@@ -6,11 +6,9 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAfterSemicolon
-//! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-rwi3
-//!   - murphy-ilrx
+//! upstream_version_checked: 1.87.0
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `SpaceAfterPunctuation` mixin for the semicolon token:
 //!   an offense fires when `;` is immediately followed (same line, adjacent
@@ -18,24 +16,13 @@
 //!   Allowed following tokens (no offense) match RuboCop's `allowed_type?`
 //!   (`tRPAREN`/`tRBRACK`/`tPIPE`/`tSTRING_DEND`): `)`, `]`, `|`, and the
 //!   string-interpolation-end `}` of `#{...}`. A regular hash/block `}` is NOT
-//!   in `allowed_type?`, so `;}` IS flagged — matching RuboCop's default
-//!   (`SpaceInsideBlockBraces: space`). A run of semicolons (`;;`) is accepted
-//!   between the pair, mirroring `semicolon_sequence?`.
-//!
-//!   murphy-rwi3 (ABI blocker, not a cop-level fix): RuboCop additionally
-//!   suppresses the regular-`}` offense when `Layout/SpaceInsideBlockBraces` is
-//!   configured `EnforcedStyle: no_space`, by reading that *sibling* cop's
-//!   `cop_config` at runtime. Murphy's plugin ABI exposes only the running
-//!   cop's OWN resolved config (`cx.options_json`, set from
-//!   `config.cop_options_json(self_name)` in dispatch) — there is no surface to
-//!   read another cop's config. Honouring it requires a new `CxRaw`
-//!   sibling-config field (an ABI change — `CxRaw` offsets are pinned by
-//!   `offset_of!` assertions) or host-side baking of the sibling style into
-//!   this cop's `options_json` (a murphy-core config-contract change). Both lie
-//!   outside the murphy-std single-surface boundary and need sign-off, so this
-//!   stays documented and unported. Murphy always flags `;}`, matching
-//!   RuboCop's default (`SpaceInsideBlockBraces: space`); only a non-default
-//!   `no_space` sibling config diverges.
+//!   in `allowed_type?`, so `;}` IS flagged under RuboCop's default
+//!   (`SpaceInsideBlockBraces: space`); when that sibling cop is configured
+//!   `EnforcedStyle: no_space`, `space_forbidden_before_rcurly?` exempts `;}`.
+//!   The sibling style is read dynamically via `Cx::block_braces_space()`
+//!   (murphy-ilrx, reusing the murphy-4qhr signal — no new ABI field was
+//!   needed). A run of semicolons (`;;`) is accepted between the pair,
+//!   mirroring `semicolon_sequence?`.
 //! ```
 //!
 //! ## Matched shape
@@ -108,9 +95,19 @@ impl SpaceAfterSemicolon {
                 continue;
             }
 
-            // `space_required_before?` — closing delimiters / pipe are allowed
-            // to abut a semicolon.
+            // `space_required_before?` — `!(allowed_type? || (right_curly && no_space))`.
+            // `allowed_type?` (`)`, `]`, `|`, interpolation-end `}`) is handled
+            // by `allowed_following`. A regular `}` (`RightBrace`, `tRCURLY`)
+            // additionally needs the sibling
+            // `Layout/SpaceInsideBlockBraces.EnforcedStyle == "no_space"` check:
+            // read dynamically via `Cx::block_braces_space()` (murphy-ilrx,
+            // reusing the murphy-4qhr signal — no new ABI field needed).
             if allowed_following(cx, token2) {
+                continue;
+            }
+            if token2.kind == SourceTokenKind::RightBrace
+                && cx.space_forbidden_before_rcurly_for_semicolon()
+            {
                 continue;
             }
 
@@ -269,6 +266,51 @@ mod tests {
     #[test]
     fn leaves_clean_program_without_corrections() {
         test::<SpaceAfterSemicolon>().expect_no_corrections("a = 1; b = 2\n");
+    }
+
+    // ── murphy-ilrx: dynamic Layout/SpaceInsideBlockBraces.EnforcedStyle ──
+
+    #[test]
+    fn accepts_semicolon_before_brace_under_no_space_sibling_style() {
+        // `EnforcedStyle: no_space` sibling style: `;}` needs no space
+        // (`space_forbidden_before_rcurly?`), so no offense. Reuses the
+        // existing `block_braces_space` signal (murphy-4qhr) — no new ABI
+        // field was needed for this cop.
+        test::<SpaceAfterSemicolon>()
+            .with_block_braces_space(false)
+            .expect_no_offenses("foo { x = 1;}\n");
+    }
+
+    #[test]
+    fn flags_semicolon_before_brace_with_explicit_space_sibling_style() {
+        // Explicit `space` sibling style: `;}` requires the space.
+        test::<SpaceAfterSemicolon>()
+            .with_block_braces_space(true)
+            .expect_offense(indoc! {r#"
+                foo { x = 1;}
+                           ^ Space missing after semicolon.
+            "#});
+    }
+
+    #[test]
+    fn accepts_interpolation_end_brace_regardless_of_sibling_style() {
+        // `tSTRING_DEND` is in `allowed_type?` and is always exempt, even
+        // under `no_space` sibling style.
+        test::<SpaceAfterSemicolon>()
+            .with_block_braces_space(false)
+            .expect_no_offenses("\"a#{x;}\"\n");
+    }
+
+    #[test]
+    fn flags_normal_missing_space_regardless_of_sibling_style() {
+        // Non-`}` gaps flag in both sibling styles — the flag only gates the
+        // `}`-exemption.
+        test::<SpaceAfterSemicolon>()
+            .with_block_braces_space(false)
+            .expect_offense(indoc! {r#"
+                x = 1;y = 2
+                     ^ Space missing after semicolon.
+            "#});
     }
 }
 

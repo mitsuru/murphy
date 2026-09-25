@@ -1248,6 +1248,7 @@ impl MurphyConfig {
             block_forwarding_explicit: self.resolved_block_forwarding_explicit(),
             block_body_empty_lines: self.resolved_block_body_empty_lines(),
             block_braces_space: self.resolved_block_braces_space(),
+            hash_literal_braces_space: self.resolved_hash_literal_braces_space(),
             max_line_length: self.resolved_max_line_length(),
         }
     }
@@ -1316,6 +1317,28 @@ impl MurphyConfig {
             .as_deref()
             .unwrap_or("space")
             == "space"
+    }
+
+    /// RuboCop's `config.for_cop('Layout/SpaceInsideHashLiteralBraces')`
+    /// `['EnforcedStyle']` resolved for this config: `false` only when the
+    /// style is `no_space`, else `true` (RuboCop's `space` default; `compact`
+    /// also requires the space before `}`). Mirrors `for_cop` (not
+    /// `for_enabled_cop`): read unconditionally whether or not the sibling
+    /// cop is enabled, with an unset style falling back to `'space'`.
+    /// Read by `Layout/SpaceAfterComma` via
+    /// `Cx::hash_literal_braces_space()` (murphy-ilrx).
+    fn resolved_hash_literal_braces_space(&self) -> bool {
+        const COP: &str = "Layout/SpaceInsideHashLiteralBraces";
+        let style = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("EnforcedStyle"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        style(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| style(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .as_deref()
+            .unwrap_or("space")
+            != "no_space"
     }
 
     /// RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']` resolved
@@ -2176,6 +2199,68 @@ mod tests {
         let cfg = MurphyConfig::from_yaml_str("Layout/SpaceInsideBlockBraces:\n  Enabled: false\n")
             .expect("config parses");
         assert!(cfg.allcops_context().block_braces_space);
+    }
+
+    #[test]
+    fn allcops_context_resolves_hash_literal_braces_space() {
+        // User `EnforcedStyle: space` flows into the context (drives
+        // `Layout/SpaceAfterComma` `,}`-exemption, murphy-ilrx).
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: space\n",
+        )
+        .expect("config parses");
+        assert!(cfg.allcops_context().hash_literal_braces_space);
+
+        // Explicit `no_space` resolves to false (exempts `,}`).
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        assert!(!cfg.allcops_context().hash_literal_braces_space);
+
+        // `compact` counts as space-required (only `no_space` exempts),
+        // matching RuboCop's `space_forbidden_before_rcurly? == (style == 'no_space')`.
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: compact\n",
+        )
+        .expect("config parses");
+        assert!(cfg.allcops_context().hash_literal_braces_space);
+
+        // Unconfigured -> RuboCop's `space` default (true) via `|| 'space'`
+        // fallback.
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        assert!(cfg.allcops_context().hash_literal_braces_space);
+
+        // Bundled default `no_space` is honoured when user does not set it.
+        let cfg = MurphyConfig::with_defaults(
+            "",
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        assert!(!cfg.allcops_context().hash_literal_braces_space);
+
+        // User `space` overrides a bundled `no_space` default.
+        let cfg = MurphyConfig::with_defaults(
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: space\n",
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        assert!(cfg.allcops_context().hash_literal_braces_space);
+
+        // Disabled cop → `for_cop` still yields its style (read
+        // unconditionally). An explicit `no_space` is honoured even when
+        // disabled.
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/SpaceInsideHashLiteralBraces:\n  Enabled: false\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        assert!(!cfg.allcops_context().hash_literal_braces_space);
+
+        // Disabled cop with no style → fallback `'space'` (true).
+        let cfg =
+            MurphyConfig::from_yaml_str("Layout/SpaceInsideHashLiteralBraces:\n  Enabled: false\n")
+                .expect("config parses");
+        assert!(cfg.allcops_context().hash_literal_braces_space);
     }
 
     #[test]

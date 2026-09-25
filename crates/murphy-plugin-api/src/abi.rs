@@ -307,6 +307,20 @@ pub struct CxRaw {
     /// not bumped for tail-appended CxRaw fields. Read via
     /// `Cx::block_braces_space()`.
     pub block_braces_space: bool,
+    /// Resolved `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle != "no_space"`
+    /// (default `true`, i.e. RuboCop's `space` default; `compact` also counts
+    /// as space-required). NOT an `AllCops.*` key — it is the run-wide
+    /// cross-cop signal RuboCop's `Layout/SpaceAfterComma#space_style_before_rcurly`
+    /// reads via `config.for_cop('Layout/SpaceInsideHashLiteralBraces')`,
+    /// threaded here (murphy-bgd8 pattern, murphy-ilrx) so the cop need not
+    /// perform its own cross-cop config lookup. When `false` (`no_space`
+    /// style), a comma directly before `}` is exempt (no space required);
+    /// when `true`, the trailing `,}` gap is flagged. Tail-appended into the
+    /// trailing padding after `block_braces_space` (offset 267) under ABI v4
+    /// lockstep, so this field leaves `size_of::<CxRaw>()` unchanged. Per
+    /// project policy the numeric ABI is not bumped for tail-appended CxRaw
+    /// fields. Read via `Cx::hash_literal_braces_space()`.
+    pub hash_literal_braces_space: bool,
     /// Resolved `Layout/LineLength.Max` (default 120). NOT an `AllCops.*`
     /// key — it is the run-wide cross-cop signal RuboCop's
     /// `Style/IfUnlessModifier`, `Style/WhileUntilModifier`,
@@ -314,7 +328,7 @@ pub struct CxRaw {
     /// `config.for_cop('Layout/LineLength')['Max']`, threaded here
     /// (murphy-bgd8 pattern, murphy-y3h2) so a cop needing it does not require
     /// its own cross-cop config lookup. Tail-appended into the trailing padding
-    /// after `block_braces_space` (offset 268) under ABI v4 lockstep, so this
+    /// after `hash_literal_braces_space` (offset 268) under ABI v4 lockstep, so this
     /// field leaves `size_of::<CxRaw>()` unchanged. Per project policy the
     /// numeric ABI is not bumped for tail-appended CxRaw fields. Read via
     /// `Cx::max_line_length()`. A wire value of `0` (only observed in raw-ABI
@@ -386,6 +400,12 @@ pub struct CxRaw {
 /// into the trailing padding after `block_braces_space` (offset 268) under ABI v4
 /// lockstep for murphy-y3h2; it fits the existing tail padding so
 /// `size_of::<CxRaw>()` is unchanged.
+/// `CxRaw::hash_literal_braces_space` (the resolved
+/// `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle != "no_space"` flag,
+/// consumed by `Layout/SpaceAfterComma`) was tail-appended into the trailing
+/// padding after `block_braces_space` (offset 267) under ABI v4 lockstep for
+/// murphy-ilrx; it fits the existing tail padding so `size_of::<CxRaw>()` is
+/// unchanged (coexists with `max_line_length` at 268).
 /// `CxRaw::parse_diagnostics` (+`_len`) was tail-appended under ABI v4
 /// lockstep for murphy-zpgm; it grows `size_of::<CxRaw>()` (a pointer+len do
 /// not fit the trailing padding). Per project policy the numeric ABI is not
@@ -483,6 +503,15 @@ pub struct AllCopsContext {
     /// (murphy-bgd8 pattern) so the cop need not perform its own cross-cop
     /// config lookup (murphy-4qhr). Read via `Cx::block_braces_space()`.
     pub block_braces_space: bool,
+    /// Resolved `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle != "no_space"`
+    /// (default `true`, i.e. RuboCop\'s `space` default; `compact` also counts
+    /// as space-required). NOT an `AllCops.*` key — the run-wide cross-cop
+    /// signal RuboCop\'s `Layout/SpaceAfterComma#space_style_before_rcurly`
+    /// reads via `config.for_cop(\'Layout/SpaceInsideHashLiteralBraces\')`,
+    /// threaded here (murphy-bgd8 pattern) so the cop need not perform its own
+    /// cross-cop config lookup (murphy-ilrx). Read via
+    /// `Cx::hash_literal_braces_space()`.
+    pub hash_literal_braces_space: bool,
     /// Resolved `Layout/LineLength.Max`, default
     /// [`AllCopsContext::DEFAULT_MAX_LINE_LENGTH`]. NOT an `AllCops.*` key —
     /// it is the shared run-wide line-length budget RuboCop\'s
@@ -541,6 +570,7 @@ impl Default for AllCopsContext {
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
             block_braces_space: true,
+            hash_literal_braces_space: true,
             max_line_length: Self::DEFAULT_MAX_LINE_LENGTH,
         }
     }
@@ -723,11 +753,14 @@ mod tests {
         // murphy-4qhr: tail-appended into the trailing padding after
         // `block_body_empty_lines` (265); size unchanged.
         assert_eq!(offset_of!(CxRaw, block_braces_space), 266);
+        // murphy-ilrx: tail-appended into the trailing padding after
+        // `block_braces_space` (266); bool at offset 267.
+        assert_eq!(offset_of!(CxRaw, hash_literal_braces_space), 267);
         // murphy-y3h2: tail-appended into the trailing padding after
-        // `block_braces_space` (266); u16 at offset 268 (267 is padding).
+        // `hash_literal_braces_space` (267); u16 at offset 268.
         assert_eq!(offset_of!(CxRaw, max_line_length), 268);
         // murphy-zpgm: tail-appended pointer+len; needs 8-byte alignment so it
-        // starts at 272 (after 264-266 bools + max_line_length at 268 +
+        // starts at 272 (after 264-267 bools + max_line_length at 268 +
         // 270-271 padding).
         assert_eq!(offset_of!(CxRaw, parse_diagnostics), 272);
         assert_eq!(offset_of!(CxRaw, parse_diagnostics_len), 280);
