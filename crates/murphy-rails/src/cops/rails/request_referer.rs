@@ -5,11 +5,17 @@
 //! upstream: rubocop-rails
 //! upstream_cop: Rails/RequestReferer
 //! upstream_version_checked: 2.35.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-h8ke
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Backfilled metadata; full upstream parity audit still needs to confirm no remaining behavior gaps.
+//!   Audited against rubocop-rails 2.35.0 for murphy-h8ke: the NodePattern
+//!   `(send (send nil? :request) {:referer :referrer})` is mirrored with
+//!   strict zero-arity on both Sends, so `request(foo).referer` (a
+//!   user-defined helper) is excluded exactly like upstream. Both
+//!   EnforcedStyles are implemented with the upstream default (`referer`).
+//!   The whole-node replace normalises `request . referrer` whitespace the
+//!   same way upstream's `corrector.replace` does. Dispatch covers all Send
+//!   nodes rather than RESTRICT_ON_SEND (perf-only difference).
 //! ```
 //!
 //! `request.referer` / `request.referrer` accessors. Rails exposes both

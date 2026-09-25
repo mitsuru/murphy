@@ -7,10 +7,19 @@
 //! upstream_version_checked: 3.7.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-h8ke
+//!   - murphy-iwsr
 //! notes: >
-//!   Backfilled metadata; full upstream parity audit still needs to confirm remaining file-gating and behavior differences.
-//! ```
+//!   Audited against rubocop-rspec 3.7.0 for murphy-h8ke. Top-level gating
+//!   mirrors TopLevelGroup (begin/class/module walk), the string_constant?
+//!   regex is ASCII-faithful to upstream, IgnoredMetadata defaults and
+//!   sym-pair matching mirror upstream, receiver gating (bare plus
+//!   RSpec/::RSpec) mirrors `#rspec?`, and the five spec-dir Excludes are
+//!   layered via the pack config. Residual gap in murphy-iwsr: non-literal
+//!   first args (calls, variables, numbers, hashes) are skipped while
+//!   upstream flags any non-const non-string-constant (conservative stance,
+//!   pinned by tests); `class << self` wrapping counts as top-level while
+//!   upstream ignores sclass.
+//! //! ```
 //!
 //! `RSpec.describe`/`describe` block should be the class or module
 //! under test, not a string or symbol. Mirrors RuboCop-RSpec's cop of
