@@ -1,0 +1,78 @@
+name: release-gem
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-linux
+            runner: ubuntu-latest
+          - platform: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - platform: x86_64-darwin
+            runner: macos-13
+          - platform: arm64-darwin
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Build native binary
+        run: cargo build --release -p murphy-cli
+
+      - name: Build platform gem
+        run: sh scripts/build-gem.sh --platform ${{ matrix.platform }} --release
+
+      - name: Smoke test gem install + bundle exec
+        run: |
+          gem install --local ./murphy-*.gem
+          murphy --help
+          bundle install --local
+          bundle exec murphy --help
+          bundle exec ruby -Ilib -Itest test/test_native.rb
+          bundle exec ruby -Ilib -Itest test/test_version_sync.rb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gem-${{ matrix.platform }}
+          path: murphy-*.gem
+
+  push:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: gems
+          merge-multiple: true
+
+      - name: Push platform gems to RubyGems
+        env:
+          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        run: |
+          mkdir -p ~/.gem
+          printf -- "---\n:rubygems_api_key: %s\n" "$GEM_HOST_API_KEY" > ~/.gem/credentials
+          chmod 600 ~/.gem/credentials
+          for g in gems/*.gem; do
+            echo "pushing $g"
+            gem push "$g"
+          done

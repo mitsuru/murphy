@@ -1,6 +1,6 @@
 //! Plugin name → path resolution for `[[plugins]]` `Name(String)` shorthand
-//! (murphy-9cr.10.2; ADR 0042). The `Detailed { name, path }` form bypasses
-//! this module entirely.
+//! (murphy-9cr.10.2; ADR 0042, extended by C2 gem discovery; ADR 0048).
+//! The `Detailed { name, path }` form bypasses this module entirely.
 //!
 //! Search-path priority (highest to lowest):
 //! 1. `Detailed { name, path }` overrides supplied by the caller — lets a
@@ -8,7 +8,9 @@
 //!    shorthand from `plugins = ["..."]`.
 //! 2. `MURPHY_PLUGIN_PATH` env (parsed via `std::env::split_paths`).
 //! 3. project-local `<root>/.murphy/plugins/`.
-//! 4. user-local `dirs::data_dir()/murphy/plugins/`
+//! 4. installed gems (`MURPHY_GEM_PATH`, then `GEM_HOME`/`GEM_PATH` —
+//!    the Bundler layer; see `crate::gem_discovery`).
+//! 5. user-local `dirs::data_dir()/murphy/plugins/`
 //!    (XDG `$XDG_DATA_HOME/murphy/plugins` on Linux).
 //!
 //! Within a directory the loader first probes the pack-dir form
@@ -22,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::gem_discovery::find_gem_pack;
 use crate::plugin_loader::{LoadKind, PluginLoadDiagnostic, ResolveFailure};
 use crate::plugin_manifest::{is_pack_dir, resolve_pack_cdylib};
 use crate::{ConfigError, PluginConfig};
@@ -144,9 +147,11 @@ pub fn resolve_plugin_name_with_search_dirs(
 
 /// Resolve a plugin `name` against the standard search path: env
 /// (`MURPHY_PLUGIN_PATH`), then `<project_root>/.murphy/plugins/`, then
-/// the user data dir (`dirs::data_dir()/murphy/plugins/`). `overrides`
-/// come from any `Detailed { name, path }` entries declared in the same
-/// `[[plugins]]` array.
+/// installed gems (`MURPHY_GEM_PATH` / `GEM_HOME` / `GEM_PATH`, the C2
+/// Bundler layer — see `crate::gem_discovery`), then the user data dir
+/// (`dirs::data_dir()/murphy/plugins/`). `overrides` come from any
+/// `Detailed { name, path }` entries declared in the same `[[plugins]]`
+/// array.
 ///
 /// The name is validated first ([`validate_plugin_name`]); invalid names
 /// are rejected before any I/O happens.
@@ -156,21 +161,50 @@ pub fn resolve_plugin_name(
     overrides: &BTreeMap<String, PathBuf>,
 ) -> Result<PathBuf, ConfigError> {
     validate_plugin_name(name)?;
-    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(pinned) = overrides.get(name) {
+        let path = normalize_pack_path(pinned)?;
+        return Ok(path);
+    }
+    // Layer 1: `MURPHY_PLUGIN_PATH` + project-local. A project-staged
+    // pack wins over the bundled gem (local rebuild shadows release).
+    let mut early_dirs: Vec<PathBuf> = Vec::new();
     if let Some(env) = std::env::var_os("MURPHY_PLUGIN_PATH") {
-        search_dirs.extend(std::env::split_paths(&env));
+        early_dirs.extend(std::env::split_paths(&env));
     }
-    search_dirs.push(project_root.join(".murphy/plugins"));
+    early_dirs.push(project_root.join(".murphy/plugins"));
+    // Empty overrides: already handled above, so pass an empty map to the
+    // pure helper (it would otherwise re-check the same pin).
+    let empty: BTreeMap<String, PathBuf> = BTreeMap::new();
+    if let Ok(hit) = resolve_plugin_name_with_search_dirs(name, &empty, &early_dirs) {
+        return Ok(hit);
+    }
+    // Layer 2 (C2 Bundler): installed gems. Wins over a stale user-global
+    // copy, loses to project-local staging above.
+    if let Some(gem_cdylib) = find_gem_pack(name) {
+        return Ok(gem_cdylib);
+    }
+    // Layer 3: user-local.
+    let mut late_dirs: Vec<PathBuf> = Vec::new();
     if let Some(data) = dirs::data_dir() {
-        search_dirs.push(data.join("murphy/plugins"));
+        late_dirs.push(data.join("murphy/plugins"));
     }
-    resolve_plugin_name_with_search_dirs(name, overrides, &search_dirs).map_err(|failure| {
-        ConfigError::PluginLoad(PluginLoadDiagnostic {
-            plugin_name: name.to_string(),
-            attempted_path: None,
-            kind: LoadKind::Resolve(failure),
-        })
-    })
+    if let Ok(hit) = resolve_plugin_name_with_search_dirs(name, &empty, &late_dirs) {
+        return Ok(hit);
+    }
+    // Miss everywhere: report every layer that was probed, gem dirs
+    // spliced between project-local and user-local to mirror the order.
+    let mut searched = early_dirs;
+    searched.extend(crate::gem_discovery::gem_gems_dirs());
+    searched.extend(late_dirs);
+    let failure = ResolveFailure {
+        filename: lib_filename(name),
+        searched_dirs: searched,
+    };
+    Err(ConfigError::PluginLoad(PluginLoadDiagnostic {
+        plugin_name: name.to_string(),
+        attempted_path: None,
+        kind: LoadKind::Resolve(failure),
+    }))
 }
 
 /// Pre-pass that turns a `[[plugins]]` array into the ordered `(name,
@@ -612,5 +646,135 @@ mod tests {
         let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
         assert_eq!(plan.len(), 1, "single load expected: {plan:?}");
         assert_eq!(plan[0].1, cdylib);
+    }
+
+    /// Write a gem-style pack `<gems>/<name>-<version>/` with a manifest +
+    /// cdylib. Returns the cdylib path. Shared helper for the C2 Bundler
+    /// layer tests below (ADR 0048).
+    fn write_gem_pack(gems: &Path, name: &str, version: &str) -> PathBuf {
+        let gem_dir = gems.join(format!("{name}-{version}"));
+        std::fs::create_dir_all(&gem_dir).expect("mkdir gem");
+        std::fs::write(
+            gem_dir.join(crate::plugin_manifest::MANIFEST_FILENAME),
+            format!(
+                "[plugin]\nname = \"{name}\"\nversion = \"{version}\"\nmurphy-api-version = 4\n"
+            ),
+        )
+        .expect("write manifest");
+        let arch = gem_dir.join("lib").join("linux-x86_64");
+        std::fs::create_dir_all(&arch).expect("mkdir lib/<arch>");
+        let cdylib = arch.join(lib_filename(name));
+        std::fs::write(&cdylib, b"").expect("write fake .so");
+        cdylib
+    }
+
+    #[test]
+    fn resolve_finds_gem_pack_via_murphy_gem_path() {
+        // C2 Bundler layer: `plugins = ["murphy-gem-pack"]` resolves from
+        // an installed gem when `MURPHY_GEM_PATH` points at its `gems/`
+        // dir, even with no project-local staging.
+        let _guard = crate::gem_discovery::lock_gem_env();
+        unsafe {
+            std::env::remove_var("MURPHY_PLUGIN_PATH");
+            std::env::remove_var("GEM_HOME");
+            std::env::remove_var("GEM_PATH");
+        }
+        let gems = tempfile::tempdir().expect("gems");
+        let cdylib = write_gem_pack(gems.path(), "murphy-gem-pack", "0.1.0");
+        unsafe {
+            std::env::set_var(crate::gem_discovery::GEM_PATH_ENV, gems.path());
+        }
+        let project = tempfile::tempdir().expect("project");
+        let got = resolve_plugin_name("murphy-gem-pack", project.path(), &BTreeMap::new())
+            .expect("gem pack must resolve");
+        assert_eq!(got, cdylib);
+        unsafe {
+            std::env::remove_var(crate::gem_discovery::GEM_PATH_ENV);
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_project_local_over_gem_pack() {
+        // Project-local `.murphy/plugins/` wins over the bundled gem so a
+        // local rebuild shadows the released version during development.
+        let _guard = crate::gem_discovery::lock_gem_env();
+        unsafe {
+            std::env::remove_var("MURPHY_PLUGIN_PATH");
+            std::env::remove_var("GEM_HOME");
+            std::env::remove_var("GEM_PATH");
+        }
+        let gems = tempfile::tempdir().expect("gems");
+        let _gem_cdylib = write_gem_pack(gems.path(), "murphy-gem-pack", "0.1.0");
+        unsafe {
+            std::env::set_var(crate::gem_discovery::GEM_PATH_ENV, gems.path());
+        }
+        let project = tempfile::tempdir().expect("project");
+        let staged = project.path().join(".murphy/plugins");
+        std::fs::create_dir_all(&staged).expect("mkdir staged");
+        let local = staged.join(lib_filename("murphy-gem-pack"));
+        std::fs::write(&local, b"").expect("write staged .so");
+        let got = resolve_plugin_name("murphy-gem-pack", project.path(), &BTreeMap::new())
+            .expect("must resolve");
+        assert_eq!(got, local);
+        unsafe {
+            std::env::remove_var(crate::gem_discovery::GEM_PATH_ENV);
+        }
+    }
+
+    #[test]
+    fn resolve_detailed_override_wins_over_gem_pack() {
+        // An explicit `Detailed { path }` pin wins over the gem layer.
+        let _guard = crate::gem_discovery::lock_gem_env();
+        unsafe {
+            std::env::remove_var("MURPHY_PLUGIN_PATH");
+            std::env::remove_var("GEM_HOME");
+            std::env::remove_var("GEM_PATH");
+        }
+        let gems = tempfile::tempdir().expect("gems");
+        let _gem_cdylib = write_gem_pack(gems.path(), "murphy-gem-pack", "0.1.0");
+        unsafe {
+            std::env::set_var(crate::gem_discovery::GEM_PATH_ENV, gems.path());
+        }
+        let project = tempfile::tempdir().expect("project");
+        let pinned_rel = PathBuf::from("./vendor.so");
+        std::fs::write(project.path().join("vendor.so"), b"").expect("write vendor.so");
+        let overrides: BTreeMap<String, PathBuf> = std::iter::once((
+            "murphy-gem-pack".to_string(),
+            project.path().join("vendor.so"),
+        ))
+        .collect();
+        let got = resolve_plugin_name("murphy-gem-pack", project.path(), &overrides)
+            .expect("must resolve");
+        assert_eq!(got, project.path().join("vendor.so"));
+        let _ = pinned_rel;
+        unsafe {
+            std::env::remove_var(crate::gem_discovery::GEM_PATH_ENV);
+        }
+    }
+
+    #[test]
+    fn plan_resolves_gem_pack_end_to_end() {
+        // `plan_plugin_loads` carries a gem-resolved `Name` entry through
+        // to the load plan (the registry path, not just the resolver).
+        let _guard = crate::gem_discovery::lock_gem_env();
+        unsafe {
+            std::env::remove_var("MURPHY_PLUGIN_PATH");
+            std::env::remove_var("GEM_HOME");
+            std::env::remove_var("GEM_PATH");
+        }
+        let gems = tempfile::tempdir().expect("gems");
+        let cdylib = write_gem_pack(gems.path(), "murphy-plan-gem", "1.2.0");
+        unsafe {
+            std::env::set_var(crate::gem_discovery::GEM_PATH_ENV, gems.path());
+        }
+        let project = tempfile::tempdir().expect("project");
+        let plugins = vec![PluginConfig::Name("murphy-plan-gem".to_string())];
+        let plan = plan_plugin_loads(project.path(), &plugins).expect("plan must succeed");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, "murphy-plan-gem");
+        assert_eq!(plan[0].1, cdylib);
+        unsafe {
+            std::env::remove_var(crate::gem_discovery::GEM_PATH_ENV);
+        }
     }
 }

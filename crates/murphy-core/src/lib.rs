@@ -28,6 +28,7 @@ mod discovery;
 pub mod dispatch;
 pub mod explain;
 mod fingerprint;
+pub mod gem_discovery;
 #[cfg(feature = "mruby-user-cops")]
 mod mruby;
 mod offense;
