@@ -155,7 +155,7 @@ fn final_line_content_range(
     let Ok(end) = usize::try_from(range.end) else {
         return None;
     };
-    let line_idx = line_of_offset(bytes, end.saturating_sub(1).max(0));
+    let line_idx = line_of_offset(bytes, end.saturating_sub(1));
     let mut offset = 0usize;
     let raw: Vec<&str> = src.split('\n').collect();
     if line_idx >= raw.len() {
