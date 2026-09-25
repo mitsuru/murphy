@@ -28,7 +28,17 @@
 //! `Proc.new` (receiver start to selector end). Autocorrect replaces it
 //! with `proc`.
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/Proc` inner send is
+// `(send (const {nil? cbase} :Proc) :new)` (zero args, send-only).
+// In Murphy `::Proc` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by pre-existing `flags_cbase_proc_new`). Namespaced
+// `Foo::Proc` still accepts (pinned by `boundary_accepts_namespaced_proc_new`).
+// `send` covers `Send` only (not `Csend`), matching the `Send`-only check
+// (pinned by `boundary_accepts_csend_proc_new`). Block extraction
+// (`block`/`numblock`/`itblock`) and offense-range logic stay hand-rolled.
+def_node_matcher!(proc_new, "(send (const nil? :Proc) :new)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -68,25 +78,17 @@ fn check_block_call(node: NodeId, cx: &Cx<'_>) {
         _ => return,
     };
 
-    // The call must be a Send with method `new`.
-    let NodeKind::Send { receiver, method, args } = *cx.kind(call) else {
-        return;
-    };
-    if cx.symbol_str(method) != "new" {
-        return;
-    }
-    // Must have no arguments to `new`.
-    if !cx.list(args).is_empty() {
+    // `(send (const nil? :Proc) :new)` (zero args, `Send` only).
+    // `nil?` covers `Proc` + `::Proc`; `send` excludes `Csend`.
+    if !proc_new(call, cx) {
         return;
     }
 
-    // Receiver must be `(const {nil? cbase} :Proc)`.
-    let Some(recv_id) = receiver.get() else {
+    // Receiver for the offense range (`Proc.new` span). Always present when
+    // the matcher above passes.
+    let Some(recv_id) = cx.call_receiver(call).get() else {
         return;
     };
-    if !cx.is_global_const(recv_id, "Proc") {
-        return;
-    }
 
     // Offense range: from the start of the receiver to the end of the
     // `new` selector. This covers exactly `Proc.new` (or `::Proc.new`).
@@ -144,6 +146,26 @@ mod tests {
             "},
             "f = proc { puts _1 }\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.6): pin the exact node set
+    // the hand-rolled `Proc` guard matches, so the verbatim
+    // `(send (const nil? :Proc) :new)` refactor can be proven equivalent.
+    // `::Proc` collapses to `Const{scope:None}` in Murphy: `nil?` covers
+    // bare + `::` (pinned by pre-existing `flags_cbase_proc_new`).
+    // Namespaced `Foo::Proc` still accepts; `&.` is a `csend` node and
+    // `send` covers `Send` only.
+
+    #[test]
+    fn boundary_accepts_namespaced_proc_new() {
+        // Upstream `(const {nil? cbase} :Proc)` matches top-level only.
+        test::<Proc>().expect_no_offenses("f = Foo::Proc.new { |x| x }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_proc_new() {
+        // `&.` is a `csend` node; `send` covers `Send` only.
+        test::<Proc>().expect_no_offenses("f = Proc&.new { |x| x }\n");
     }
 }
 murphy_plugin_api::submit_cop!(Proc);

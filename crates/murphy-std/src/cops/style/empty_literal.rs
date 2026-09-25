@@ -19,7 +19,22 @@
 //!   not flagged.
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/EmptyLiteral` heads are
+// `(send (const {nil? cbase} :Array) :new)`,
+// `(send (const {nil? cbase} :Hash) :new)`,
+// `(send (const {nil? cbase} :String) :new)` (zero args, send-only).
+// In Murphy `::Array` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_array_new`). Namespaced `Foo::Array`
+// etc. still accept (pinned by `boundary_accepts_namespaced_*`). `send`
+// covers `Send` only (not `Csend`, pinned by `boundary_accepts_csend_array_new`).
+// No-arg (no `...`), no-block, frozen-string-literal, and unparenthesized-arg
+// guards stay hand-rolled below.
+def_node_matcher!(
+    empty_literal_new,
+    "(send (const nil? {:Array :Hash :String}) :new)"
+);
 
 const ARR_MSG: &str = "Use array literal `[]` instead of `Array.new`.";
 const HASH_MSG: &str = "Use hash literal `{}` instead of `Hash.new`.";
@@ -38,28 +53,18 @@ pub struct EmptyLiteral;
 impl EmptyLiteral {
     #[on_node(kind = "send")]
     fn check(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if cx.symbol_str(method) != "new" {
+        // `(send (const nil? {:Array :Hash :String}) :new)` (zero args,
+        // `Send` only). `nil?` covers bare + `::`; `send` excludes `Csend`.
+        if !empty_literal_new(node, cx) {
             return;
         }
         let Some(recv) = cx.call_receiver(node).get() else {
             return;
         };
-        let NodeKind::Const { name, scope } = *cx.kind(recv) else {
+        let NodeKind::Const { name, .. } = *cx.kind(recv) else {
             return;
         };
-        if scope.get().is_some() {
-            // Only top-level constants (Array, Hash, String), not A::Array etc.
-            return;
-        }
         let const_name = cx.symbol_str(name);
-
-        // Must have no arguments.
-        if !cx.call_arguments(node).is_empty() {
-            return;
-        }
 
         // Skip if this call is the send-part of a block (Array.new { }, Hash.new { }).
         if parent_is_block_call(node, cx) {
@@ -235,6 +240,42 @@ mod tests {
     #[test]
     fn accepts_empty_hash_literal() {
         test::<EmptyLiteral>().expect_no_offenses("{}\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.6): pin the exact node set
+    // the hand-rolled `Array`/`Hash`/`String` guard matches, so the verbatim
+    // `(send (const nil? {:Array :Hash :String}) :new)` refactor can be
+    // proven equivalent. `::Array` collapses to `Const{scope:None}` in
+    // Murphy: `nil?` covers bare + `::`. Namespaced `Foo::Array` still
+    // accepts; `&.` is a `csend` node and `send` covers `Send` only.
+
+    #[test]
+    fn boundary_flags_cbase_array_new() {
+        test::<EmptyLiteral>().expect_offense(indoc! {"
+            x = ::Array.new
+                ^^^^^^^^^^^ Use array literal `[]` instead of `Array.new`.
+        "});
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_array_new() {
+        test::<EmptyLiteral>().expect_no_offenses("x = Foo::Array.new\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_hash_new() {
+        test::<EmptyLiteral>().expect_no_offenses("x = Foo::Hash.new\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_string_new() {
+        test::<EmptyLiteral>().expect_no_offenses("x = Foo::String.new\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_array_new() {
+        // `&.` is a `csend` node; `send` covers `Send` only.
+        test::<EmptyLiteral>().expect_no_offenses("x = Array&.new\n");
     }
 }
 
