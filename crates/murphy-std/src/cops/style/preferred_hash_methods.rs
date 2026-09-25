@@ -9,11 +9,17 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the `has_key?`/`has_value?`/`key?`/`value?` call head
+//!   `(call _ {:has_key? :has_value? :key? :value?} ...)` (murphy-s1yc.6):
+//!   `call` = `{send csend}` covers safe-navigation (`h&.has_key?`),
+//!   mirroring RuboCop's `alias on_csend on_send`; the `_` receiver binds an
+//!   absent (receiverless `has_key?(k)`) or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list (upstream's
+//!   `node.arguments.one?` guard and the EnforcedStyle filter apply
+//!   separately).
 //!   Ports both EnforcedStyle modes:
 //!     - short (default): flags `has_key?` and `has_value?`, suggests `key?` and `value?`.
 //!     - verbose: flags `key?` and `value?`, suggests `has_key?` and `has_value?`.
-//!   Requires exactly one argument (mirrors RuboCop's `node.arguments.one?` guard).
-//!   Both send and csend are handled (mirrors RuboCop's `alias on_csend on_send`).
 //!   Offense range and autocorrect target the selector only (loc.name).
 //!   Marked unsafe in RuboCop because the receiver may not actually be a Hash.
 //! ```
@@ -29,7 +35,19 @@
 //!
 //! Surgical rename of the selector (`loc.name`) only.
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// Verbatim port of the `has_key?`/`has_value?`/`key?`/`value?` call head
+// (murphy-s1yc.6):
+// `(call _ {:has_key? :has_value? :key? :value?} ...)` — `call` =
+// `{send csend}` covers safe-navigation (`h&.has_key?`); the `_` receiver
+// binds an absent (receiverless `has_key?(k)`) or present receiver; trailing
+// `...` absorbs any argument list, so the one-arg guard and the EnforcedStyle
+// filter below apply separately.
+def_node_matcher!(
+    preferred_hash_methods_call,
+    "(call _ {:has_key? :has_value? :key? :value?} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -64,26 +82,26 @@ const MSG: &str = "Use `Hash#%preferred%` instead of `Hash#%current%`.";
     options = PreferredHashMethodsOptions,
 )]
 impl PreferredHashMethods {
-    #[on_node(kind = "send", methods = ["has_key?", "has_value?", "key?", "value?"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(
-            cx.symbol_str(method),
-            "has_key?" | "has_value?" | "key?" | "value?"
-        ) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:has_key? :has_value? :key? :value?} ...)` head:
+    // filters to the four Hash-method calls on either `send` or `csend`
+    // (safe-navigation), with any receiver (absent or present). Trailing
+    // `...` matches any arg list, so the one-arg guard and the EnforcedStyle
+    // filter below apply separately.
+    if !preferred_hash_methods_call(node, cx) {
+        return;
+    }
     // Must have exactly one argument (mirrors RuboCop's `node.arguments.one?`).
     let args = match *cx.kind(node) {
         NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => args,
@@ -253,6 +271,45 @@ mod tests {
             "#},
             "h.value?(42)\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.6): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // `(call _ {:has_key? :has_value? :key? :value?} ...)` port can be proven
+    // byte-identical. `call` = `{send csend}` covers safe-navigation; `_`
+    // binds the absent (receiverless) slot per if9y; trailing `...` absorbs
+    // any arg list (the one-arg guard below applies separately, mirroring
+    // upstream's `node.arguments.one?`).
+
+    #[test]
+    fn s1yc6_flags_bare_has_key_corrects_to_key() {
+        // Bare `has_key?(:foo)` matches: `_` binds the nil-filled receiver.
+        test::<PreferredHashMethods>().expect_correction(
+            indoc! {r#"
+                has_key?(:foo)
+                ^^^^^^^^ Use `Hash#key?` instead of `Hash#has_key?`.
+            "#},
+            "key?(:foo)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc6_accepts_bare_key_in_short_mode() {
+        // Bare `key?(:foo)` in short mode: matcher matches, style filter rejects.
+        test::<PreferredHashMethods>().expect_no_offenses("key?(:foo)\n");
+    }
+
+    #[test]
+    fn s1yc6_accepts_bare_has_key_without_args() {
+        // No-arg bare `has_key?`: matcher `...` matches zero args,
+        // the one-arg guard rejects.
+        test::<PreferredHashMethods>().expect_no_offenses("has_key?\n");
+    }
+
+    #[test]
+    fn s1yc6_accepts_unrelated_method() {
+        // `h.foo(:foo)`: matcher rejects non-union method.
+        test::<PreferredHashMethods>().expect_no_offenses("h.foo(:foo)\n");
     }
 
     #[test]
