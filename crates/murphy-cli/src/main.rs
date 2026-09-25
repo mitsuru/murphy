@@ -888,7 +888,7 @@ struct DirectiveState {
     todo_cops: BTreeSet<String>,
     /// Next-line suppression from a full-line `# rubocop:disable-next` /
     /// `# rubocop:todo-next` on the immediately preceding line. `next_all`
-    /// covers a bare directive (or `all`); otherwise `next_cops` lists the
+    /// covers `all`; otherwise `next_cops` lists the
     /// suppressed cops (slashless entries match whole departments, mirroring
     /// `cop_set_matches`). Only the next line is affected.
     next_all: bool,
