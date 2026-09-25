@@ -477,154 +477,29 @@ submit_cop!(BulkChangeTable);
 // `OrderArguments` promoted to real cop in
 // `cops::rails::order_arguments`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/OrderById
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct OrderById;
-
-#[cop(
-    name = "Rails/OrderById",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl OrderById {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(OrderById);
+// `OrderById` promoted to real cop in
+// `cops::rails::order_by_id`.
 
 // `Output` is now a real cop in `cops::rails::output` — `pub use`d at
 // the crate root via the `use cops::rails::Output;` above so the
 // `register_cops!` ident below resolves unchanged.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/OutputSafety
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct OutputSafety;
-
-#[cop(
-    name = "Rails/OutputSafety",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl OutputSafety {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(OutputSafety);
+// `OutputSafety` promoted to real cop in
+// `cops::rails::output_safety`.
 
 // `Pick` is now a real cop in `cops::rails::pick` — `pub use`d at the
 // crate root via the `use cops::rails::{AssertNot, Output, Pick,
 // RequestReferer};` above so the `register_cops!` ident below resolves
 // unchanged.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/Pluck
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct Pluck;
+// `Pluck` promoted to real cop in
+// `cops::rails::pluck`.
 
-#[cop(
-    name = "Rails/Pluck",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl Pluck {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(Pluck);
+// `PluckId` promoted to real cop in
+// `cops::rails::pluck_id`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/PluckId
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct PluckId;
-
-#[cop(
-    name = "Rails/PluckId",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl PluckId {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(PluckId);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/PluckInWhere
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct PluckInWhere;
-
-#[cop(
-    name = "Rails/PluckInWhere",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl PluckInWhere {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(PluckInWhere);
+// `PluckInWhere` promoted to real cop in
+// `cops::rails::pluck_in_where`.
 
 /// ## RuboCop parity
 ///
