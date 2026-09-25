@@ -516,145 +516,20 @@ submit_cop!(BulkChangeTable);
 // `ReadWriteAttribute` promoted to real cop in
 // `cops::rails::read_write_attribute`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedirectBackOrTo
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedirectBackOrTo;
+// `RedirectBackOrTo` promoted to real cop in
+// `cops::rails::redirect_back_or_to`.
 
-#[cop(
-    name = "Rails/RedirectBackOrTo",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedirectBackOrTo {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedirectBackOrTo);
+// `RedundantActiveRecordAllMethod` promoted to real cop in
+// `cops::rails::redundant_active_record_all_method`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedundantActiveRecordAllMethod
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedundantActiveRecordAllMethod;
+// `RedundantAllowNil` promoted to real cop in
+// `cops::rails::redundant_allow_nil`.
 
-#[cop(
-    name = "Rails/RedundantActiveRecordAllMethod",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedundantActiveRecordAllMethod {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedundantActiveRecordAllMethod);
+// `RedundantForeignKey` promoted to real cop in
+// `cops::rails::redundant_foreign_key`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedundantAllowNil
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedundantAllowNil;
-
-#[cop(
-    name = "Rails/RedundantAllowNil",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedundantAllowNil {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedundantAllowNil);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedundantForeignKey
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedundantForeignKey;
-
-#[cop(
-    name = "Rails/RedundantForeignKey",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedundantForeignKey {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedundantForeignKey);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedundantPresenceValidationOnBelongsTo
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedundantPresenceValidationOnBelongsTo;
-
-#[cop(
-    name = "Rails/RedundantPresenceValidationOnBelongsTo",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedundantPresenceValidationOnBelongsTo {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedundantPresenceValidationOnBelongsTo);
+// `RedundantPresenceValidationOnBelongsTo` promoted to real cop in
+// `cops::rails::redundant_presence_validation_on_belongs_to`.
 
 /// ## RuboCop parity
 ///
