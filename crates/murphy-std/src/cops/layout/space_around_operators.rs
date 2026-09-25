@@ -832,7 +832,7 @@ mod tests {
     use super::{
         SpaceAroundOperators, SpaceAroundOperatorsBinaryStyle, SpaceAroundOperatorsOptions,
     };
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{indoc, test, test_with_options};
 
     // ---------- options surface (frozen v1 contract) ----------
 
@@ -862,12 +862,13 @@ mod tests {
 
     #[test]
     fn allow_for_alignment_false_flags_all_extra_spaces() {
-        test::<SpaceAroundOperators>()
-            .with_options(&SpaceAroundOperatorsOptions {
-                allow_for_alignment: false,
-                ..Default::default()
-            })
-            .expect_offense(indoc! {r#"
+        // murphy-ya1h: let-bind large opts so the header stays concise via
+        // the opts-taking entry point (`test_with_options`).
+        let opts = SpaceAroundOperatorsOptions {
+            allow_for_alignment: false,
+            ..Default::default()
+        };
+        test_with_options::<SpaceAroundOperators>(&opts).expect_offense(indoc! {r#"
                 x   = 1
                     ^ Operator `=` should be surrounded by a single space.
                 foo = 2

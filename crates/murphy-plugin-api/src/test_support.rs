@@ -272,6 +272,32 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
     }
 }
 
+/// Options-taking entry point for the tester-builder API (murphy-ya1h).
+///
+/// Rust has no function overloading, so the `test::<T>(&opts)` sketch from
+/// the issue lives here as a separate function instead of an overloaded
+/// `test`. When `opts` is large, `let`-bind it first so only the header
+/// stays concise:
+///
+/// ```ignore
+/// let opts = MyOpts { foo: true, ..Default::default() };
+/// test_with_options::<MyCop>(&opts)
+///     .expect_offense(indoc! {r#"
+///         …
+///     "#});
+/// ```
+///
+/// Equivalent to `test::<T>().with_options(opts)`; subsequent
+/// [`Tester::with_options`] calls overwrite the options set here.
+pub fn test_with_options<T: NodeCop + Default>(opts: &<T as Cop>::Options) -> Tester<T> {
+    Tester {
+        options_json: opts.to_config_json(),
+        context: crate::AllCopsContext::default(),
+        file_path: DEFAULT_TEST_FILE_PATH.to_string(),
+        _phantom: PhantomData,
+    }
+}
+
 /// File path threaded into `Cx::file_path()` for cop tests that do not
 /// override it via [`Tester::with_file_path`]. Matches the path the
 /// translator stamps on the test AST so existing tests keep their
@@ -2250,5 +2276,45 @@ mod tests {
         super::test::<OptionAwareCop>()
             .with_options(&ToggleOptions { emit: true })
             .expect_offense("abc\n");
+    }
+
+    #[test]
+    fn test_with_options_drives_non_default_branch() {
+        // murphy-ya1h: opts-taking entry point. Equivalent to
+        // `test::<T>().with_options(&opts)` but keeps the header concise
+        // when `opts` is let-bound (friction #3 in the issue).
+        super::test_with_options::<OptionAwareCop>(&ToggleOptions { emit: true }).expect_offense(
+            "abc\n\
+                 ^^^ toggle\n",
+        );
+    }
+
+    #[test]
+    fn test_with_options_default_struct_stays_silent() {
+        super::test_with_options::<OptionAwareCop>(&ToggleOptions { emit: false })
+            .expect_no_offenses("abc\n")
+            .expect_no_corrections("abc\n");
+    }
+
+    #[test]
+    fn test_with_options_chains_multiple_expectations() {
+        super::test_with_options::<OptionAwareCop>(&ToggleOptions { emit: true })
+            .expect_offense(
+                "abc\n\
+                 ^^^ toggle\n",
+            )
+            .expect_correction(
+                "abc\n\
+                 ^^^ toggle\n",
+                "xyz\n",
+            );
+    }
+
+    #[test]
+    fn test_with_options_can_be_overwritten_by_with_options() {
+        // Later `with_options` wins over the entry-point options.
+        super::test_with_options::<OptionAwareCop>(&ToggleOptions { emit: true })
+            .with_options(&ToggleOptions { emit: false })
+            .expect_no_offenses("abc\n");
     }
 }
