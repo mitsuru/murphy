@@ -107,6 +107,13 @@ pub struct OptionSpec {
 unsafe impl Sync for OptionSpec {}
 
 /// `#[repr(C)]` offense payload passed to [`FnTable::emit_offense`].
+///
+/// ABI constraint (murphy-e7bz.41.2): this struct's layout is frozen and
+/// `MURPHY_PLUGIN_ABI_VERSION` is NOT bumped for no-location support.
+/// No-location is encoded as `range == Range::NO_LOCATION` reusing the
+/// existing `range` field, so `size_of`/`offset_of` are unchanged. Cops
+/// must use `Cx::emit_file_offense` (not `Range::ZERO`) for filepath-only
+/// findings; the host decodes `NO_LOCATION` into a locationless offense.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawOffense {
@@ -114,11 +121,19 @@ pub struct RawOffense {
     pub cop_name: RawSlice,
     /// Human-readable offense message.
     pub message: RawSlice,
-    /// Source byte range of the offense.
+    /// Source byte range of the offense, or [`Range::NO_LOCATION`] for a
+    /// filepath-only offense with no source location.
     pub range: Range,
     /// Severity wire byte (see [`Severity::to_wire`](crate::Severity::to_wire));
     /// `SEVERITY_UNSET` defers to the host default.
     pub severity: u8,
+}
+
+impl RawOffense {
+    /// `true` iff this is a filepath-only offense with no source location.
+    pub fn is_no_location(&self) -> bool {
+        self.range.is_no_location()
+    }
 }
 
 /// `#[repr(C)]` autocorrect edit passed to [`FnTable::emit_edit`].
@@ -390,6 +405,10 @@ pub struct CxRaw {
 /// lockstep for murphy-zpgm; it grows `size_of::<CxRaw>()` (a pointer+len do
 /// not fit the trailing padding). Per project policy the numeric ABI is not
 /// bumped for tail-appended CxRaw fields.
+///
+/// `RawOffense` no-location support (murphy-e7bz.41.2) reuses the existing
+/// `range` field as `Range::NO_LOCATION`; no field is added and the numeric
+/// ABI stays at 4 by explicit project policy (no bump without approval).
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.

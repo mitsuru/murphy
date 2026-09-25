@@ -96,3 +96,59 @@ fn sample_offense() -> Offense {
         "Remove debugger entry point `debugger`.",
     )
 }
+
+#[test]
+fn json_omits_range_for_no_location_offense() {
+    let located = sample_offense();
+    let file_only = Offense::new_without_location(
+        "whitelist.rb",
+        "Naming/InclusiveLanguage",
+        Severity::Warning,
+        "Consider replacing 'whitelist' in file path.",
+    );
+
+    let output = format_lint_output(
+        &[located, file_only],
+        &["dirty.rb".to_string()],
+        OutputFormat::Json,
+    )
+    .expect("format json");
+    let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+
+    // Ordinary offense keeps its fabricated-free real range.
+    assert_eq!(parsed[0]["range"]["start_offset"], 0);
+    assert_eq!(parsed[0]["range"]["end_offset"], 8);
+    // Filepath-only offense serializes without a fabricated range.
+    assert!(
+        parsed[1].as_object().unwrap().get("range").is_none(),
+        "no-location offense must omit `range` from JSON"
+    );
+    assert_eq!(parsed[1]["cop_name"], "Naming/InclusiveLanguage");
+}
+
+#[test]
+fn human_omits_line_column_for_no_location_offense() {
+    let located = sample_offense();
+    let file_only = Offense::new_without_location(
+        "whitelist.rb",
+        "Naming/InclusiveLanguage",
+        Severity::Warning,
+        "Consider replacing 'whitelist' in file path.",
+    );
+
+    let output = format_lint_output(
+        &[located, file_only],
+        &["dirty.rb".to_string(), "whitelist.rb".to_string()],
+        OutputFormat::Human,
+    )
+    .expect("format human");
+
+    // Ordinary offense keeps `file:line:col:`.
+    assert!(output.contains("dirty.rb:1:1: C: Lint/Debugger"));
+    // Filepath-only offense renders without a fabricated `1:1`.
+    assert!(output.contains("whitelist.rb: C: Naming/InclusiveLanguage: Consider replacing"));
+    assert!(
+        !output.contains("whitelist.rb:1:1:"),
+        "no-location offense must not fabricate a 1:1 range"
+    );
+}

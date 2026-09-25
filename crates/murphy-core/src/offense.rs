@@ -40,6 +40,31 @@ impl Range {
             end_offset: loc.end_offset() as u32,
         }
     }
+
+    /// No-location sentinel for filepath-only offenses (murphy-e7bz.41.2).
+    ///
+    /// Mirrors `murphy_ast::Range::NO_LOCATION` (`u32::MAX`/`u32::MAX`).
+    /// A real source range can never hold this value: `parse()` rejects
+    /// sources longer than `u32::MAX` bytes. Distinct from `{0, 0}` so a
+    /// locationless finding is never rendered as line 1 / column 1.
+    pub const NO_LOCATION: Range = Range {
+        start_offset: u32::MAX,
+        end_offset: u32::MAX,
+    };
+
+    /// `true` iff this is the [`Range::NO_LOCATION`] sentinel.
+    ///
+    /// Takes `&self` (not `self`) so it can be used directly as a serde
+    /// `skip_serializing_if` predicate.
+    pub fn is_no_location(&self) -> bool {
+        *self == Self::NO_LOCATION
+    }
+
+    /// [`Range::NO_LOCATION`], as a `fn` so it can be used as a serde
+    /// `default` for a missing `range` key.
+    pub fn no_location() -> Range {
+        Self::NO_LOCATION
+    }
 }
 
 /// How serious an offense is.
@@ -119,7 +144,14 @@ pub struct Offense {
     pub file: String,
     /// Fully-qualified cop name, e.g. `Lint/Debugger`.
     pub cop_name: String,
-    /// The offending source span (byte offsets).
+    /// The offending source span (byte offsets), or [`Range::NO_LOCATION`]
+    /// for a filepath-only offense with no source location
+    /// (murphy-e7bz.41.2). Absent from JSON when no-location, so no
+    /// fabricated range is ever serialized.
+    #[serde(
+        skip_serializing_if = "Range::is_no_location",
+        default = "Range::no_location"
+    )]
     pub range: Range,
     /// Severity of the offense.
     pub severity: Severity,
@@ -166,6 +198,42 @@ impl Offense {
     pub fn with_autocorrect(mut self, ac: Autocorrect) -> Offense {
         self.autocorrect = Some(ac);
         self
+    }
+
+    /// Construct a filepath-only [`Offense`] with no source location
+    /// (murphy-e7bz.41.2).
+    ///
+    /// The `range` field holds [`Range::NO_LOCATION`]; JSON omits the key
+    /// and human output renders without `line:column`, so no fabricated
+    /// `1:1` ever appears. A file offense never carries autocorrect edits.
+    pub fn new_without_location(
+        file: &str,
+        cop_name: &str,
+        severity: Severity,
+        message: &str,
+    ) -> Offense {
+        Offense {
+            file: file.into(),
+            cop_name: cop_name.into(),
+            range: Range::NO_LOCATION,
+            severity,
+            message: message.into(),
+            autocorrect: None,
+        }
+    }
+
+    /// `true` iff this is a filepath-only offense with no source location.
+    pub fn has_location(&self) -> bool {
+        !self.range.is_no_location()
+    }
+
+    /// The source span when located, or `None` for a filepath-only offense.
+    pub fn location(&self) -> Option<Range> {
+        if self.range.is_no_location() {
+            None
+        } else {
+            Some(self.range)
+        }
     }
 }
 
@@ -251,5 +319,66 @@ mod tests {
             j.as_object().unwrap().get("autocorrect").is_none(),
             "\"autocorrect\" key must be absent from JSON when there is no fix"
         );
+    }
+
+    #[test]
+    fn no_location_offense_omits_range_from_json() {
+        let o = Offense::new_without_location(
+            "whitelist.rb",
+            "Naming/InclusiveLanguage",
+            Severity::Warning,
+            "Consider replacing 'whitelist' in file path.",
+        );
+        assert!(!o.has_location());
+        assert_eq!(o.location(), None);
+
+        let j: serde_json::Value = serde_json::to_value(&o).unwrap();
+        assert!(
+            j.as_object().unwrap().get("range").is_none(),
+            "\"range\" key must be absent from JSON for a no-location offense"
+        );
+
+        let round_tripped: Offense = serde_json::from_value(j.clone()).unwrap();
+        assert_eq!(round_tripped, o);
+        assert!(!round_tripped.has_location());
+    }
+
+    #[test]
+    fn located_offense_keeps_range_in_json() {
+        let o = Offense::new(
+            "a.rb",
+            "Lint/Debugger",
+            Range {
+                start_offset: 0,
+                end_offset: 8,
+            },
+            Severity::Warning,
+            "Remove debugger entry point `debugger`.",
+        );
+        assert!(o.has_location());
+        assert_eq!(
+            o.location(),
+            Some(Range {
+                start_offset: 0,
+                end_offset: 8,
+            })
+        );
+
+        let j: serde_json::Value = serde_json::to_value(&o).unwrap();
+        assert_eq!(j["range"]["start_offset"], 0);
+        assert_eq!(j["range"]["end_offset"], 8);
+    }
+
+    #[test]
+    fn missing_range_key_deserializes_to_no_location() {
+        let j = serde_json::json!({
+            "file": "whitelist.rb",
+            "cop_name": "Naming/InclusiveLanguage",
+            "severity": "warning",
+            "message": "Consider replacing 'whitelist' in file path."
+        });
+        let o: Offense = serde_json::from_value(j).unwrap();
+        assert_eq!(o.range, Range::NO_LOCATION);
+        assert!(!o.has_location());
     }
 }

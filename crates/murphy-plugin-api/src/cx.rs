@@ -3497,6 +3497,11 @@ impl<'a> Cx<'a> {
 
     /// Record an offense. `cop_name` is stamped from the `CxRaw` the host
     /// built for the running cop.
+    ///
+    /// `range` may be [`Range::NO_LOCATION`] for a filepath-only finding;
+    /// prefer [`Cx::emit_file_offense`] for that case so the no-location
+    /// intent is explicit. Never use [`Range::ZERO`] for filepath offenses:
+    /// `ZERO` is a located empty range at file start and renders as `1:1`.
     pub fn emit_offense(&self, range: Range, message: &str, severity: Option<crate::Severity>) {
         let offense = crate::RawOffense {
             cop_name: self.raw.cop_name,
@@ -3512,6 +3517,18 @@ impl<'a> Cx<'a> {
         // message slice outlives this synchronous call.
         let fns = unsafe { &*self.raw.fns };
         unsafe { (fns.emit_offense)(self.raw.sink, &offense) };
+    }
+
+    /// Record a filepath-only offense with no source location
+    /// (murphy-e7bz.41.2).
+    ///
+    /// Encoded on the wire as `range == Range::NO_LOCATION` reusing the
+    /// existing `RawOffense.range` field, so the plugin ABI layout and
+    /// `MURPHY_PLUGIN_ABI_VERSION` are unchanged. The host renders and
+    /// serializes the offense without a fabricated source range or
+    /// line/column. A file offense never carries autocorrect edits.
+    pub fn emit_file_offense(&self, message: &str, severity: Option<crate::Severity>) {
+        self.emit_offense(Range::NO_LOCATION, message, severity);
     }
 
     /// Record an autocorrect edit. Offense↔edit correlation is the host's
@@ -5255,6 +5272,61 @@ mod tests {
             s.edits,
             vec![(Range { start: 7, end: 10 }, "false".to_string())]
         );
+    }
+
+    #[test]
+    fn emit_file_offense_uses_no_location_sentinel() {
+        let (ast, _root) = fixture();
+        let fns = FnTable {
+            emit_offense: record_offense,
+            emit_edit: record_edit,
+        };
+        let sink = RefCell::new(Sink {
+            offenses: Vec::new(),
+            edits: Vec::new(),
+        });
+
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.cop_name = RawSlice::from_str("Naming/InclusiveLanguage");
+        raw.sink = &sink as *const _ as *mut std::ffi::c_void;
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        cx.emit_file_offense("filepath hit", None);
+
+        let s = sink.borrow();
+        assert_eq!(s.offenses.len(), 1);
+        assert_eq!(s.offenses[0].0, "Naming/InclusiveLanguage");
+        assert_eq!(s.offenses[0].1, "filepath hit");
+        assert_eq!(s.offenses[0].2, Range::NO_LOCATION);
+        assert!(s.offenses[0].2.is_no_location());
+        // NO_LOCATION is distinct from ZERO so no fabricated 1:1 appears.
+        assert_ne!(s.offenses[0].2, Range::ZERO);
+    }
+
+    #[test]
+    fn ordinary_offense_range_is_preserved() {
+        let (ast, root) = fixture();
+        let fns = FnTable {
+            emit_offense: record_offense,
+            emit_edit: record_edit,
+        };
+        let sink = RefCell::new(Sink {
+            offenses: Vec::new(),
+            edits: Vec::new(),
+        });
+
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.cop_name = RawSlice::from_str("Plugin/Demo");
+        raw.sink = &sink as *const _ as *mut std::ffi::c_void;
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range(root);
+        cx.emit_offense(range, "located", None);
+
+        let s = sink.borrow();
+        assert_eq!(s.offenses.len(), 1);
+        assert_eq!(s.offenses[0].2, range);
+        assert!(!s.offenses[0].2.is_no_location());
     }
 
     #[test]

@@ -785,10 +785,31 @@ fn indent_block(s: &str) -> String {
 pub struct CapturedOffense {
     pub cop_name: String,
     pub message: String,
+    /// Source range, or [`Range::NO_LOCATION`] for a filepath-only offense
+    /// with no source location (murphy-e7bz.41.2). Use
+    /// [`CapturedOffense::has_location`] / [`CapturedOffense::location`]
+    /// rather than comparing against [`Range::ZERO`]: `ZERO` is a located
+    /// empty range at file start, never a no-location marker.
     pub range: Range,
     /// `None` when the cop didn't override (host applies its default);
     /// otherwise the cop's declared severity.
     pub severity: Option<Severity>,
+}
+
+impl CapturedOffense {
+    /// `true` iff this offense carries a source location.
+    pub fn has_location(&self) -> bool {
+        !self.range.is_no_location()
+    }
+
+    /// The source range when located, or `None` for a filepath-only offense.
+    pub fn location(&self) -> Option<Range> {
+        if self.range.is_no_location() {
+            None
+        } else {
+            Some(self.range)
+        }
+    }
 }
 
 /// One autocorrect edit captured by [`run_cop_with_edits`].
