@@ -7,8 +7,8 @@ from the existing autocorrect edits plus range-selected re-lint.
 
 ## Start
 
-```console
-$ murphy lsp
+```bash
+murphy lsp
 ```
 
 The server speaks LSP over stdin/stdout (`Content-Length` framing).
