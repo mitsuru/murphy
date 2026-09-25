@@ -16,7 +16,27 @@
 //!   unsafe autocorrection to `exception: false`.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// RuboCop parity: `Lint/SuppressedExceptionInNumberConversion`
+// `constructor_receiver?` = `{nil? (const {nil? cbase} :Kernel)}` and
+// `numeric_method?` = `(call #constructor_receiver? {:Integer :BigDecimal
+// :Complex :Rational | :Float} ...)` (arity in pattern: others `_ _?`,
+// Float `_`). In Murphy `::Kernel` collapses to `Const{scope:None}`: `nil?`
+// covers bare + `::` for `Kernel` (pinned by `boundary_flags_cbase_kernel_integer`;
+// namespaced `Foo::Kernel` still accepts, pinned by
+// `boundary_accepts_namespaced_kernel_integer`). `call` covers both `Send`
+// and `Csend` (pinned by `boundary_flags_csend_kernel_integer` + pre-existing
+// `::Kernel&.Float`). Arity (`Float` 1, others 1|2) and `exception: false`
+// guards stay hand-rolled below.
+def_node_matcher!(
+    numeric_bare,
+    "(call nil? {:Integer :BigDecimal :Complex :Rational :Float} ...)"
+);
+def_node_matcher!(
+    numeric_kernel,
+    "(call (const nil? :Kernel) {:Integer :BigDecimal :Complex :Rational :Float} ...)"
+);
 
 const MSG_TEMPLATE_PREFIX: &str = "Use `";
 const EXPECTED_EXCEPTION_CLASSES: &[&str] = &["ArgumentError", "TypeError"];
@@ -138,24 +158,17 @@ fn const_name<'a>(node: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
 }
 
 fn is_numeric_constructor_call(node: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Send { receiver, method, args } => {
-            constructor_receiver(receiver.get(), cx)
-                && numeric_constructor_arity(cx.symbol_str(method), cx.list(args), cx)
-        }
-        NodeKind::Csend { receiver, method, args } => {
-            constructor_receiver(Some(receiver), cx)
-                && numeric_constructor_arity(cx.symbol_str(method), cx.list(args), cx)
-        }
-        _ => false,
+    // `(call nil? {...} ...)` (bare) or `(call (const nil? :Kernel) {...} ...)`
+    // (`Kernel` / `::Kernel`, top-level only). `call` covers `Send` + `Csend`.
+    if !numeric_bare(node, cx) && !numeric_kernel(node, cx) {
+        return false;
     }
-}
-
-fn constructor_receiver(receiver: Option<NodeId>, cx: &Cx<'_>) -> bool {
-    match receiver {
-        None => true,
-        Some(receiver) => cx.is_global_const(receiver, "Kernel"),
-    }
+    // Arity + `exception: false` guards stay hand-rolled (preserving the
+    // exact `Float` 1-arg vs others 1|2-arg contract).
+    let Some(method) = cx.method_name(node) else {
+        return false;
+    };
+    numeric_constructor_arity(method, cx.call_arguments(node), cx)
 }
 
 fn numeric_constructor_arity(method: &str, args: &[NodeId], cx: &Cx<'_>) -> bool {
@@ -324,6 +337,47 @@ mod tests {
                 "#},
                 "::Kernel&.Float(arg, exception: false)\n",
             );
+    }
+
+    // --- Boundary characterization (murphy-ft88.6): pin the exact node set
+    // the hand-rolled `Kernel` guard matches, so the verbatim
+    // `(call nil? ...)` / `(call (const nil? :Kernel) ...)` refactor can be
+    // proven equivalent. `::Kernel` collapses to `Const{scope:None}` in
+    // Murphy: `nil?` covers bare + `::`. Namespaced `Foo::Kernel` still
+    // accepts; `call` covers both `Send` and `Csend` (unlike `send`-only
+    // cops), so `Kernel&.Integer` still flags.
+
+    #[test]
+    fn boundary_flags_cbase_kernel_integer() {
+        test::<SuppressedExceptionInNumberConversion>().expect_correction(
+            indoc! {r#"
+                ::Kernel.Integer(arg) rescue nil
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `::Kernel.Integer(arg, exception: false)` instead.
+            "#},
+            "::Kernel.Integer(arg, exception: false)\n",
+        );
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_kernel_integer() {
+        // Upstream `(const {nil? cbase} :Kernel)` matches top-level only.
+        test::<SuppressedExceptionInNumberConversion>().expect_no_offenses(
+            "Foo::Kernel.Integer(arg) rescue nil\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_csend_kernel_integer() {
+        // `call` covers `Csend` as well as `Send`, so safe-nav still flags
+        // (pre-existing `::Kernel&.Float` also pins this; this pins the
+        // non-cbase `Kernel&.` form).
+        test::<SuppressedExceptionInNumberConversion>().expect_correction(
+            indoc! {r#"
+                Kernel&.Integer(arg) rescue nil
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Kernel&.Integer(arg, exception: false)` instead.
+            "#},
+            "Kernel&.Integer(arg, exception: false)\n",
+        );
     }
 
     #[test]
