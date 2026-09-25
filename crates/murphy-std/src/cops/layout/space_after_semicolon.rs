@@ -6,11 +6,9 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAfterSemicolon
-//! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-rwi3
-//!   - murphy-ilrx
+//! upstream_version_checked: 1.87.0
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `SpaceAfterPunctuation` mixin for the semicolon token:
 //!   an offense fires when `;` is immediately followed (same line, adjacent
@@ -18,24 +16,19 @@
 //!   Allowed following tokens (no offense) match RuboCop's `allowed_type?`
 //!   (`tRPAREN`/`tRBRACK`/`tPIPE`/`tSTRING_DEND`): `)`, `]`, `|`, and the
 //!   string-interpolation-end `}` of `#{...}`. A regular hash/block `}` is NOT
-//!   in `allowed_type?`, so `;}` IS flagged — matching RuboCop's default
+//!   in `allowed_type?`, so `;}` IS flagged under RuboCop's default
 //!   (`SpaceInsideBlockBraces: space`). A run of semicolons (`;;`) is accepted
 //!   between the pair, mirroring `semicolon_sequence?`.
 //!
-//!   murphy-rwi3 (ABI blocker, not a cop-level fix): RuboCop additionally
-//!   suppresses the regular-`}` offense when `Layout/SpaceInsideBlockBraces` is
-//!   configured `EnforcedStyle: no_space`, by reading that *sibling* cop's
-//!   `cop_config` at runtime. Murphy's plugin ABI exposes only the running
-//!   cop's OWN resolved config (`cx.options_json`, set from
-//!   `config.cop_options_json(self_name)` in dispatch) — there is no surface to
-//!   read another cop's config. Honouring it requires a new `CxRaw`
-//!   sibling-config field (an ABI change — `CxRaw` offsets are pinned by
-//!   `offset_of!` assertions) or host-side baking of the sibling style into
-//!   this cop's `options_json` (a murphy-core config-contract change). Both lie
-//!   outside the murphy-std single-surface boundary and need sign-off, so this
-//!   stays documented and unported. Murphy always flags `;}`, matching
-//!   RuboCop's default (`SpaceInsideBlockBraces: space`); only a non-default
-//!   `no_space` sibling config diverges.
+//!   Cross-cop `space_required_before?` (murphy-rwi3, murphy-ilrx, option 2,
+//!   no ABI bump): RuboCop suppresses the regular-`}` offense when
+//!   `Layout/SpaceInsideBlockBraces` is `EnforcedStyle: no_space`
+//!   (`space_style_before_rcurly` / `space_forbidden_before_rcurly?`). The host
+//!   bakes that sibling style into this cop's `options_json` as
+//!   `SpaceInsideBlockBracesEnforcedStyle` (`config.cop_options_json`
+//!   contract); the cop reads it via `SpaceAfterSemicolonOptions` and exempts
+//!   a regular `}` (`RightBrace`) only under `no_space`. Default (`{}` when
+//!   unconfigured) is `space`, preserving the default-config behavior.
 //! ```
 //!
 //! ## Matched shape
@@ -49,27 +42,59 @@
 //! - `;;` — consecutive semicolons (`semicolon_sequence?`).
 //! - `;)`, `;]`, `;|` — next token is a closing paren / bracket / pipe.
 //! - `";#{x;}"` — next token is the interpolation-end `}` (`tSTRING_DEND`).
-//!   A *regular* hash/block `}` (`;}`) IS flagged (RuboCop default).
+//!   A *regular* hash/block `}` (`;}`) IS flagged under the default
+//!   (`SpaceInsideBlockBraces: space`) and accepted only when that sibling
+//!   cop is `EnforcedStyle: no_space` (host-baked, murphy-ilrx).
 //!
 //! ## Autocorrect
 //!
 //! Inserts a single space immediately after the semicolon.
 
-use murphy_plugin_api::{Cx, Range, SourceToken, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, Range, SourceToken, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct SpaceAfterSemicolon;
+
+/// Host-baked sibling style for [`SpaceAfterSemicolon`].
+///
+/// The host resolves `Layout/SpaceInsideBlockBraces.EnforcedStyle`
+/// (`for_cop`, fallback `"space"`) and bakes it into this cop's
+/// `options_json` as `SpaceInsideBlockBracesEnforcedStyle` (murphy-ilrx,
+/// option 2 — no `CxRaw` change, no ABI bump). `space` (default) requires a
+/// space before a regular `}` (`;}` is flagged); `no_space` exempts it.
+#[derive(CopOptions)]
+pub struct SpaceAfterSemicolonOptions {
+    #[option(
+        name = "SpaceInsideBlockBracesEnforcedStyle",
+        default = "space",
+        description = "Baked Layout/SpaceInsideBlockBraces EnforcedStyle; no_space exempts `;}`."
+    )]
+    pub space_inside_block_braces_enforced_style: BlockBracesSiblingStyle,
+}
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockBracesSiblingStyle {
+    #[option(value = "space")]
+    Space,
+    #[option(value = "no_space")]
+    NoSpace,
+}
 
 #[cop(
     name = "Layout/SpaceAfterSemicolon",
     description = "Flag a semicolon that is not followed by a space.",
     default_severity = "warning",
     default_enabled = true,
+    options = SpaceAfterSemicolonOptions,
 )]
 impl SpaceAfterSemicolon {
     #[on_new_investigation]
     fn investigate(&self, cx: &Cx<'_>) {
+        let sibling_no_space = cx
+            .options_or_default::<SpaceAfterSemicolonOptions>()
+            .space_inside_block_braces_enforced_style
+            == BlockBracesSiblingStyle::NoSpace;
         let toks = cx.sorted_tokens();
         // A `;` that is the entire content of a string/symbol literal is an
         // `Other` `b";"` token but not a separator; skip those (see
@@ -109,8 +134,9 @@ impl SpaceAfterSemicolon {
             }
 
             // `space_required_before?` — closing delimiters / pipe are allowed
-            // to abut a semicolon.
-            if allowed_following(cx, token2) {
+            // to abut a semicolon; a regular `}` is additionally allowed when
+            // the baked sibling style is `no_space` (murphy-ilrx).
+            if allowed_following(cx, token2, sibling_no_space) {
                 continue;
             }
 
@@ -131,17 +157,19 @@ fn is_semicolon(cx: &Cx<'_>, token: SourceToken) -> bool {
     token.kind == SourceTokenKind::Other && cx.raw_source(token.range) == ";"
 }
 
-/// Mirrors RuboCop's `allowed_type?` (`%i[tRPAREN tRBRACK tPIPE tSTRING_DEND]`):
-/// a following `)`, `]`, `|`, or string-interpolation-end `}` (`#{...}`) is
-/// allowed to abut a semicolon. A *regular* hash/block `}` is NOT in
-/// `allowed_type?`; under RuboCop's default (`SpaceInsideBlockBraces: space`)
-/// `;}` IS flagged, so we do not blanket-allow `RightBrace`. The
-/// interpolation-end `}` tokenizes as `Other` (per token-api.md), so the
-/// `Other => "}"` arm catches exactly that case and leaves regular `}`
-/// (`RightBrace`) to be flagged.
-fn allowed_following(cx: &Cx<'_>, token: SourceToken) -> bool {
+/// Mirrors RuboCop's `space_required_before?`: `allowed_type?`
+/// (`%i[tRPAREN tRBRACK tPIPE tSTRING_DEND]`) plus the sibling-gated rcurly
+/// exemption (`token.right_curly_brace? && space_forbidden_before_rcurly?`).
+/// A following `)`, `]`, `|`, or string-interpolation-end `}` (`#{...}`) is
+/// always allowed. A *regular* hash/block `}` (`RightBrace`) is allowed only
+/// when the baked `SpaceInsideBlockBraces` style is `no_space`; under the
+/// default (`space`) `;}` IS flagged. The interpolation-end `}` tokenizes as
+/// `Other` (per token-api.md), so the `Other => "}"` arm catches exactly
+/// that case while `RightBrace` goes through the sibling gate.
+fn allowed_following(cx: &Cx<'_>, token: SourceToken, sibling_no_space: bool) -> bool {
     match token.kind {
         SourceTokenKind::RightParen => true,
+        SourceTokenKind::RightBrace => sibling_no_space,
         SourceTokenKind::Other => {
             matches!(cx.raw_source(token.range), "]" | "|" | "}")
         }
@@ -151,7 +179,9 @@ fn allowed_following(cx: &Cx<'_>, token: SourceToken) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::SpaceAfterSemicolon;
+    use super::{
+        BlockBracesSiblingStyle, SpaceAfterSemicolon, SpaceAfterSemicolonOptions,
+    };
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -269,6 +299,54 @@ mod tests {
     #[test]
     fn leaves_clean_program_without_corrections() {
         test::<SpaceAfterSemicolon>().expect_no_corrections("a = 1; b = 2\n");
+    }
+
+    // ── murphy-ilrx: host-baked Layout/SpaceInsideBlockBraces.EnforcedStyle ──
+
+    #[test]
+    fn options_default_is_space() {
+        let d = SpaceAfterSemicolonOptions::default();
+        assert_eq!(
+            d.space_inside_block_braces_enforced_style,
+            BlockBracesSiblingStyle::Space
+        );
+    }
+
+    #[test]
+    fn accepts_semicolon_before_regular_brace_under_no_space_sibling_style() {
+        // RuboCop `space_forbidden_before_rcurly?`: `;}` is exempt when the
+        // sibling cop is `EnforcedStyle: no_space` (host-baked).
+        test::<SpaceAfterSemicolon>()
+            .with_options(&SpaceAfterSemicolonOptions {
+                space_inside_block_braces_enforced_style: BlockBracesSiblingStyle::NoSpace,
+            })
+            .expect_no_offenses("foo { x = 1;}\n");
+    }
+
+    #[test]
+    fn flags_semicolon_before_regular_brace_under_explicit_space_style() {
+        // Explicit `space` behaves like the default: `;}` is flagged.
+        test::<SpaceAfterSemicolon>()
+            .with_options(&SpaceAfterSemicolonOptions {
+                space_inside_block_braces_enforced_style: BlockBracesSiblingStyle::Space,
+            })
+            .expect_offense(indoc! {r#"
+                foo { x = 1;}
+                           ^ Space missing after semicolon.
+            "#});
+    }
+
+    #[test]
+    fn no_space_style_still_flags_ordinary_missing_space() {
+        // The sibling gate only affects a regular `}`; `;y` still fires.
+        test::<SpaceAfterSemicolon>()
+            .with_options(&SpaceAfterSemicolonOptions {
+                space_inside_block_braces_enforced_style: BlockBracesSiblingStyle::NoSpace,
+            })
+            .expect_offense(indoc! {r#"
+                x = 1;y = 2
+                     ^ Space missing after semicolon.
+            "#});
     }
 }
 

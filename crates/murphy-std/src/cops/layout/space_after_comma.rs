@@ -5,54 +5,82 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAfterComma
-//! upstream_version_checked: master
-//! status: partial
-//! gap_issues:
-//!   - murphy-je5n
-//!   - murphy-ilrx
+//! upstream_version_checked: 1.87.0
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Token-stream port of RuboCop's `SpaceAfterPunctuation` mixin specialized
 //!   for commas. Fires only when a `,` is immediately followed (zero gap, same
 //!   line) by a non-allowed token. RuboCop's `allowed_type?` exempts `)`, `]`,
-//!   `|`, and `tSTRING_DEND`; Murphy's token stream only models `)` as a
-//!   distinct kind (`RightParen`), so `]` and `|` are matched by source byte.
-//!   The `}` rcurly case follows `Layout/SpaceInsideHashLiteralBraces`'s default
-//!   (`space`), under which a space *is* required before `}` — so `{ a,}` flags
-//!   by default, exactly matching RuboCop's default config.
+//!   `|`, and `tSTRING_DEND`; Murphy's token stream only models `)` and `}`
+//!   as distinct kinds (`RightParen` / `RightBrace`), so `]` and `|` are
+//!   matched by source byte while the interpolation-end `}` (`Other` `"}"`)
+//!   is always exempt. A regular `}` (`RightBrace`) requires a space under
+//!   `Layout/SpaceInsideHashLiteralBraces`'s default (`space`), so `{ a,}`
+//!   flags by default, exactly matching RuboCop's default config.
 //!
-//!   murphy-je5n (ABI blocker, not a cop-level fix): RuboCop's
-//!   `SpaceAfterComma#space_required_before?` reads a *sibling* cop's runtime
-//!   config — `config_to_allow_offenses` / `cop_config` for
-//!   `Layout/SpaceInsideHashLiteralBraces` — and exempts a comma directly before
-//!   `}` when that cop is set to `EnforcedStyle: no_space`. Murphy's plugin ABI
-//!   gives a cop body only its OWN resolved config (`cx.options_json`, populated
-//!   by `config.cop_options_json(self_name)` in dispatch); there is no surface
-//!   to read another cop's config. Wiring this requires either a new `CxRaw`
-//!   sibling-config field (an ABI change — `CxRaw` field offsets are pinned by
-//!   `offset_of!` assertions) or the host baking the sibling style into this
-//!   cop's `options_json` (a murphy-core config-contract change). Both are
-//!   outside the murphy-std single-surface boundary and need sign-off, so this
-//!   remains documented and unported. Current behavior matches RuboCop under
-//!   the default (`space`) config; only a non-default `no_space` sibling config
-//!   diverges.
+//!   Cross-cop `space_required_before?` (murphy-je5n, murphy-ilrx, option 2,
+//!   no ABI bump): RuboCop exempts a comma directly before `}` when
+//!   `Layout/SpaceInsideHashLiteralBraces` is `EnforcedStyle: no_space`
+//!   (`space_style_before_rcurly` / `space_forbidden_before_rcurly?`). The host
+//!   bakes that sibling style into this cop's `options_json` as
+//!   `SpaceInsideHashLiteralBracesEnforcedStyle` (`config.cop_options_json`
+//!   contract); the cop reads it via `SpaceAfterCommaOptions` and exempts a
+//!   regular `}` only under `no_space` (`compact` still requires a space,
+//!   matching `style == 'no_space'`). Default (`{}` when unconfigured) is
+//!   `space`, preserving the default-config behavior.
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, Range, SourceToken, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, Range, SourceToken, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct SpaceAfterComma;
+
+/// Host-baked sibling style for [`SpaceAfterComma`].
+///
+/// The host resolves `Layout/SpaceInsideHashLiteralBraces.EnforcedStyle`
+/// (`for_cop`, fallback `"space"`) and bakes it into this cop's
+/// `options_json` as `SpaceInsideHashLiteralBracesEnforcedStyle` (murphy-ilrx,
+/// option 2 — no `CxRaw` change, no ABI bump). Only `no_space` exempts a
+/// comma directly before a regular `}` (`compact` still requires a space,
+/// matching RuboCop's `style == 'no_space'`).
+#[derive(CopOptions)]
+pub struct SpaceAfterCommaOptions {
+    #[option(
+        name = "SpaceInsideHashLiteralBracesEnforcedStyle",
+        default = "space",
+        description = "Baked Layout/SpaceInsideHashLiteralBraces EnforcedStyle; only no_space exempts `,}`."
+    )]
+    pub space_inside_hash_literal_braces_enforced_style: HashBraceSiblingStyle,
+}
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HashBraceSiblingStyle {
+    #[option(value = "space")]
+    Space,
+    #[option(value = "no_space")]
+    NoSpace,
+    #[option(value = "compact")]
+    Compact,
+}
 
 #[cop(
     name = "Layout/SpaceAfterComma",
     description = "Use spaces after commas.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = SpaceAfterCommaOptions,
 )]
 impl SpaceAfterComma {
     #[on_new_investigation]
     fn investigate(&self, cx: &Cx<'_>) {
+        // Host-baked sibling style (murphy-ilrx, option 2): only `no_space`
+        // exempts a comma directly before a regular `}`.
+        let sibling_no_space = cx
+            .options_or_default::<SpaceAfterCommaOptions>()
+            .space_inside_hash_literal_braces_enforced_style
+            == HashBraceSiblingStyle::NoSpace;
         // RuboCop iterates the Parser token stream pairwise. Murphy's stream
         // additionally carries Newline/IgnoredNewline/Comment tokens that the
         // Parser stream omits, so skip those when looking for the token that
@@ -72,7 +100,7 @@ impl SpaceAfterComma {
             }
 
             if let Some(comma) = prev_comma.take() {
-                check_comma_pair(cx, comma, tok);
+                check_comma_pair(cx, comma, tok, sibling_no_space);
             }
 
             if tok.kind == SourceTokenKind::Comma {
@@ -82,7 +110,7 @@ impl SpaceAfterComma {
     }
 }
 
-fn check_comma_pair(cx: &Cx<'_>, comma: SourceToken, next: SourceToken) {
+fn check_comma_pair(cx: &Cx<'_>, comma: SourceToken, next: SourceToken, sibling_no_space: bool) {
     // RuboCop's `kind`: the token after a comma must not be a `;`.
     if cx.raw_source(next.range) == ";" {
         return;
@@ -91,12 +119,11 @@ fn check_comma_pair(cx: &Cx<'_>, comma: SourceToken, next: SourceToken) {
     if comma.range.end != next.range.start {
         return;
     }
-    // `space_required_before?`: skip closers `)`, `]`, `|`. `tSTRING_DEND`
-    // (string interpolation end `}`) is `Other` in Murphy; a `}` here is either
-    // a hash/brace close (which RuboCop's default config *does* require a space
-    // before) or interpolation end. We do not special-case `}`; under default
-    // config this matches RuboCop.
-    if is_allowed_after_comma(cx, next) {
+    // `space_required_before?`: `allowed_type?` (`)`, `]`, `|`,
+    // `tSTRING_DEND`) plus the sibling-gated rcurly exemption (murphy-ilrx).
+    // A regular `}` (`RightBrace`) is exempt only under `no_space`; the
+    // interpolation-end `}` (`Other` `"}"`) is always exempt.
+    if is_allowed_after_comma(cx, next, sibling_no_space) {
         return;
     }
 
@@ -110,10 +137,19 @@ fn check_comma_pair(cx: &Cx<'_>, comma: SourceToken, next: SourceToken) {
     );
 }
 
-/// Mirror of RuboCop `SpaceAfterPunctuation#allowed_type?`: a space is not
-/// required when the following token is `)`, `]`, or `|`.
-fn is_allowed_after_comma(cx: &Cx<'_>, next: SourceToken) -> bool {
+/// Mirror of RuboCop `space_required_before?`: `allowed_type?` plus the
+/// sibling-gated rcurly exemption. A space is not required when the following
+/// token is `)`, `]`, `|`, or the interpolation-end `}` (`tSTRING_DEND`,
+/// `Other` `"}"`). A regular `}` (`RightBrace`) is exempt only when the
+/// baked `SpaceInsideHashLiteralBraces` style is `no_space`.
+fn is_allowed_after_comma(cx: &Cx<'_>, next: SourceToken, sibling_no_space: bool) -> bool {
     if next.kind == SourceTokenKind::RightParen {
+        return true;
+    }
+    if next.kind == SourceTokenKind::RightBrace {
+        return sibling_no_space;
+    }
+    if next.kind == SourceTokenKind::Other && cx.raw_source(next.range) == "}" {
         return true;
     }
     matches!(cx.raw_source(next.range), "]" | "|")
@@ -123,7 +159,7 @@ murphy_plugin_api::submit_cop!(SpaceAfterComma);
 
 #[cfg(test)]
 mod tests {
-    use super::SpaceAfterComma;
+    use super::{HashBraceSiblingStyle, SpaceAfterComma, SpaceAfterCommaOptions};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -249,5 +285,69 @@ mod tests {
     #[test]
     fn accepts_spaced_trailing_comma_before_brace() {
         test::<SpaceAfterComma>().expect_no_offenses("{ foo: bar, }\n");
+    }
+
+    // ── murphy-ilrx: host-baked Layout/SpaceInsideHashLiteralBraces.EnforcedStyle ──
+
+    #[test]
+    fn options_default_is_space() {
+        let d = SpaceAfterCommaOptions::default();
+        assert_eq!(
+            d.space_inside_hash_literal_braces_enforced_style,
+            HashBraceSiblingStyle::Space
+        );
+    }
+
+    #[test]
+    fn accepts_comma_before_closing_brace_under_no_space_sibling_style() {
+        // RuboCop `space_forbidden_before_rcurly?`: `,}` is exempt when the
+        // sibling cop is `EnforcedStyle: no_space` (host-baked).
+        test::<SpaceAfterComma>()
+            .with_options(&SpaceAfterCommaOptions {
+                space_inside_hash_literal_braces_enforced_style: HashBraceSiblingStyle::NoSpace,
+            })
+            .expect_no_offenses("{ foo: bar,}\n");
+    }
+
+    #[test]
+    fn flags_comma_before_closing_brace_under_explicit_space_style() {
+        // Explicit `space` behaves like the default: `,}` is flagged.
+        test::<SpaceAfterComma>()
+            .with_options(&SpaceAfterCommaOptions {
+                space_inside_hash_literal_braces_enforced_style: HashBraceSiblingStyle::Space,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    { foo: bar,}
+                              ^ Space missing after comma.
+                "#},
+                "{ foo: bar, }\n",
+            );
+    }
+
+    #[test]
+    fn flags_comma_before_closing_brace_under_compact_style() {
+        // `compact` still requires a space (`style == 'no_space'` is false).
+        test::<SpaceAfterComma>()
+            .with_options(&SpaceAfterCommaOptions {
+                space_inside_hash_literal_braces_enforced_style: HashBraceSiblingStyle::Compact,
+            })
+            .expect_offense(indoc! {r#"
+                { foo: bar,}
+                          ^ Space missing after comma.
+            "#});
+    }
+
+    #[test]
+    fn no_space_style_still_flags_ordinary_missing_space() {
+        // The sibling gate only affects a regular `}`; `,2` still fires.
+        test::<SpaceAfterComma>()
+            .with_options(&SpaceAfterCommaOptions {
+                space_inside_hash_literal_braces_enforced_style: HashBraceSiblingStyle::NoSpace,
+            })
+            .expect_offense(indoc! {r#"
+                [1,2]
+                  ^ Space missing after comma.
+            "#});
     }
 }
