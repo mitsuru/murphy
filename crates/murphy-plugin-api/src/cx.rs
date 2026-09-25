@@ -3029,6 +3029,266 @@ impl<'a> Cx<'a> {
         out
     }
 
+    /// Redundant `# rubocop:enable` comments with registry-backed `all` /
+    /// department expansion — Murphy's parity-correct analog of RuboCop's
+    /// `CommentConfig#extra_enabled_comments` (murphy-8b8m).
+    ///
+    /// `registry_names` is the full cop registry (`registry.names` in RuboCop:
+    /// every `Dept/Cop`, including config-disabled cops). The caller (the
+    /// `Lint/RedundantCopEnableDirective` cop in `murphy-std`, via its
+    /// `PACK_COPS`) supplies it; the count-pass itself stays host-side on `Cx`
+    /// so no `CxRaw` wire change is needed (ABI unchanged).
+    ///
+    /// Expansion mirrors `DirectiveComment#cop_names`:
+    /// - `all` (`cop == None`) on a *disable* expands to every registry cop
+    ///   minus `Lint/Syntax` + `Lint/RedundantCopDisableDirective`, plus every
+    ///   file-local unknown cop name (safe direction: an `enable` of a name
+    ///   mentioned anywhere in the file is treated as covered by a prior
+    ///   `disable all`, matching the pre-8b8m conservative proxy for unknowns).
+    /// - a department (`Lint`, `Layout`, … — a slash-less name present as a
+    ///   department in the registry) expands to its department cops (same
+    ///   `Lint` exclusions) plus file-local `Dept/*` unknowns.
+    /// - `enable all` keeps RuboCop's `handle_enable_all` semantics (sentinel
+    ///   `"all"` when nothing was enabled); it is NOT expanded.
+    /// - a department `enable` is redundant as a whole (`all_in_directive`)
+    ///   when ANY of its expanded cops is redundant — this reproduces RuboCop's
+    ///   whole-comment removal for e.g. `disable LineLength` → `enable Layout`
+    ///   (one valid + many redundant still removes the whole department line).
+    pub fn extra_enabled_directives_with_registry(
+        &self,
+        registry_names: &[&str],
+    ) -> Vec<RedundantEnable<'a>> {
+        use std::collections::{HashMap, HashSet};
+
+        const LINT_SYNTAX: &str = "Lint/Syntax";
+        const LINT_REDUNDANT_DISABLE: &str = "Lint/RedundantCopDisableDirective";
+
+        let directives = self.comment_directives();
+
+        // Departments from the registry (prefix before `/`).
+        let mut departments: HashSet<String> = HashSet::new();
+        let mut known_set: HashSet<String> = HashSet::new();
+        for name in registry_names {
+            known_set.insert((*name).to_string());
+            if let Some((dept, _)) = name.split_once('/') {
+                departments.insert(dept.to_string());
+            }
+        }
+        let is_department = |name: &str| departments.contains(name);
+
+        // File-local specific names (safe-direction cover for unknowns):
+        // every `Some` that is not a known department. Slash-less unknowns
+        // like `Foo`/`A` (synthetic test names) are included so a prior
+        // `disable all` covers them; slash-less known departments are not.
+        let mut file_locals: HashSet<String> = HashSet::new();
+        for d in &directives {
+            if let Some(cop) = d.cop
+                && (cop.contains('/') || !is_department(cop))
+            {
+                file_locals.insert(cop.to_string());
+            }
+        }
+
+        // `all` expansion: registry minus the two Lint exclusions, plus
+        // file-local unknowns not already known (deduped to avoid double
+        // counting a known cop that also happens to be mentioned).
+        let mut all_expansion: Vec<String> = Vec::new();
+        for name in registry_names {
+            if *name == LINT_SYNTAX || *name == LINT_REDUNDANT_DISABLE {
+                continue;
+            }
+            all_expansion.push((*name).to_string());
+        }
+        for local in &file_locals {
+            if !known_set.contains(local) {
+                all_expansion.push(local.clone());
+            }
+        }
+
+        // Department expansion helper: registry dept cops (with `Lint`
+        // exclusions) plus file-local `Dept/*` unknowns not already known.
+        let dept_expansion = |dept: &str| -> Vec<String> {
+            let prefix = format!("{dept}/");
+            let mut out: Vec<String> = Vec::new();
+            for name in registry_names {
+                if !name.starts_with(&prefix) {
+                    continue;
+                }
+                if dept == "Lint" && (*name == LINT_SYNTAX || *name == LINT_REDUNDANT_DISABLE) {
+                    continue;
+                }
+                out.push((*name).to_string());
+            }
+            for local in &file_locals {
+                if local.starts_with(&prefix) && !known_set.contains(local) {
+                    out.push(local.clone());
+                }
+            }
+            out
+        };
+
+        // Per-cop disable counts (owned keys mix registry + file-local +
+        // config-seed lifetimes). Seeded from config-disabled cops.
+        let mut count: HashMap<String, i32> = HashMap::new();
+        for name in self.config_disabled_cops() {
+            *count.entry(name.to_string()).or_insert(0) += 1;
+        }
+        // Global `disable all` depth, used ONLY for `enable all` validity
+        // (so `disable all` → `enable all` stays valid even when the
+        // expansion is empty). Specific enables never consult it — they are
+        // covered by the file-local-inclusive expansion above.
+        let mut disable_all_depth: i32 = 0;
+
+        let mut out: Vec<RedundantEnable<'a>> = Vec::new();
+        let mut i = 0;
+        while i < directives.len() {
+            let d0 = &directives[i];
+            let mut j = i;
+            while j < directives.len() && directives[j].comment_range == d0.comment_range {
+                j += 1;
+            }
+            let group = &directives[i..j];
+            i = j;
+
+            if d0.scope == CommentDirectiveScope::SameLine {
+                continue;
+            }
+
+            let is_all = group.iter().any(|d| d.cop.is_none());
+            match d0.kind {
+                CommentDirectiveKind::Disable => {
+                    if is_all {
+                        for name in &all_expansion {
+                            *count.entry(name.clone()).or_insert(0) += 1;
+                        }
+                        disable_all_depth += 1;
+                    } else {
+                        for d in group {
+                            let Some(cop) = d.cop else { continue };
+                            if is_department(cop) {
+                                for name in dept_expansion(cop) {
+                                    *count.entry(name).or_insert(0) += 1;
+                                }
+                            } else {
+                                *count.entry(cop.to_string()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+                CommentDirectiveKind::Enable => {
+                    if is_all {
+                        let mut enabled_any = false;
+                        if disable_all_depth > 0 {
+                            disable_all_depth -= 1;
+                            enabled_any = true;
+                        }
+                        for v in count.values_mut() {
+                            if *v > 0 {
+                                *v -= 1;
+                                enabled_any = true;
+                            }
+                        }
+                        if !enabled_any {
+                            out.push(RedundantEnable {
+                                comment_range: d0.comment_range,
+                                cop_names: vec!["all"],
+                                all_in_directive: true,
+                            });
+                        }
+                    } else {
+                        // Per-raw expansion in source order (matches RuboCop's
+                        // `directive.cop_names` order: each raw's expansion in
+                        // turn). Track per-expanded validity, then map back to
+                        // raw: specific redundant iff its single expanded was
+                        // redundant; department redundant iff ANY expanded was.
+                        struct RawWork<'x> {
+                            raw: &'x str,
+                            is_dept: bool,
+                            expanded: Vec<String>,
+                        }
+                        let mut works: Vec<RawWork<'_>> = Vec::new();
+                        for d in group {
+                            let Some(cop) = d.cop else { continue };
+                            if is_department(cop) {
+                                works.push(RawWork {
+                                    raw: cop,
+                                    is_dept: true,
+                                    expanded: dept_expansion(cop),
+                                });
+                            } else {
+                                works.push(RawWork {
+                                    raw: cop,
+                                    is_dept: false,
+                                    expanded: vec![cop.to_string()],
+                                });
+                            }
+                        }
+                        let total = works.len();
+                        // Per-expanded redundancy in order.
+                        let mut expanded_redundant: Vec<bool> = Vec::new();
+                        // Map from work index -> range in expanded_redundant.
+                        let mut work_ranges: Vec<(usize, usize)> = Vec::new();
+                        for w in &works {
+                            let start = expanded_redundant.len();
+                            for name in &w.expanded {
+                                let slot = count.entry(name.clone()).or_insert(0);
+                                if *slot > 0 {
+                                    *slot -= 1;
+                                    expanded_redundant.push(false);
+                                } else {
+                                    expanded_redundant.push(true);
+                                }
+                            }
+                            // An empty department expansion (unknown dept can
+                            // not happen here since unknown slash-less is not
+                            // a dept; but a known dept with zero cops after
+                            // exclusions — e.g. a test registry where `Lint`
+                            // holds only the two excluded cops — would yield
+                            // no expanded entries. Treat the raw as redundant
+                            // (safe: nothing was enabled).
+                            let end = expanded_redundant.len();
+                            work_ranges.push((start, end));
+                        }
+                        // `all_in_directive` mirrors RuboCop's `directive.match?`
+                        // (parsed uniq == extras uniq): true iff EVERY expanded
+                        // cop in the comment was redundant (no valid enable).
+                        // A department with one valid + many redundant is thus
+                        // partial (blank-line removal), not whole.
+                        let any_valid = expanded_redundant.iter().any(|&r| !r);
+                        let mut redundant: Vec<&str> = Vec::new();
+                        for (idx, w) in works.iter().enumerate() {
+                            let (s, e) = work_ranges[idx];
+                            let raw_redundant = if w.is_dept {
+                                if s == e {
+                                    true
+                                } else {
+                                    expanded_redundant[s..e].iter().any(|&r| r)
+                                }
+                            } else {
+                                // Specific always has exactly one expanded.
+                                s < e && expanded_redundant[s]
+                            };
+                            if raw_redundant {
+                                redundant.push(w.raw);
+                            }
+                        }
+                        if !redundant.is_empty() {
+                            let _ = total;
+                            let all_in_directive = !any_valid;
+                            out.push(RedundantEnable {
+                                comment_range: d0.comment_range,
+                                cop_names: redundant,
+                                all_in_directive,
+                            });
+                        }
+                    }
+                }
+                CommentDirectiveKind::Todo => {}
+            }
+        }
+        out
+    }
+
     /// The file's source tokens, in source order.
     pub fn sorted_tokens(&self) -> &'a [SourceToken] {
         unsafe { slice(self.raw.sorted_tokens, self.raw.sorted_tokens_len) }
@@ -4097,6 +4357,180 @@ mod tests {
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(cx.extra_enabled_directives().is_empty());
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_disable_all_then_double_enable_specific() {
+        // murphy-8b8m: `disable all` expands to cop names, so the first
+        // specific enable is valid but the second is redundant (the old
+        // opaque-depth proxy flagged neither).
+        let source = concat!(
+            "# rubocop:disable all\n",
+            "foo\n",
+            "# rubocop:enable Layout/LineLength\n",
+            "bar\n",
+            "# rubocop:enable Layout/LineLength\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = ["Layout/LineLength", "Style/StringLiterals"];
+        let extras = cx.extra_enabled_directives_with_registry(&registry);
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["Layout/LineLength"]);
+        assert!(extras[0].all_in_directive);
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_disable_dept_enables_specific() {
+        // `disable Layout` covers `Layout/LineLength`, so enabling it is valid.
+        let source = concat!(
+            "# rubocop:disable Layout\n",
+            "foo\n",
+            "# rubocop:enable Layout/LineLength\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = ["Layout/LineLength", "Layout/Indentation", "Style/Foo"];
+        assert!(
+            cx.extra_enabled_directives_with_registry(&registry)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_enable_dept_after_single_disable_is_redundant() {
+        // RuboCop parity: `disable LineLength` then `enable Layout` is redundant
+        // (one valid + many redundant), but `all_in_directive` is false so the
+        // cop keeps the newline (blank-line removal, not whole-comment).
+        let source = concat!(
+            "# rubocop:disable Layout/LineLength\n",
+            "foo\n",
+            "# rubocop:enable Layout\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = ["Layout/LineLength", "Layout/Indentation", "Style/Foo"];
+        let extras = cx.extra_enabled_directives_with_registry(&registry);
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["Layout"]);
+        assert!(!extras[0].all_in_directive);
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_enable_dept_with_nothing_disabled() {
+        let source = "foo\n# rubocop:enable Layout\n";
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = ["Layout/LineLength", "Layout/Indentation"];
+        let extras = cx.extra_enabled_directives_with_registry(&registry);
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["Layout"]);
+        assert!(extras[0].all_in_directive);
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_disable_then_enable_same_dept() {
+        let source = concat!(
+            "# rubocop:disable Layout\n",
+            "foo\n",
+            "# rubocop:enable Layout\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = ["Layout/LineLength", "Layout/Indentation"];
+        assert!(
+            cx.extra_enabled_directives_with_registry(&registry)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_all_excludes_lint_syntax_cops() {
+        // RuboCop's `all` (and `Lint` department) excludes
+        // `Lint/Syntax` + `Lint/RedundantCopDisableDirective`.
+        let source = concat!(
+            "# rubocop:disable all\n",
+            "foo\n",
+            "# rubocop:enable Lint/Syntax\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = [
+            "Layout/LineLength",
+            "Lint/Syntax",
+            "Lint/RedundantCopDisableDirective",
+        ];
+        let extras = cx.extra_enabled_directives_with_registry(&registry);
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["Lint/Syntax"]);
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_file_local_unknown_covered_by_disable_all() {
+        // Safe direction: an unknown name mentioned in the file is covered by
+        // a prior `disable all` (no false positive for typos/external cops).
+        let source = concat!("# rubocop:disable all\n", "foo\n", "# rubocop:enable Foo\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry = ["Layout/LineLength"];
+        assert!(
+            cx.extra_enabled_directives_with_registry(&registry)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extra_enabled_with_registry_disable_all_then_enable_all_needs_depth() {
+        // Even with an empty registry/file-locals, `disable all` -> `enable
+        // all` is valid via the global depth (not via per-cop counts).
+        let source = concat!("# rubocop:disable all\n", "foo\n", "# rubocop:enable all\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let registry: [&str; 0] = [];
+        assert!(
+            cx.extra_enabled_directives_with_registry(&registry)
+                .is_empty()
+        );
     }
 
     fn cx_for_source(source: &str) -> (Ast, FnTable) {

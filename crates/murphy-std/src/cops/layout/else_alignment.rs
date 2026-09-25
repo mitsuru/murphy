@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn variable_style_aligns_else_with_assignment() {
         let src = "x = if a\n  b\nelse\n  c\nend\n";
-        assert!(run_cop::<ElseAlignment>(src).is_empty() == false, "keyword style must flag col-0 else");
+        assert!(!run_cop::<ElseAlignment>(src).is_empty(), "keyword style must flag col-0 else");
         let offenses = run_cop_with_options::<ElseAlignment>(src, &variable());
         assert!(offenses.is_empty(), "variable style: else at col 0 aligns with x: {offenses:?}");
         let bad = "x = if a\n  b\n  else\n  c\nend\n";
