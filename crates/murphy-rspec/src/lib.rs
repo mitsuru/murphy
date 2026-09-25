@@ -42,6 +42,11 @@
 //! - `RSpec/DuplicatedMetadata` — no duplicated metadata (murphy-4gd.3.8).
 //! - `RSpec/EmptyExampleGroup` — no empty example groups (murphy-4gd.3.8).
 //! - `RSpec/EmptyLineAfterExample` — blank line after examples (murphy-4gd.3.8).
+//! - `RSpec/EmptyLineAfterExampleGroup` — blank line after groups (murphy-4gd.3.9).
+//! - `RSpec/EmptyLineAfterFinalLet` — blank line after final `let` (murphy-4gd.3.9).
+//! - `RSpec/EmptyLineAfterHook` — blank line after hooks (murphy-4gd.3.9).
+//! - `RSpec/EmptyLineAfterSubject` — blank line after `subject` (murphy-4gd.3.9).
+//! - `RSpec/EmptyMetadata` — no empty metadata hash (murphy-4gd.3.9).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
