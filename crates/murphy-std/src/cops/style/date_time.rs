@@ -17,6 +17,9 @@
 //!   are accepted per RuboCop's historic_date? matcher.
 //!   Autocorrect only applies to the class case (replaces DateTime with Time);
 //!   to_datetime calls have no autocorrect (different semantics).
+//!   Verbatim port of RuboCop's `to_datetime?` matcher `(call _ :to_datetime)`
+//!   (murphy-s1yc.2): `call` covers safe-navigation, `_` binds the absent
+//!   (receiverless) slot, strict arity requires zero args.
 //!   SafeAutoCorrect: false is noted in parity; DateTime and Time have subtle
 //!   differences in handling of timezones and DST.
 //!   Const nodes have loc.name = Range::ZERO in Murphy (push uses Range::ZERO);
@@ -49,6 +52,13 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind
 // `_`, or `{...}` union there, and `_ ...` (any method, any args) matches
 // the same node set as RuboCop's method-omitted `(call recv ...)`.
 def_node_matcher!(date_time, "(call (const nil? :DateTime) _ ...)");
+
+// Verbatim port of RuboCop's `to_datetime?` (murphy-s1yc.2):
+// `(call _ :to_datetime)` — `call` = `{send csend}` covers safe-navigation
+// (`foo&.to_datetime`); the `_` receiver binds an absent (receiverless
+// `to_datetime`) or present receiver; strict arity (no trailing `...`)
+// requires exactly zero arguments (`foo.to_datetime(8)` does not match).
+def_node_matcher!(to_datetime, "(call _ :to_datetime)");
 
 const CLASS_MSG: &str = "Prefer `Time` over `DateTime`.";
 const COERCION_MSG: &str = "Do not use `#to_datetime`.";
@@ -114,7 +124,7 @@ fn is_date_time_call(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns true if `node` is a `to_datetime` call (e.g. `something.to_datetime`).
 fn is_to_datetime(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.method_name(node) == Some("to_datetime")
+    to_datetime(node, cx)
 }
 
 /// Returns true if the call has a second argument that is a constant rooted in
@@ -271,6 +281,43 @@ mod tests {
             "},
             "Time&.now\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.2): pin the exact node set the
+    // hand-rolled `is_to_datetime` matches, so the verbatim
+    // `(call _ :to_datetime)` port can be proven byte-identical (plus the
+    // strict-arity parity fix). `call` = `{send csend}` covers
+    // safe-navigation; `_` binds the absent (receiverless) slot per if9y.
+
+    #[test]
+    fn s1yc2_flags_receiverless_to_datetime() {
+        // Bare `to_datetime` matches: `_` binds the nil-filled receiver.
+        test::<DateTime>().expect_offense(indoc! {"
+            to_datetime
+            ^^^^^^^^^^^ Do not use `#to_datetime`.
+        "});
+    }
+
+    #[test]
+    fn s1yc2_flags_csend_to_datetime() {
+        // `&.` lowers to csend; `call` covers it, same as RuboCop.
+        test::<DateTime>().expect_offense(indoc! {"
+            foo&.to_datetime
+            ^^^^^^^^^^^^^^^^ Do not use `#to_datetime`.
+        "});
+    }
+
+    #[test]
+    fn s1yc2_accepts_to_datetime_with_args() {
+        // Strict arity (no trailing `...`): `to_datetime(8)` does not match.
+        // Characterization: hand-rolled `method_name` check flags this today
+        // (false positive vs RuboCop); the verbatim port fixes it.
+        test::<DateTime>().expect_no_offenses("foo.to_datetime(8)\n");
+    }
+
+    #[test]
+    fn s1yc2_accepts_csend_to_datetime_with_args() {
+        test::<DateTime>().expect_no_offenses("foo&.to_datetime(8)\n");
     }
 
     #[test]
