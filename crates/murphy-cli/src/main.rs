@@ -18,6 +18,7 @@
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
 //! - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` — scaffold git-hook configs (see `install.rs`).
 //! - `murphy add <pack> [--registry PATH] [--dry-run]` — add a registry pack to `.murphy.yml` (see `add.rs`).
+//! - `murphy init [--preset <name>] [--force] [--hook [TOOL]] [--from <.rubocop.yml>]` — scaffold `.murphy.yml` + `.murphyignore` (see `init.rs`).
 //!
 //! `murphy lint --profile [--profile-format summary|speedscope]` emits the
 //! Phase 9 B6 profile (per-cop wall time + p95 + cop x file matrix + hot
@@ -29,6 +30,7 @@
 mod add;
 mod cops;
 mod explain;
+mod init;
 mod install;
 mod lsp;
 mod plugins;
@@ -155,6 +157,8 @@ enum CliCommand {
     Add(AddArgs),
     /// Scaffold git-hook configs (lefthook / pre-commit / overcommit).
     Install(InstallArgs),
+    /// Scaffold `.murphy.yml` + `.murphyignore` for an existing repo (C5).
+    Init(InitArgs),
     /// Inspect or maintain the on-disk lint cache (A5).
     Cache(CacheArgs),
     /// Stay resident and re-lint changed files on every save (Phase 9 B1).
@@ -439,6 +443,27 @@ impl From<InstallToolArg> for install::HookTool {
             InstallToolArg::All => install::HookTool::All,
         }
     }
+}
+
+#[derive(Debug, clap::Args)]
+struct InitArgs {
+    /// Builtin config preset for the generated `.murphy.yml`
+    /// (`minimal`, `recommended`, `shopify`, `rails-strict`,
+    /// optionally as `murphy:<name>`). Default: `recommended`.
+    #[arg(long, value_name = "PRESET", default_value = "recommended")]
+    preset: String,
+    /// Overwrite existing `.murphy.yml` / `.murphyignore` (and hook files).
+    #[arg(long)]
+    force: bool,
+    /// Also scaffold a git-hook config (B8 templates). Bare `--hook`
+    /// defaults to `lefthook`; pass a tool for the others.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "lefthook")]
+    hook: Option<InstallToolArg>,
+    /// Migrate this `.rubocop.yml` into `.murphy.yml` instead of writing
+    /// the fresh template (chosen `extends:` is prepended; migrated cop
+    /// rules always win over the preset layer).
+    #[arg(long, value_name = "PATH")]
+    from: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1615,6 +1640,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         CliCommand::Plugins(plugins_args) => run_plugins(&plugins_args),
         CliCommand::Add(add_args) => run_add(&add_args),
         CliCommand::Install(install_args) => run_install(&install_args),
+        CliCommand::Init(init_args) => run_init(&init_args),
         CliCommand::Cache(cache_args) => run_cache(&cache_args),
         CliCommand::Watch(watch_args) => run_watch(&watch_args),
     }
@@ -1665,6 +1691,15 @@ fn run_install(args: &InstallArgs) -> Result<u8, AppError> {
         git_hook: args.git_hook,
         tool: args.tool.into(),
         force: args.force,
+    })
+}
+
+fn run_init(args: &InitArgs) -> Result<u8, AppError> {
+    init::run_init(&init::InitOptions {
+        preset: args.preset.clone(),
+        force: args.force,
+        hook: args.hook.map(|h| h.into()),
+        from: args.from.clone(),
     })
 }
 

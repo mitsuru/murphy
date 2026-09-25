@@ -87,6 +87,17 @@ pub fn overcommit_yml() -> String {
         .to_string()
 }
 
+/// Hook scaffold bodies for reuse by `murphy init --hook` (C5).
+///
+/// Returns `(relative path, body)` pairs using the same B8 templates.
+/// `Copy` tool enum keeps the call cheap; paths stay `&'static str`.
+pub fn scaffold_bodies(tool: HookTool) -> Vec<(&'static str, String)> {
+    scaffolds_for(tool)
+        .into_iter()
+        .map(|s| (s.path, s.body))
+        .collect()
+}
+
 fn scaffolds_for(tool: HookTool) -> Vec<Scaffold> {
     match tool {
         HookTool::Lefthook => vec![Scaffold {

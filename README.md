@@ -35,6 +35,10 @@ eliminate RuboCop's slowness with a native Rust core.
 - `murphy migrate <.rubocop.yml>` normalizes a `.rubocop.yml` to `.murphy.yml`
   (adds `AllCops.CopsPath: cops`, emits plugin rename hints); the output is
   valid `.murphy.yml` that Murphy reads directly.
+- `murphy init [--preset <name>] [--force] [--hook [TOOL]] [--from <.rubocop.yml>]`
+  scaffolds `.murphy.yml` + `.murphyignore` for an existing repo (fresh template
+  or `--from` migration with `extends:` preset + optional B8 git-hook scaffold);
+  see `docs/guides/init.md`.
 - **User cops:** drop a `.rb` file into a `cops/` directory and Murphy runs
   it **in addition to** the native cops, merged into one deterministic JSON
   offense array. `cops/` is resolved relative to the invocation working
