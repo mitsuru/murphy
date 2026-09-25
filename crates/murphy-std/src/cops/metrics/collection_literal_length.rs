@@ -57,7 +57,15 @@
 //! Set[1, 2, '...', 999_999_999]                    # 250+ arguments
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Metrics/CollectionLiteralLength` `Set` matcher
+// `set_const?` is `(const {nil? cbase} :Set)`, used from the `on_index`
+// `Set[...]` check. In Murphy `::Set` collapses to `Const{scope:None}`,
+// so a single `nil?` scope covers bare and `::`-prefixed forms —
+// equivalent to the prior `is_global_const` check. The entry-count
+// threshold comparison stays hand-rolled below.
+def_node_matcher!(set_index, "(send (const nil? :Set) :[] ...)");
 
 /// Stateless unit struct (ADR 0035).
 #[derive(Default)]
@@ -107,11 +115,8 @@ impl CollectionLiteralLength {
     /// RuboCop `on_index`/`on_send`: `Set[...]` with too many arguments.
     #[on_node(kind = "send", methods = ["[]"])]
     fn check_set_index(&self, node: NodeId, cx: &Cx<'_>) {
-        // RuboCop `set_const?`: `(const {cbase nil?} :Set)`.
-        let Some(receiver) = cx.call_receiver(node).get() else {
-            return;
-        };
-        if !cx.is_global_const(receiver, "Set") {
+        // `(send (const nil? :Set) :[] ...)` — top-level `Set[...]`.
+        if !set_index(node, cx) {
             return;
         }
         self.check_count(cx.call_arguments(node).len(), node, cx);
@@ -221,6 +226,22 @@ mod tests {
         test::<CollectionLiteralLength>()
             .with_options(&opts(3))
             .expect_no_offenses("x = Foo[1, 2, 3, 4]\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.3): pin the exact node set
+    // the hand-rolled `is_global_const(receiver, "Set")` predicate matches,
+    // so the `(send (const nil? :Set) :[] ...)` refactor can be proven
+    // equivalent. Cbase is pinned by `flags_cbase_set_index`; namespaced is
+    // pinned by `ignores_non_set_index`.
+
+    #[test]
+    fn boundary_ignores_csend_set_index() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<CollectionLiteralLength>()
+            .with_options(&opts(3))
+            .expect_no_offenses("S = Set&.[1, 2, 3]\n");
     }
 
     #[test]

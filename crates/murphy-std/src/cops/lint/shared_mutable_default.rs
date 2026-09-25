@@ -15,7 +15,16 @@
 //!   block/default_proc-safe forms, and scalar defaults. No autocorrect.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Lint/SharedMutableDefault` matcher for `Hash.new` is
+// `(send (const {nil? cbase} :Hash) :new ...)`. In Murphy `::Hash`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare
+// and `::`-prefixed forms — equivalent to the prior `is_global_const`
+// check. The mutable-default argument inspection (`Array`/`Hash` literals,
+// `Array.new`/`Hash.new` constructors, `capacity:` keywords) stays
+// hand-rolled below.
+def_node_matcher!(hash_new, "(send (const nil? :Hash) :new ...)");
 
 const MSG: &str = "Do not create a Hash with a mutable default value as the default value can accidentally be changed.";
 
@@ -39,15 +48,13 @@ impl SharedMutableDefault {
 }
 
 fn hash_initialized_with_mutable_shared_object(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-        return false;
-    };
-    let Some(receiver) = receiver.get() else {
-        return false;
-    };
-    if !cx.is_global_const(receiver, "Hash") {
+    // `(send (const nil? :Hash) :new ...)` — top-level `Hash.new`.
+    if !hash_new(node, cx) {
         return false;
     }
+    let NodeKind::Send { args, .. } = *cx.kind(node) else {
+        return false;
+    };
 
     let args = cx.list(args);
     match args {
@@ -138,6 +145,36 @@ mod tests {
             Hash.new(Hash.new.freeze)
             Hash.new(capacity: 42)
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.3): pin the exact node set
+    // the hand-rolled `is_global_const(receiver, "Hash")` predicate matches,
+    // so the `(send (const nil? :Hash) :new ...)` refactor can be proven
+    // equivalent. `::Hash` collapses to `Const{scope:None}` in Murphy, so a
+    // single `nil?` scope covers bare + `::`-prefixed forms.
+
+    #[test]
+    fn boundary_flags_cbase_hash_new_outer() {
+        test::<SharedMutableDefault>().expect_offense(indoc! {r#"
+            ::Hash.new([])
+            ^^^^^^^^^^^^^^ Do not create a Hash with a mutable default value as the default value can accidentally be changed.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_hash_new() {
+        // `Foo::Hash` has a non-nil const scope, so it is not flagged.
+        test::<SharedMutableDefault>().expect_no_offenses("Foo::Hash.new([])
+");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_hash_new() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<SharedMutableDefault>().expect_no_offenses("Hash&.new([])
+");
     }
 }
 
