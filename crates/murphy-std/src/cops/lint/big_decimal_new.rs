@@ -22,7 +22,13 @@
 //!   specced upstream (BigDecimal requires an argument) and is kept here only
 //!   to pin the parity behavior.
 //! ```
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, Range, def_node_matcher};
+
+// RuboCop parity: BigDecimalNew matcher is
+// `(send (const {nil? cbase} :BigDecimal) :new ...)`. In Murphy `::BigDecimal`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+def_node_matcher!(big_decimal_new, "(send (const nil? :BigDecimal) :new ...)");
 
 const MSG: &str = "`BigDecimal.new()` is deprecated. Use `BigDecimal()` instead.";
 
@@ -39,14 +45,11 @@ pub struct BigDecimalNew;
 impl BigDecimalNew {
     #[on_node(kind = "send", methods = ["new"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let Some(receiver) = cx.call_receiver(node).get() else {
-            return;
-        };
-        // `(const {nil? cbase} :BigDecimal)`: `is_global_const` accepts both
-        // bare `BigDecimal` and `::BigDecimal`, and excludes `Foo::BigDecimal`.
-        if !cx.is_global_const(receiver, "BigDecimal") {
+        // `(send (const nil? :BigDecimal) :new ...)` — top-level `BigDecimal.new`.
+        if !big_decimal_new(node, cx) {
             return;
         }
+        let receiver = cx.call_receiver(node).get().expect("matcher guarantees receiver");
 
         // Offense range = selector (`new`) only, matching RuboCop's
         // `add_offense(node.loc.selector)`.
@@ -134,5 +137,18 @@ mod tests {
     #[test]
     fn ignores_other_new() {
         test::<BigDecimalNew>().expect_no_offenses("Foo.new(123.456, 3)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :BigDecimal) :new ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<BigDecimalNew>().expect_no_offenses("BigDecimal&.new(1)\n");
     }
 }
