@@ -110,10 +110,15 @@ jobs:
           git diff --cached --quiet && echo 'benchmark docs unchanged' && exit 0
           git commit -m 'docs(bench): refresh benchmark snapshot'
           git push -f origin docs/bench-snapshot
-          if [ -z "$(gh pr list --head docs/bench-snapshot --json number --jq '.[0].number')" ]; then
-            gh pr create --base main --head docs/bench-snapshot \
-              --title 'docs(bench): refresh benchmark snapshot' \
-              --body 'Automated refresh from phase6-perf publish (hyperfine N=1/20/100). Docs-only; merge when green.'
-          else
+          if [ -n "$(gh pr list --head docs/bench-snapshot --json number --jq '.[0].number')" ]; then
             echo 'snapshot PR already open; branch updated'
+          elif gh pr create --base main --head docs/bench-snapshot \
+              --title 'docs(bench): refresh benchmark snapshot' \
+              --body 'Automated refresh from phase6-perf publish (hyperfine N=1/20/100). Docs-only; merge when green.'; then
+            echo 'snapshot PR opened'
+          else
+            # Repo setting "Allow GitHub Actions to create and approve pull
+            # requests" is off: the branch is fresh, a maintainer opens the
+            # PR (one click once the setting is enabled, this step lights up).
+            echo '::warning::snapshot branch updated but PR creation denied; open the PR manually'
           fi
