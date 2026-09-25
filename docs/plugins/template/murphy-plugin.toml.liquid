@@ -1,0 +1,27 @@
+# Pack manifest for {{project-name}} (ADR 0046).
+#
+# This file lives at the pack root and lets Murphy read the pack's
+# identity and cop catalogue *without* `dlopen`. An installed pack
+# pairs it with per-arch binaries:
+#
+#   {{project-name}}/
+#   |-- murphy-plugin.toml
+#   `-- lib/
+#       |-- linux-x86_64/lib{{crate_name}}.so
+#       `-- darwin-arm64/lib{{crate_name}}.dylib
+#
+# `murphy-api-version` must equal the host's MURPHY_PLUGIN_ABI_VERSION
+# (currently 4 — keep in step with the Murphy release you target).
+# `[cops].provided` must match the cops the cdylib registers; rename it
+# together with the cop in `src/lib.rs` when replacing the demo cop.
+
+[plugin]
+name = "{{project-name}}"
+version = "0.1.0"
+murphy-api-version = 4
+authors = ["{{authors}}"]
+license = "MIT"
+description = "Murphy plugin pack generated from murphy-rs/plugin-template."
+
+[cops]
+provided = ["Example/NoTodo"]

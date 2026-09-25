@@ -1,0 +1,48 @@
+# {{project-name}} — Murphy plugin pack template.
+#
+# Generated from `murphy-rs/plugin-template` via:
+#
+#   cargo generate --git https://github.com/murphy-rs/plugin-template \
+#     --name {{project-name}}
+#
+# `project-name` is the pack's Cargo + manifest identity
+# (e.g. `murphy-foo`); `crate_name` is its snake_case form
+# (e.g. `murphy_foo`, derived by cargo-generate).
+#
+# Until `murphy-plugin-api` is published to crates.io, replace the
+# version requirements below with a git/path dependency on the Murphy
+# repo's `crates/murphy-plugin-api` (same source the workspace
+# `murphy-example-pack` uses).
+
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2024"
+description = "Murphy plugin pack — delete the Example/NoTodo demo cop and add real cops."
+authors = ["{{authors}}"]
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# The rlib variant exists so `tests/` integration tests link the crate
+# (`use {{crate_name}}::...`). Production never `use`s this crate from
+# Rust — the cdylib is `dlopen`'d by Murphy's plugin loader.
+
+[dependencies]
+# Single-surface plugin ABI (ADR 0038): the only Murphy crate a pack
+# may depend on at runtime. Widening this breaks the dep-boundary
+# contract every pack carries in `tests/`-adjacent guards.
+murphy-plugin-api = "0.1"
+# `submit_cop!` / `register_cops!` expand to `::linkme::` paths, so the
+# direct dependency is required.
+linkme = "0.3"
+# `#[derive(CopOptions)]`-expanded code refers to `::serde_json` in the
+# consuming crate root; keep the dep even before adding option-bearing
+# cops so the first one just works.
+serde_json = "1"
+
+[dev-dependencies]
+# Parser-driven cop test harness (`test_support::test::<T>()`) used by
+# `tests/smoke.rs`. Feature-gated: the production cdylib stays
+# parser-free.
+murphy-plugin-api = { version = "0.1", features = ["test-support"] }

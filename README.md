@@ -51,6 +51,9 @@ eliminate RuboCop's slowness with a native Rust core.
   `Include` / `Exclude` globs (for example: `Include = ["app/**/*.rb"]`), while
   parent-directory traversal in file strings (for example `../` or `a/../b.rb`) is
   treated as out-of-scope for those matches.
+  Start a new pack with
+  `cargo generate --git https://github.com/murphy-rs/plugin-template --name murphy-foo` —
+  see `docs/plugins/` for the template, manifest format, and loading guide.
 - Cop SDK (`Murphy::Cop` base): an `on_call_node(node)` visitor with
   `node.name` / `node.receiver_nil?` / `node.message_loc`,
   `add_offense(range, message:, severity:)`, and a `fix` block.

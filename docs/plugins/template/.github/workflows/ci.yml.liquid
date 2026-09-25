@@ -1,0 +1,26 @@
+# CI for {{project-name}} — generated from murphy-rs/plugin-template.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Test
+        run: cargo test
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Format
+        run: cargo fmt --check
+      # Multi-arch matrix builds (linux-x86_64, darwin-arm64, ...) are a
+      # future option: cross-compile the cdylib per arch and stage each
+      # under `lib/<arch>/` next to `murphy-plugin.toml` (see ADR 0046).
+      # The matrix itself is out of scope for the template (murphy-1f7).
