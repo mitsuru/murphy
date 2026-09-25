@@ -17,6 +17,11 @@
 //! - `RSpec/BeEq` — prefer `be` over `eq` for booleans/nil (murphy-4gd.3.3).
 //! - `RSpec/BeNil` — consistent `nil` matching style (murphy-4gd.3.3).
 //! - `RSpec/Eq` — use `eq` instead of `be ==` (murphy-4gd.3.3).
+//! - `RSpec/ClassCheck` — consistent `be_a` / `be_kind_of` style (murphy-4gd.3.4).
+//! - `RSpec/ContainExactly` — prefer `match_array` for all-splat args (murphy-4gd.3.4).
+//! - `RSpec/MatchArray` — prefer `contain_exactly` for array literals (murphy-4gd.3.4).
+//! - `RSpec/NotToNot` — consistent `not_to` / `to_not` spelling (murphy-4gd.3.4).
+//! - `RSpec/IdenticalEqualityAssertion` — flag identical equality sides (murphy-4gd.3.4).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
