@@ -38,9 +38,11 @@ not see `bundle install`ed `murphy-*` packs.
 
 `plugins = ["murphy-rails"]` now resolves:
 
-1. `Detailed` pin, 2. `MURPHY_PLUGIN_PATH`, 3. `.murphy/plugins/`,
-4. **installed gems** (`MURPHY_GEM_PATH`, then `GEM_HOME`/`GEM_PATH`),
-5. user-local.
+1. `Detailed` pin
+2. `MURPHY_PLUGIN_PATH`
+3. `.murphy/plugins/`
+4. **installed gems** (`MURPHY_GEM_PATH`, then `GEM_HOME`/`GEM_PATH`)
+5. user-local
 
 `MURPHY_GEM_PATH` is the explicit/test override; `GEM_HOME`/`GEM_PATH`
 are what `bundle exec` sets, so no `bundle show` subprocess is needed.
