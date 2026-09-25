@@ -62,6 +62,11 @@
 //! - `RSpec/InstanceSpy` — use `instance_spy` with `have_received` (murphy-4gd.3.12).
 //! - `RSpec/InstanceVariable` — avoid instance variables in specs (murphy-4gd.3.12).
 //! - `RSpec/IsExpectedSpecify` — use `it` for one-line `is_expected` (murphy-4gd.3.12).
+//! - `RSpec/IteratedExpectation` — use `all` instead of iterating (murphy-4gd.3.13).
+//! - `RSpec/LeadingSubject` — `subject` first in the group (murphy-4gd.3.13).
+//! - `RSpec/LeakyConstantDeclaration` — stub constants, don't declare them (murphy-4gd.3.13).
+//! - `RSpec/LetBeforeExamples` — `let` before examples (murphy-4gd.3.13).
+//! - `RSpec/LetSetup` — no unreferenced `let!` setup (murphy-4gd.3.13).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
