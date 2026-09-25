@@ -32,6 +32,7 @@ mod lsp;
 mod plugins;
 mod profile;
 mod since;
+mod watch;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use murphy_ast::content_hash;
@@ -152,6 +153,8 @@ enum CliCommand {
     Install(InstallArgs),
     /// Inspect or maintain the on-disk lint cache (A5).
     Cache(CacheArgs),
+    /// Stay resident and re-lint changed files on every save (Phase 9 B1).
+    Watch(WatchArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -421,6 +424,31 @@ enum CacheCommand {
     Stat,
     /// Remove all cached AST and result entries.
     Clean,
+}
+
+#[derive(Debug, clap::Args)]
+struct WatchArgs {
+    /// Output format (same shapes as `murphy lint --format`).
+    #[arg(long, value_enum, default_value = "human")]
+    format: LintOutputFormatArg,
+    /// Disable both on-disk caches (arena AST + lint results) for this run.
+    #[arg(long)]
+    no_cache: bool,
+    /// Suppress offenses frozen in a baseline TOML file (reloaded every pass).
+    #[arg(long, value_name = "PATH")]
+    baseline: Option<PathBuf>,
+    /// Poll interval in seconds (0.05–60, default 0.5).
+    #[arg(long, default_value_t = watch::DEFAULT_INTERVAL_SECS)]
+    interval: f64,
+    /// Clear the screen before each pass.
+    #[arg(long)]
+    clear: bool,
+    /// Lint once and exit (uses the watch pipeline; for CI/tests).
+    #[arg(long)]
+    once: bool,
+    /// Files or directories to watch. With no paths, Murphy discovers from cwd.
+    #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
+    paths: Vec<String>,
 }
 
 #[cfg_attr(not(feature = "mruby-user-cops"), allow(dead_code))]
@@ -1555,6 +1583,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         CliCommand::Plugins(plugins_args) => run_plugins(&plugins_args),
         CliCommand::Install(install_args) => run_install(&install_args),
         CliCommand::Cache(cache_args) => run_cache(&cache_args),
+        CliCommand::Watch(watch_args) => run_watch(&watch_args),
     }
 }
 
@@ -1630,6 +1659,383 @@ fn run_cache(args: &CacheArgs) -> Result<u8, AppError> {
             println!("cache cleaned: {}", root.display());
             Ok(EXIT_OK)
         }
+    }
+}
+
+/// Owned per-config state for one `murphy watch` process.
+///
+/// All fields are owned (no borrows across reloads): `cops_vec` is rebuilt
+/// from `registry` on every pass, so replacing the whole session on
+/// `.murphy.yml` change is safe. `result_cache` embeds the
+/// `lint_fingerprint(registry, config)`, so a reloaded session misses old
+/// keys by construction and never returns stale offenses (ADR 0047).
+struct WatchSession {
+    config: MurphyConfig,
+    registry: CopRegistry,
+    mruby_cops: Vec<MrubyCopSource>,
+    cache: Option<Cache>,
+    result_cache: Option<ResultCache>,
+}
+
+/// Load config + registry + caches for `murphy watch` (mirrors the
+/// `run_lint` setup minus `--fix`/`--profile`/`--since`: watch never
+/// fixes, never profiles, and computes its own diff by polling).
+fn load_watch_session(no_cache: bool) -> Result<WatchSession, AppError> {
+    let mut config =
+        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .map_err(|e| AppError::setup(e.to_string()))?;
+    for stale in murphy_core::plugin_sync::check_project_with_config(Path::new("."), &config, &[]) {
+        eprintln!("{}", stale.warning());
+    }
+    let registry = CopRegistry::discover_with_config(Path::new("."), &config, builtin_pack())
+        .map_err(|e| AppError::setup(e.to_string()))?;
+    config.apply_pack_default_layers(&registry.pack_default_configs());
+    cops::warn_user_enabled_disabled(&config, &registry);
+    #[cfg(feature = "mruby-user-cops")]
+    let mruby_cop_sources = load_mruby_cop_sources(registry.mruby_cop_paths())?;
+    #[cfg(not(feature = "mruby-user-cops"))]
+    let mruby_cop_sources = load_mruby_cop_sources(&[])?;
+    let mruby_cops: Vec<MrubyCopSource> = mruby_cop_sources;
+    // Same gating as `run_lint` (minus `--fix`, which watch never does):
+    // mruby user cops live outside the fingerprint, so the result cache
+    // stays off and the run falls back to the AST cache.
+    let cache: Option<Cache> = if no_cache {
+        None
+    } else {
+        Cache::open(murphy_translate::LAYER_VERSION)
+    };
+    let result_cache: Option<ResultCache> = if no_cache || !mruby_cops.is_empty() {
+        None
+    } else {
+        let extra = lint_fingerprint(&registry, &config);
+        ResultCache::open(&extra, murphy_translate::LAYER_VERSION)
+    };
+    Ok(WatchSession {
+        config,
+        registry,
+        mruby_cops,
+        cache,
+        result_cache,
+    })
+}
+
+/// Resolve the watch file list (mirrors the `run_lint` path
+/// classification + discovery, without `--since`: the watcher computes
+/// its own diff by polling, so no git restriction applies here).
+fn discover_watch_paths(
+    path_args: &[&str],
+    config: &MurphyConfig,
+    registry: &CopRegistry,
+) -> Result<Vec<String>, AppError> {
+    let mut explicit_files: Vec<String> = Vec::new();
+    let mut discover_roots: Vec<PathBuf> = Vec::new();
+    if path_args.is_empty() {
+        discover_roots.push(PathBuf::from("."));
+    } else {
+        for arg in path_args {
+            let p = Path::new(arg);
+            if p.is_dir() {
+                discover_roots.push(p.to_path_buf());
+            } else {
+                explicit_files.push((*arg).to_string());
+            }
+        }
+    }
+    let mut all_paths: BTreeSet<String> = explicit_files.iter().cloned().collect();
+    for root in &discover_roots {
+        let discovered = if root == Path::new(".") {
+            discover_with_config(root, config).map_err(|e| AppError::setup(e.to_string()))?
+        } else {
+            let mut local_config =
+                MurphyConfig::load_with_defaults(root, murphy_std::BUNDLED_DEFAULTS_YAML)
+                    .map_err(|e| AppError::setup(e.to_string()))?;
+            local_config.apply_pack_default_layers(&registry.pack_default_configs());
+            discover_with_config(root, &local_config).map_err(|e| AppError::setup(e.to_string()))?
+        };
+        for p in discovered {
+            all_paths.insert(p.to_string_lossy().into_owned());
+        }
+    }
+    Ok(all_paths.into_iter().collect())
+}
+
+/// Lint one watch pass (full initial pass or incremental changed-file
+/// subset) and print it in the requested `--format` shape.
+///
+/// Returns `(exit_code, offense_count)`. Aggregation, B4 enrichment,
+/// baseline filtering, and formatting are the shared `run_lint` pipeline
+/// — incremental passes only narrow the *file subset*, never the
+/// per-file semantics, so the ADR 0006 JSON shape is unchanged.
+fn lint_and_print_watch_pass(
+    sources: &[(String, String)],
+    session: &WatchSession,
+    format: LintOutputFormatArg,
+    baseline: Option<&PathBuf>,
+    clear: bool,
+) -> Result<(u8, usize), AppError> {
+    // `registry.cops()` allocates a fresh `Vec<&PluginCopV1>` bounded by
+    // `&session.registry`; hold it for this pass only (a config reload
+    // replaces the whole session between passes).
+    let cops_vec = session.registry.cops();
+    let cops: &[&PluginCopV1] = &cops_vec;
+    let flat = lint_files_memoized(
+        sources,
+        cops,
+        &session.mruby_cops,
+        &session.config,
+        session.cache.as_ref(),
+        session.result_cache.as_ref(),
+    );
+    let mut offenses = aggregate_with_config(flat, &session.config);
+    {
+        let desc_map = explain::description_map(&session.registry);
+        for offense in &mut offenses {
+            let desc =
+                explain::lookup_description(&desc_map, &offense.cop_name).unwrap_or_default();
+            murphy_core::enrich_offense(offense, &desc);
+        }
+    }
+    if let Some(path) = baseline {
+        let loaded = Baseline::load(path).map_err(|e| {
+            AppError::setup(format!("cannot load baseline {}: {e}", path.display()))
+        })?;
+        offenses = loaded.filter_offenses(offenses);
+    }
+    let exit = if offenses.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_OFFENSES
+    };
+    let count = offenses.len();
+    let file_paths: Vec<String> = sources.iter().map(|(p, _)| p.clone()).collect();
+    let formatted = format_lint_output(&offenses, &file_paths, OutputFormat::from(format))
+        .map_err(AppError::setup)?;
+    let mut stdout = std::io::stdout().lock();
+    if clear {
+        // ANSI clear screen + home cursor (no new dependency; ignored
+        // when stdout is piped).
+        if let Err(e) = write!(stdout, "\x1b[2J\x1b[H") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok((exit, count));
+            }
+            return Err(AppError::setup(format!("failed to write stdout: {e}")));
+        }
+    }
+    if let Err(e) = writeln!(stdout, "{formatted}") {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok((exit, count));
+        }
+        return Err(AppError::setup(format!("failed to write stdout: {e}")));
+    }
+    if let Err(e) = std::io::Write::flush(&mut stdout) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok((exit, count));
+        }
+        return Err(AppError::setup(format!("failed to write stdout: {e}")));
+    }
+    Ok((exit, count))
+}
+
+/// `murphy watch` (Phase 9 B1, murphy-fmw.2.1).
+///
+/// Resident polling loop on top of the A5 result cache: the initial pass
+/// lints every discovered file (warming `results/*.json`), then each tick
+/// re-discovers, diffs `mtime` snapshots, and re-lints only added +
+/// modified files. `.murphy.yml` (cwd) and the `--baseline` file are
+/// tracked too — a change there triggers a full re-lint (with a config
+/// reload for `.murphy.yml`). Transient per-tick failures (a file deleted
+/// mid-pass, a discovery hiccup) are reported on stderr without killing
+/// the resident loop; only baseline-load failures exit (they would fail
+/// every future pass identically, so failing loud matches `murphy lint`).
+fn run_watch(args: &WatchArgs) -> Result<u8, AppError> {
+    let interval = watch::validate_interval(args.interval).map_err(AppError::setup)?;
+    let path_args: Vec<&str> = args.paths.iter().map(String::as_str).collect();
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let mut session = load_watch_session(args.no_cache)?;
+    let mut prev_files = discover_watch_paths(&path_args, &session.config, &session.registry)?;
+    let mut prev_snap = watch::snapshot_files(&prev_files);
+    let mut config_sig = watch::file_sig(".murphy.yml");
+    let mut baseline_sig = args
+        .baseline
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .as_deref()
+        .and_then(watch::file_sig);
+
+    // ── initial full pass (also warms the A5 result cache) ──────────────
+    let initial_sources = read_batch_sources(&prev_files, worker_count)?;
+    let (initial_exit, initial_count) = lint_and_print_watch_pass(
+        &initial_sources,
+        &session,
+        args.format,
+        args.baseline.as_ref(),
+        args.clear,
+    )?;
+    eprintln!(
+        "murphy watch: initial pass: {} files, {initial_count} offenses",
+        prev_files.len()
+    );
+    if args.once {
+        return Ok(initial_exit);
+    }
+    eprintln!(
+        "murphy watch: watching {} files every {:.2}s (Ctrl-C to stop)",
+        prev_files.len(),
+        args.interval
+    );
+
+    // ── resident poll loop ──────────────────────────────────────────────
+    loop {
+        std::thread::sleep(interval);
+
+        // Config / baseline change → full re-lint (reload first for config:
+        // the new fingerprint misses old result-cache keys by construction).
+        let cur_config_sig = watch::file_sig(".murphy.yml");
+        let cur_baseline_sig = args
+            .baseline
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .as_deref()
+            .and_then(watch::file_sig);
+        if cur_config_sig != config_sig {
+            eprintln!(
+                "murphy watch: config changed (.murphy.yml) — reloading and re-linting all files"
+            );
+            session = load_watch_session(args.no_cache)?;
+            config_sig = cur_config_sig;
+            baseline_sig = cur_baseline_sig;
+            match discover_watch_paths(&path_args, &session.config, &session.registry) {
+                Ok(files) => {
+                    prev_files = files;
+                    prev_snap = watch::snapshot_files(&prev_files);
+                }
+                Err(e) => {
+                    eprintln!("murphy watch: discovery failed, retrying: {}", e.message);
+                    continue;
+                }
+            }
+            match read_batch_sources(&prev_files, worker_count) {
+                Ok(sources) => {
+                    match lint_and_print_watch_pass(
+                        &sources,
+                        &session,
+                        args.format,
+                        args.baseline.as_ref(),
+                        args.clear,
+                    ) {
+                        Ok((_, count)) => {
+                            eprintln!(
+                                "murphy watch: full re-lint: {} files, {count} offenses",
+                                prev_files.len()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("murphy watch: {}", e.message);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("murphy watch: {}", e.message);
+                }
+            }
+            continue;
+        }
+        if cur_baseline_sig != baseline_sig {
+            eprintln!("murphy watch: baseline changed — re-linting all files");
+            baseline_sig = cur_baseline_sig;
+            match read_batch_sources(&prev_files, worker_count) {
+                Ok(sources) => {
+                    match lint_and_print_watch_pass(
+                        &sources,
+                        &session,
+                        args.format,
+                        args.baseline.as_ref(),
+                        args.clear,
+                    ) {
+                        Ok((_, count)) => {
+                            eprintln!(
+                                "murphy watch: full re-lint: {} files, {count} offenses",
+                                prev_files.len()
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("murphy watch: {}", e.message);
+                }
+            }
+            continue;
+        }
+
+        // Normal tick: re-discover (catches new files) + snapshot diff.
+        let curr_files = match discover_watch_paths(&path_args, &session.config, &session.registry)
+        {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("murphy watch: discovery failed, retrying: {}", e.message);
+                continue;
+            }
+        };
+        let curr_snap = watch::snapshot_files(&curr_files);
+        let mut diff = watch::diff_snapshots(&prev_snap, &curr_snap);
+        // Files the snapshot could not stat (deleted between discovery
+        // and stat, or unreadable) never enter the maps — merge them at
+        // the path-list level so they still surface as added/removed
+        // and get a proper read error instead of silently vanishing.
+        for f in &curr_files {
+            if !curr_snap.contains_key(f) && !prev_snap.contains_key(f) && !diff.added.contains(f) {
+                diff.added.push(f.clone());
+            }
+        }
+        for f in &prev_files {
+            if !curr_files.contains(f) && !diff.removed.contains(f) {
+                diff.removed.push(f.clone());
+            }
+        }
+        diff.added.sort();
+        diff.removed.sort();
+        if diff.is_empty() {
+            prev_files = curr_files;
+            prev_snap = curr_snap;
+            continue;
+        }
+
+        let summary = watch::format_change_summary(&diff);
+        let targets = diff.lint_targets();
+        if targets.is_empty() {
+            // Removals only — nothing to lint.
+            eprintln!("murphy watch: {summary} — nothing to lint");
+            prev_files = curr_files;
+            prev_snap = curr_snap;
+            continue;
+        }
+        match read_batch_sources(&targets, worker_count) {
+            Ok(sources) => {
+                match lint_and_print_watch_pass(
+                    &sources,
+                    &session,
+                    args.format,
+                    args.baseline.as_ref(),
+                    args.clear,
+                ) {
+                    Ok((_, count)) => {
+                        eprintln!("murphy watch: {summary} — {count} offenses");
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => {
+                // Transient (file deleted mid-pass, editor half-write):
+                // report and keep watching; the next tick re-diffs.
+                eprintln!("murphy watch: {}", e.message);
+            }
+        }
+        prev_files = curr_files;
+        prev_snap = curr_snap;
     }
 }
 
