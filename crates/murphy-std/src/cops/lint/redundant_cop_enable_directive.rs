@@ -6,18 +6,17 @@
 //! upstream_cop: Lint/RedundantCopEnableDirective
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues:
-//!   - murphy-8b8m
+//! gap_issues: []
 //! notes: >
-//!   The `all` keyword and department names (e.g. `Lint`) are treated as
-//!   opaque/global rather than expanded to concrete cop names (the host has
-//!   no registry access). Redundant enables that depend on such expansion —
-//!   for example a specific `enable X` after a `disable all`, or a department
-//!   enable that only partially overlaps an active disable — are not detected
-//!   (a safe false negative). A valid enable is never falsely flagged. The
-//!   `extra_enabled_directives` primitive's `disable_all_depth` proxy keeps
-//!   those cases on the conservative side. Registry-backed `all`/department
-//!   expansion is tracked by murphy-8b8m.
+//!   `all` and department names (e.g. `Lint`) are expanded to concrete cop
+//!   names via the pack registry (`PACK_COPS`), mirroring RuboCop's
+//!   `DirectiveComment#cop_names` through
+//!   `Cx::extra_enabled_directives_with_registry` (murphy-8b8m, fixed). `all`
+//!   excludes `Lint/Syntax` + `Lint/RedundantCopDisableDirective`, as does the
+//!   `Lint` department; file-local unknown names are covered by a prior
+//!   `disable all`/department (safe direction, no false positives). A
+//!   department `enable` is redundant as a whole when ANY expanded cop is
+//!   redundant, reproducing RuboCop's whole-comment removal.
 //!   Redundant cop names that are prefixes of other listed cops (and the `all`
 //!   keyword / department names) are located by a `comment.text.index`-style
 //!   search exactly as RuboCop does — this reproduces RuboCop's behavior rather
@@ -46,7 +45,25 @@ impl RedundantCopEnableDirective {
             return;
         }
 
-        for extra in cx.extra_enabled_directives() {
+        // Registry-backed `all`/department expansion (murphy-8b8m): the pack's
+        // own cop table is the registry. No `CxRaw` wire change (ABI unchanged).
+        let registry: Vec<&str> = crate::PACK_COPS
+            .iter()
+            .filter_map(|cop| {
+                // Safety: `cop.name` is a `RawSlice` over `'static` rodata
+                // emitted by `register_cops!`; `as_bytes` only reads it.
+                let bytes = unsafe { cop.name.as_bytes() };
+                std::str::from_utf8(bytes).ok()
+            })
+            .collect();
+
+        // RuboCop dedupes same-range offenses
+        // (`Base#add_offense` via `current_offense_locations`): a department
+        // enable collapsing many expanded cops to one department name, or a
+        // duplicated `enable Foo, Foo`, emits once.
+        let mut seen: std::collections::HashSet<Range> = std::collections::HashSet::new();
+
+        for extra in cx.extra_enabled_directives_with_registry(&registry) {
             let comment_src = cx.raw_source(extra.comment_range);
 
             // When every cop named by the directive is redundant, RuboCop
@@ -74,6 +91,9 @@ impl RedundantCopEnableDirective {
                     start,
                     end: start + name.len() as u32,
                 };
+                if !seen.insert(offense_range) {
+                    continue;
+                }
                 let shown = if *name == "all" { "all cops" } else { name };
                 cx.emit_offense(
                     offense_range,
@@ -295,5 +315,130 @@ mod tests {
             "#},
             "foo\nbar\n",
         );
+    }
+
+    // murphy-8b8m: registry-backed `all`/department expansion (RuboCop parity).
+
+    #[test]
+    fn flags_enable_department_without_disable() {
+        test::<RedundantCopEnableDirective>().expect_offense(indoc! {r#"
+            foo
+            # rubocop:enable Layout
+                             ^^^^^^ Unnecessary enabling of Layout.
+        "#});
+    }
+
+    #[test]
+    fn corrects_enable_department_without_disable() {
+        test::<RedundantCopEnableDirective>().expect_correction(
+            indoc! {r#"
+                foo
+                # rubocop:enable Layout
+                                 ^^^^^^ Unnecessary enabling of Layout.
+            "#},
+            "foo\n",
+        );
+    }
+
+    #[test]
+    fn accepts_enable_department_matching_disable() {
+        test::<RedundantCopEnableDirective>().expect_no_offenses(indoc! {r#"
+            # rubocop:disable Layout
+            foo
+            # rubocop:enable Layout
+        "#});
+    }
+
+    #[test]
+    fn accepts_enable_specific_after_disable_department() {
+        // `disable Layout` covers every Layout cop.
+        test::<RedundantCopEnableDirective>().expect_no_offenses(indoc! {r#"
+            # rubocop:disable Layout
+            foo
+            # rubocop:enable Layout/LineLength
+        "#});
+    }
+
+    #[test]
+    fn flags_enable_department_after_single_disable() {
+        // One valid + many redundant still removes the whole department line,
+        // exactly like RuboCop 1.87.0.
+        test::<RedundantCopEnableDirective>().expect_offense(indoc! {r#"
+            # rubocop:disable Layout/LineLength
+            foo
+            # rubocop:enable Layout
+                             ^^^^^^ Unnecessary enabling of Layout.
+        "#});
+    }
+
+    #[test]
+    fn corrects_enable_department_after_single_disable() {
+        test::<RedundantCopEnableDirective>().expect_correction(
+            indoc! {r#"
+                # rubocop:disable Layout/LineLength
+                foo
+                # rubocop:enable Layout
+                                 ^^^^^^ Unnecessary enabling of Layout.
+            "#},
+            "# rubocop:disable Layout/LineLength\nfoo\n\n",
+        );
+    }
+
+    #[test]
+    fn flags_redundant_department_alongside_valid_enable() {
+        test::<RedundantCopEnableDirective>().expect_offense(indoc! {r#"
+            # rubocop:disable Layout/LineLength
+            foo
+            # rubocop:enable Metrics, Layout/LineLength
+                             ^^^^^^^ Unnecessary enabling of Metrics.
+        "#});
+    }
+
+    #[test]
+    fn corrects_redundant_department_alongside_valid_enable() {
+        test::<RedundantCopEnableDirective>().expect_correction(
+            indoc! {r#"
+                # rubocop:disable Layout/LineLength
+                foo
+                # rubocop:enable Metrics, Layout/LineLength
+                                 ^^^^^^^ Unnecessary enabling of Metrics.
+            "#},
+            "# rubocop:disable Layout/LineLength\nfoo\n# rubocop:enable Layout/LineLength\n",
+        );
+    }
+
+    #[test]
+    fn flags_second_enable_after_disable_all() {
+        // `disable all` expands: first specific enable valid, second redundant.
+        test::<RedundantCopEnableDirective>().expect_offense(indoc! {r#"
+            # rubocop:disable all
+            foo
+            # rubocop:enable Layout/LineLength
+            bar
+            # rubocop:enable Layout/LineLength
+                             ^^^^^^^^^^^^^^^^^ Unnecessary enabling of Layout/LineLength.
+            baz
+        "#});
+    }
+
+    #[test]
+    fn accepts_enable_department_after_disable_all() {
+        test::<RedundantCopEnableDirective>().expect_no_offenses(indoc! {r#"
+            # rubocop:disable all
+            foo
+            # rubocop:enable Layout
+        "#});
+    }
+
+    #[test]
+    fn flags_redundant_specific_after_disable_department_plus_valid() {
+        // `disable Layout` then `enable Layout, Layout/LineLength`: the
+        // duplicate specific is redundant, the department itself is valid.
+        test::<RedundantCopEnableDirective>().expect_offense(indoc! {r#"
+            # rubocop:disable Layout
+            foo
+            # rubocop:enable Layout, Layout/LineLength
+                                     ^^^^^^^^^^^^^^^^^ Unnecessary enabling of Layout/LineLength.
+        "#});
     }
 }
