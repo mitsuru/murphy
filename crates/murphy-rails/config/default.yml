@@ -296,6 +296,15 @@ Rails/TableNameAssignment:
   Include:
     - '**/app/models/**/*.rb'
 
+Rails/ThreeStateBooleanColumn:
+  Include:
+    - 'db/**/*.rb'
+
+Rails/TimeZoneAssignment:
+  Include:
+    - '**/spec/**/*.rb'
+    - '**/test/**/*.rb'
+
 # --- Ported `Rails/*` opt-out defaults (subset of upstream defaults) ---
 # Cops below are opt-in upstream (`Enabled: false`); the pack layer must
 # reproduce that so they stay silent unless the user enables them
