@@ -32,6 +32,11 @@
 //! - `RSpec/VerifiedDoubles` — prefer verifying doubles (murphy-4gd.3.5).
 //! - `RSpec/ReceiveNever` — prefer `not_to receive` over `never` (murphy-4gd.3.5).
 //! - `RSpec/SubjectDeclaration` — define subject with the subject helper (murphy-4gd.3.5).
+//! - `RSpec/AroundBlock` — `around` hooks must run the test (murphy-4gd.3.7).
+//! - `RSpec/ChangeByZero` — prefer negated matchers over `change.by(0)` (murphy-4gd.3.7).
+//! - `RSpec/ContextWording` — `context` docstring prefix style (murphy-4gd.3.7).
+//! - `RSpec/DescribedClassModuleWrapping` — no specs inside `module` (murphy-4gd.3.7).
+//! - `RSpec/ExampleWithoutDescription` — examples need descriptions (murphy-4gd.3.7).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
