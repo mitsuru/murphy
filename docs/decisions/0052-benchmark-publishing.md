@@ -26,9 +26,10 @@ docs, so the "Ruff for Ruby" claim had no standing public data.
   table spliced into `docs/guides/benchmarks.md` between
   `BENCHMARK-RESULTS` markers (idempotent re-splice, never duplicated).
 - `phase6-perf.yml` gains a `publish` job (only on `push` to `main`):
-  benchmark → render → upload raw exports as artifacts → commit the
-  refreshed page + snapshot back with `[skip ci]` (no retrigger loop).
-  PRs run only the fast checks (`bash -n`, renderer unit tests).
+  benchmark → render → upload raw exports as artifacts → force-push the
+  refreshed page + snapshot to a rolling `docs/bench-snapshot` branch and
+  open/update a snapshot PR. PRs run only the fast checks (`bash -n`,
+  renderer unit tests).
 - `docs/guides/benchmarks.md` is the canonical page: results table,
   methodology, local repro, snapshot-schema note, and the
   hyperfine-vs-`--profile` split (outside "how slow", inside "which
@@ -45,8 +46,11 @@ docs, so the "Ruff for Ruby" claim had no standing public data.
   every `main` push refreshes them. Absolute times are runner-relative
   (`ubuntu-latest`, shared vCPU) — the murphy/RuboCop ratio is the
   portable signal, stated on the page.
-- Commit-back keeps docs fresh without a Pages deployment or manual
-  step; `[skip ci]` avoids a self-trigger loop.
+- The rolling snapshot PR keeps docs fresh without a Pages deployment.
+  `main` is ruleset-protected ("changes via pull request"), so direct
+  commit-back is rejected — the PR is the compliant path. PR-triggered
+  runs execute only fast checks (`perf-scripts-check`; `perf-regression`
+  and `publish` skip on `pull_request`), so there is no retrigger loop.
 - Timing noise stays visible: means ship with stddev, raw exports are
   kept as CI artifacts for audit.
 
