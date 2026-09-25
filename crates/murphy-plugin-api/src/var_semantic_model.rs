@@ -1213,8 +1213,7 @@ impl VarSemanticModel {
                 // declared so far in the accessible scopes, so `x = 1; binding`
                 // does not flag `x` as useless.
                 NodeKind::Send { method, args, .. } if args.len == 0 => {
-                    let is_binding =
-                        ast.interner().resolve(method.0) == "binding";
+                    let is_binding = ast.interner().resolve(method.0) == "binding";
                     if is_binding {
                         let pos = ast.range(node).start;
                         // Accessible scopes: current scope plus ancestors while
@@ -1232,9 +1231,7 @@ impl VarSemanticModel {
                             if !is_block {
                                 break;
                             }
-                            let parent = scopes
-                                .get(&cur)
-                                .and_then(|s| s.parent_scope);
+                            let parent = scopes.get(&cur).and_then(|s| s.parent_scope);
                             match parent {
                                 Some(p) => {
                                     accessible.push(p);
@@ -1246,10 +1243,7 @@ impl VarSemanticModel {
                         for scope_id in accessible {
                             if let Some(scope_info) = scopes.get_mut(&scope_id) {
                                 for var in scope_info.variables.iter_mut() {
-                                    var.references.push(Reference {
-                                        node_id: node,
-                                        pos,
-                                    });
+                                    var.references.push(Reference { node_id: node, pos });
                                 }
                             }
                         }
