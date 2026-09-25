@@ -132,17 +132,15 @@ fn check_file_join(node: NodeId, cx: &Cx<'_>) {
             | NodeKind::Ivar(_)
             | NodeKind::Cvar(_)
             | NodeKind::Gvar(_)
-            | NodeKind::Const { .. } => {
+            | NodeKind::Const { .. }
+                if !is_rails_root(cx, a) =>
+            {
                 // Rails.root itself is a Send, not Const — consts bail.
                 // But `File` const args? Any const bails like upstream.
-                if !is_rails_root(cx, a) {
-                    return;
-                }
+                return;
             }
-            NodeKind::Str(id) => {
-                if cx.string_str(id).contains("//") {
-                    return;
-                }
+            NodeKind::Str(id) if cx.string_str(id).contains("//") => {
+                return;
             }
             _ => {}
         }

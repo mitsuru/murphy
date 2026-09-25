@@ -324,7 +324,7 @@ fn collapse_namespace(namespace: &[String], konst: &[Option<String>]) -> Vec<Str
             .collect();
     }
     let c: Vec<String> = konst.iter().filter_map(|p| p.clone()).collect();
-    let start = 0.max(namespace.len().saturating_sub(c.len()));
+    let start = namespace.len().saturating_sub(c.len());
     let max = namespace.len();
     let mut intersection = max;
     for shift in start..=max {
