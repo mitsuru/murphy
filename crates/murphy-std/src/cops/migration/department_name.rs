@@ -10,7 +10,7 @@
 //! upstream_version_checked: 1.87.0
 //! version_added: "0.75"
 //! safe: true
-//! supports_autocorrect: false
+//! supports_autocorrect: true
 //! status: verified
 //! gap_issues: []
 //! notes: >
@@ -32,10 +32,15 @@
 //!   bare cop name (leading whitespace skipped), byte-precise per RuboCop's
 //!   `range_between(begin_pos + offset, + name.length)`.
 //!
-//!   Autocorrect: not implemented (v1 gap). RuboCop prepends the department via
-//!   `Registry.global.qualified_cop_name` (e.g. `AbcSize` -> `Metrics/AbcSize`),
-//!   which requires the full ~500-cop bare-name -> department table; murphy-std
-//!   has no such registry, so the detect-only port ships without it.
+//!   Autocorrect: prepends the department via the static `BARE_TO_QUALIFIED`
+//!   table (e.g. `AbcSize` -> `Metrics/AbcSize`), mirroring RuboCop's
+//!   `Registry.global.qualified_cop_name` with `warn: false`. Unknown bare
+//!   names (e.g. `Foo`) and ambiguous ones (`MultipleComparison`,
+//!   `SelfAssignment`, which map to two departments) report an offense with
+//!   no correction, matching RuboCop's non-correctable / error cases without
+//!   crashing. Legacy bare names (e.g. `AlignArguments`) fall back to the
+//!   `LEGACY_COP_NAMES` table, mirroring `qualified_legacy_cop_name` (which
+//!   returns the old qualified name, e.g. `Layout/AlignArguments`).
 //!
 //!   GAP — department set: RuboCop's `department?` consults the live registry,
 //!   so with rubocop-rails / rubocop-rspec loaded, bare `Rails` / `RSpec` are
@@ -53,6 +58,698 @@ const MSG: &str = "Department name is missing.";
 /// is a department reference, not a department-less cop name, so it is accepted.
 const CORE_DEPARTMENTS: &[&str] = &[
     "Bundler", "Gemspec", "Layout", "Lint", "Metrics", "Migration", "Naming", "Security", "Style",
+];
+
+/// Bare cop-name -> qualified cop-name table for RuboCop core 1.87.0
+/// (`Registry.global.cops`, 606 entries). Mirrors
+/// `Registry.global.qualified_cop_name(name, nil, warn: false)` for the
+/// single-match case: a bare name mapping to exactly one department resolves
+/// to that qualified name. Bare names with zero matches fall through to
+/// [`qualified_legacy_cop_name`]; bare names with two matches (currently
+/// `MultipleComparison` and `SelfAssignment`) are ambiguous — RuboCop raises
+/// `AmbiguousCopName`, so we report an offense with no correction instead of
+/// crashing.
+const BARE_TO_QUALIFIED: &[(&str, &str)] = &[
+    ("DuplicatedGem", "Bundler/DuplicatedGem"),
+    ("DuplicatedGroup", "Bundler/DuplicatedGroup"),
+    ("GemComment", "Bundler/GemComment"),
+    ("GemFilename", "Bundler/GemFilename"),
+    ("GemVersion", "Bundler/GemVersion"),
+    ("InsecureProtocolSource", "Bundler/InsecureProtocolSource"),
+    ("OrderedGems", "Bundler/OrderedGems"),
+    ("AddRuntimeDependency", "Gemspec/AddRuntimeDependency"),
+    ("AttributeAssignment", "Gemspec/AttributeAssignment"),
+    ("DependencyVersion", "Gemspec/DependencyVersion"),
+    ("DeprecatedAttributeAssignment", "Gemspec/DeprecatedAttributeAssignment"),
+    ("DevelopmentDependencies", "Gemspec/DevelopmentDependencies"),
+    ("DuplicatedAssignment", "Gemspec/DuplicatedAssignment"),
+    ("OrderedDependencies", "Gemspec/OrderedDependencies"),
+    ("RequireMFA", "Gemspec/RequireMFA"),
+    ("RequiredRubyVersion", "Gemspec/RequiredRubyVersion"),
+    ("RubyVersionGlobalsUsage", "Gemspec/RubyVersionGlobalsUsage"),
+    ("AccessModifierIndentation", "Layout/AccessModifierIndentation"),
+    ("ArgumentAlignment", "Layout/ArgumentAlignment"),
+    ("ArrayAlignment", "Layout/ArrayAlignment"),
+    ("AssignmentIndentation", "Layout/AssignmentIndentation"),
+    ("BeginEndAlignment", "Layout/BeginEndAlignment"),
+    ("BlockAlignment", "Layout/BlockAlignment"),
+    ("BlockEndNewline", "Layout/BlockEndNewline"),
+    ("CaseIndentation", "Layout/CaseIndentation"),
+    ("ClassStructure", "Layout/ClassStructure"),
+    ("ClosingHeredocIndentation", "Layout/ClosingHeredocIndentation"),
+    ("ClosingParenthesisIndentation", "Layout/ClosingParenthesisIndentation"),
+    ("CommentIndentation", "Layout/CommentIndentation"),
+    ("ConditionPosition", "Layout/ConditionPosition"),
+    ("DefEndAlignment", "Layout/DefEndAlignment"),
+    ("DotPosition", "Layout/DotPosition"),
+    ("ElseAlignment", "Layout/ElseAlignment"),
+    ("EmptyComment", "Layout/EmptyComment"),
+    ("EmptyLineAfterGuardClause", "Layout/EmptyLineAfterGuardClause"),
+    ("EmptyLineAfterMagicComment", "Layout/EmptyLineAfterMagicComment"),
+    ("EmptyLineAfterMultilineCondition", "Layout/EmptyLineAfterMultilineCondition"),
+    ("EmptyLineBetweenDefs", "Layout/EmptyLineBetweenDefs"),
+    ("EmptyLines", "Layout/EmptyLines"),
+    ("EmptyLinesAfterModuleInclusion", "Layout/EmptyLinesAfterModuleInclusion"),
+    ("EmptyLinesAroundAccessModifier", "Layout/EmptyLinesAroundAccessModifier"),
+    ("EmptyLinesAroundArguments", "Layout/EmptyLinesAroundArguments"),
+    ("EmptyLinesAroundAttributeAccessor", "Layout/EmptyLinesAroundAttributeAccessor"),
+    ("EmptyLinesAroundBeginBody", "Layout/EmptyLinesAroundBeginBody"),
+    ("EmptyLinesAroundBlockBody", "Layout/EmptyLinesAroundBlockBody"),
+    ("EmptyLinesAroundClassBody", "Layout/EmptyLinesAroundClassBody"),
+    ("EmptyLinesAroundExceptionHandlingKeywords", "Layout/EmptyLinesAroundExceptionHandlingKeywords"),
+    ("EmptyLinesAroundMethodBody", "Layout/EmptyLinesAroundMethodBody"),
+    ("EmptyLinesAroundModuleBody", "Layout/EmptyLinesAroundModuleBody"),
+    ("EndAlignment", "Layout/EndAlignment"),
+    ("EndOfLine", "Layout/EndOfLine"),
+    ("ExtraSpacing", "Layout/ExtraSpacing"),
+    ("FirstArgumentIndentation", "Layout/FirstArgumentIndentation"),
+    ("FirstArrayElementIndentation", "Layout/FirstArrayElementIndentation"),
+    ("FirstArrayElementLineBreak", "Layout/FirstArrayElementLineBreak"),
+    ("FirstHashElementIndentation", "Layout/FirstHashElementIndentation"),
+    ("FirstHashElementLineBreak", "Layout/FirstHashElementLineBreak"),
+    ("FirstMethodArgumentLineBreak", "Layout/FirstMethodArgumentLineBreak"),
+    ("FirstMethodParameterLineBreak", "Layout/FirstMethodParameterLineBreak"),
+    ("FirstParameterIndentation", "Layout/FirstParameterIndentation"),
+    ("HashAlignment", "Layout/HashAlignment"),
+    ("HeredocArgumentClosingParenthesis", "Layout/HeredocArgumentClosingParenthesis"),
+    ("HeredocIndentation", "Layout/HeredocIndentation"),
+    ("IndentationConsistency", "Layout/IndentationConsistency"),
+    ("IndentationStyle", "Layout/IndentationStyle"),
+    ("IndentationWidth", "Layout/IndentationWidth"),
+    ("InitialIndentation", "Layout/InitialIndentation"),
+    ("LeadingCommentSpace", "Layout/LeadingCommentSpace"),
+    ("LeadingEmptyLines", "Layout/LeadingEmptyLines"),
+    ("LineContinuationLeadingSpace", "Layout/LineContinuationLeadingSpace"),
+    ("LineContinuationSpacing", "Layout/LineContinuationSpacing"),
+    ("LineEndStringConcatenationIndentation", "Layout/LineEndStringConcatenationIndentation"),
+    ("LineLength", "Layout/LineLength"),
+    ("MultilineArrayBraceLayout", "Layout/MultilineArrayBraceLayout"),
+    ("MultilineArrayLineBreaks", "Layout/MultilineArrayLineBreaks"),
+    ("MultilineAssignmentLayout", "Layout/MultilineAssignmentLayout"),
+    ("MultilineBlockLayout", "Layout/MultilineBlockLayout"),
+    ("MultilineHashBraceLayout", "Layout/MultilineHashBraceLayout"),
+    ("MultilineHashKeyLineBreaks", "Layout/MultilineHashKeyLineBreaks"),
+    ("MultilineMethodArgumentLineBreaks", "Layout/MultilineMethodArgumentLineBreaks"),
+    ("MultilineMethodCallBraceLayout", "Layout/MultilineMethodCallBraceLayout"),
+    ("MultilineMethodCallIndentation", "Layout/MultilineMethodCallIndentation"),
+    ("MultilineMethodDefinitionBraceLayout", "Layout/MultilineMethodDefinitionBraceLayout"),
+    ("MultilineMethodParameterLineBreaks", "Layout/MultilineMethodParameterLineBreaks"),
+    ("MultilineOperationIndentation", "Layout/MultilineOperationIndentation"),
+    ("ParameterAlignment", "Layout/ParameterAlignment"),
+    ("RedundantLineBreak", "Layout/RedundantLineBreak"),
+    ("RescueEnsureAlignment", "Layout/RescueEnsureAlignment"),
+    ("SingleLineBlockChain", "Layout/SingleLineBlockChain"),
+    ("SpaceAfterColon", "Layout/SpaceAfterColon"),
+    ("SpaceAfterComma", "Layout/SpaceAfterComma"),
+    ("SpaceAfterMethodName", "Layout/SpaceAfterMethodName"),
+    ("SpaceAfterNot", "Layout/SpaceAfterNot"),
+    ("SpaceAfterSemicolon", "Layout/SpaceAfterSemicolon"),
+    ("SpaceAroundBlockParameters", "Layout/SpaceAroundBlockParameters"),
+    ("SpaceAroundEqualsInParameterDefault", "Layout/SpaceAroundEqualsInParameterDefault"),
+    ("SpaceAroundKeyword", "Layout/SpaceAroundKeyword"),
+    ("SpaceAroundMethodCallOperator", "Layout/SpaceAroundMethodCallOperator"),
+    ("SpaceAroundOperators", "Layout/SpaceAroundOperators"),
+    ("SpaceBeforeBlockBraces", "Layout/SpaceBeforeBlockBraces"),
+    ("SpaceBeforeBrackets", "Layout/SpaceBeforeBrackets"),
+    ("SpaceBeforeComma", "Layout/SpaceBeforeComma"),
+    ("SpaceBeforeComment", "Layout/SpaceBeforeComment"),
+    ("SpaceBeforeFirstArg", "Layout/SpaceBeforeFirstArg"),
+    ("SpaceBeforeSemicolon", "Layout/SpaceBeforeSemicolon"),
+    ("SpaceInLambdaLiteral", "Layout/SpaceInLambdaLiteral"),
+    ("SpaceInsideArrayLiteralBrackets", "Layout/SpaceInsideArrayLiteralBrackets"),
+    ("SpaceInsideArrayPercentLiteral", "Layout/SpaceInsideArrayPercentLiteral"),
+    ("SpaceInsideBlockBraces", "Layout/SpaceInsideBlockBraces"),
+    ("SpaceInsideHashLiteralBraces", "Layout/SpaceInsideHashLiteralBraces"),
+    ("SpaceInsideParens", "Layout/SpaceInsideParens"),
+    ("SpaceInsidePercentLiteralDelimiters", "Layout/SpaceInsidePercentLiteralDelimiters"),
+    ("SpaceInsideRangeLiteral", "Layout/SpaceInsideRangeLiteral"),
+    ("SpaceInsideReferenceBrackets", "Layout/SpaceInsideReferenceBrackets"),
+    ("SpaceInsideStringInterpolation", "Layout/SpaceInsideStringInterpolation"),
+    ("TrailingEmptyLines", "Layout/TrailingEmptyLines"),
+    ("TrailingWhitespace", "Layout/TrailingWhitespace"),
+    ("AmbiguousAssignment", "Lint/AmbiguousAssignment"),
+    ("AmbiguousBlockAssociation", "Lint/AmbiguousBlockAssociation"),
+    ("AmbiguousOperator", "Lint/AmbiguousOperator"),
+    ("AmbiguousOperatorPrecedence", "Lint/AmbiguousOperatorPrecedence"),
+    ("AmbiguousRange", "Lint/AmbiguousRange"),
+    ("AmbiguousRegexpLiteral", "Lint/AmbiguousRegexpLiteral"),
+    ("ArrayLiteralInRegexp", "Lint/ArrayLiteralInRegexp"),
+    ("AssignmentInCondition", "Lint/AssignmentInCondition"),
+    ("BigDecimalNew", "Lint/BigDecimalNew"),
+    ("BinaryOperatorWithIdenticalOperands", "Lint/BinaryOperatorWithIdenticalOperands"),
+    ("BooleanSymbol", "Lint/BooleanSymbol"),
+    ("CircularArgumentReference", "Lint/CircularArgumentReference"),
+    ("ConstantDefinitionInBlock", "Lint/ConstantDefinitionInBlock"),
+    ("ConstantOverwrittenInRescue", "Lint/ConstantOverwrittenInRescue"),
+    ("ConstantReassignment", "Lint/ConstantReassignment"),
+    ("ConstantResolution", "Lint/ConstantResolution"),
+    ("CopDirectiveSyntax", "Lint/CopDirectiveSyntax"),
+    ("DataDefineOverride", "Lint/DataDefineOverride"),
+    ("Debugger", "Lint/Debugger"),
+    ("DeprecatedClassMethods", "Lint/DeprecatedClassMethods"),
+    ("DeprecatedConstants", "Lint/DeprecatedConstants"),
+    ("DeprecatedOpenSSLConstant", "Lint/DeprecatedOpenSSLConstant"),
+    ("DisjunctiveAssignmentInConstructor", "Lint/DisjunctiveAssignmentInConstructor"),
+    ("DuplicateBranch", "Lint/DuplicateBranch"),
+    ("DuplicateCaseCondition", "Lint/DuplicateCaseCondition"),
+    ("DuplicateElsifCondition", "Lint/DuplicateElsifCondition"),
+    ("DuplicateHashKey", "Lint/DuplicateHashKey"),
+    ("DuplicateMagicComment", "Lint/DuplicateMagicComment"),
+    ("DuplicateMatchPattern", "Lint/DuplicateMatchPattern"),
+    ("DuplicateMethods", "Lint/DuplicateMethods"),
+    ("DuplicateRegexpCharacterClassElement", "Lint/DuplicateRegexpCharacterClassElement"),
+    ("DuplicateRequire", "Lint/DuplicateRequire"),
+    ("DuplicateRescueException", "Lint/DuplicateRescueException"),
+    ("DuplicateSetElement", "Lint/DuplicateSetElement"),
+    ("EachWithObjectArgument", "Lint/EachWithObjectArgument"),
+    ("ElseLayout", "Lint/ElseLayout"),
+    ("EmptyBlock", "Lint/EmptyBlock"),
+    ("EmptyClass", "Lint/EmptyClass"),
+    ("EmptyConditionalBody", "Lint/EmptyConditionalBody"),
+    ("EmptyEnsure", "Lint/EmptyEnsure"),
+    ("EmptyExpression", "Lint/EmptyExpression"),
+    ("EmptyFile", "Lint/EmptyFile"),
+    ("EmptyInPattern", "Lint/EmptyInPattern"),
+    ("EmptyInterpolation", "Lint/EmptyInterpolation"),
+    ("EmptyWhen", "Lint/EmptyWhen"),
+    ("EnsureReturn", "Lint/EnsureReturn"),
+    ("ErbNewArguments", "Lint/ErbNewArguments"),
+    ("FlipFlop", "Lint/FlipFlop"),
+    ("FloatComparison", "Lint/FloatComparison"),
+    ("FloatOutOfRange", "Lint/FloatOutOfRange"),
+    ("FormatParameterMismatch", "Lint/FormatParameterMismatch"),
+    ("HashCompareByIdentity", "Lint/HashCompareByIdentity"),
+    ("HashNewWithKeywordArgumentsAsDefault", "Lint/HashNewWithKeywordArgumentsAsDefault"),
+    ("HeredocMethodCallPosition", "Lint/HeredocMethodCallPosition"),
+    ("IdentityComparison", "Lint/IdentityComparison"),
+    ("ImplicitStringConcatenation", "Lint/ImplicitStringConcatenation"),
+    ("IncompatibleIoSelectWithFiberScheduler", "Lint/IncompatibleIoSelectWithFiberScheduler"),
+    ("IneffectiveAccessModifier", "Lint/IneffectiveAccessModifier"),
+    ("InheritException", "Lint/InheritException"),
+    ("InterpolationCheck", "Lint/InterpolationCheck"),
+    ("ItWithoutArgumentsInBlock", "Lint/ItWithoutArgumentsInBlock"),
+    ("LambdaWithoutLiteralBlock", "Lint/LambdaWithoutLiteralBlock"),
+    ("LiteralAsCondition", "Lint/LiteralAsCondition"),
+    ("LiteralAssignmentInCondition", "Lint/LiteralAssignmentInCondition"),
+    ("LiteralInInterpolation", "Lint/LiteralInInterpolation"),
+    ("Loop", "Lint/Loop"),
+    ("MissingCopEnableDirective", "Lint/MissingCopEnableDirective"),
+    ("MissingSuper", "Lint/MissingSuper"),
+    ("MixedCaseRange", "Lint/MixedCaseRange"),
+    ("MixedRegexpCaptureTypes", "Lint/MixedRegexpCaptureTypes"),
+    ("MultipleComparison", "Lint/MultipleComparison"),
+    ("NestedMethodDefinition", "Lint/NestedMethodDefinition"),
+    ("NestedPercentLiteral", "Lint/NestedPercentLiteral"),
+    ("NextWithoutAccumulator", "Lint/NextWithoutAccumulator"),
+    ("NoReturnInBeginEndBlocks", "Lint/NoReturnInBeginEndBlocks"),
+    ("NonAtomicFileOperation", "Lint/NonAtomicFileOperation"),
+    ("NonDeterministicRequireOrder", "Lint/NonDeterministicRequireOrder"),
+    ("NonLocalExitFromIterator", "Lint/NonLocalExitFromIterator"),
+    ("NumberConversion", "Lint/NumberConversion"),
+    ("NumberedParameterAssignment", "Lint/NumberedParameterAssignment"),
+    ("NumericOperationWithConstantResult", "Lint/NumericOperationWithConstantResult"),
+    ("OrAssignmentToConstant", "Lint/OrAssignmentToConstant"),
+    ("OrderedMagicComments", "Lint/OrderedMagicComments"),
+    ("OutOfRangeRegexpRef", "Lint/OutOfRangeRegexpRef"),
+    ("ParenthesesAsGroupedExpression", "Lint/ParenthesesAsGroupedExpression"),
+    ("PercentStringArray", "Lint/PercentStringArray"),
+    ("PercentSymbolArray", "Lint/PercentSymbolArray"),
+    ("RaiseException", "Lint/RaiseException"),
+    ("RandOne", "Lint/RandOne"),
+    ("RedundantCopDisableDirective", "Lint/RedundantCopDisableDirective"),
+    ("RedundantCopEnableDirective", "Lint/RedundantCopEnableDirective"),
+    ("RedundantDirGlobSort", "Lint/RedundantDirGlobSort"),
+    ("RedundantRegexpQuantifiers", "Lint/RedundantRegexpQuantifiers"),
+    ("RedundantRequireStatement", "Lint/RedundantRequireStatement"),
+    ("RedundantSafeNavigation", "Lint/RedundantSafeNavigation"),
+    ("RedundantSplatExpansion", "Lint/RedundantSplatExpansion"),
+    ("RedundantStringCoercion", "Lint/RedundantStringCoercion"),
+    ("RedundantTypeConversion", "Lint/RedundantTypeConversion"),
+    ("RedundantWithIndex", "Lint/RedundantWithIndex"),
+    ("RedundantWithObject", "Lint/RedundantWithObject"),
+    ("RefinementImportMethods", "Lint/RefinementImportMethods"),
+    ("RegexpAsCondition", "Lint/RegexpAsCondition"),
+    ("RequireParentheses", "Lint/RequireParentheses"),
+    ("RequireRangeParentheses", "Lint/RequireRangeParentheses"),
+    ("RequireRelativeSelfPath", "Lint/RequireRelativeSelfPath"),
+    ("RescueException", "Lint/RescueException"),
+    ("RescueType", "Lint/RescueType"),
+    ("ReturnInVoidContext", "Lint/ReturnInVoidContext"),
+    ("SafeNavigationChain", "Lint/SafeNavigationChain"),
+    ("SafeNavigationConsistency", "Lint/SafeNavigationConsistency"),
+    ("SafeNavigationWithEmpty", "Lint/SafeNavigationWithEmpty"),
+    ("ScriptPermission", "Lint/ScriptPermission"),
+    ("SelfAssignment", "Lint/SelfAssignment"),
+    ("SendWithMixinArgument", "Lint/SendWithMixinArgument"),
+    ("ShadowedArgument", "Lint/ShadowedArgument"),
+    ("ShadowedException", "Lint/ShadowedException"),
+    ("ShadowingOuterLocalVariable", "Lint/ShadowingOuterLocalVariable"),
+    ("SharedMutableDefault", "Lint/SharedMutableDefault"),
+    ("StructNewOverride", "Lint/StructNewOverride"),
+    ("SuppressedException", "Lint/SuppressedException"),
+    ("SuppressedExceptionInNumberConversion", "Lint/SuppressedExceptionInNumberConversion"),
+    ("SymbolConversion", "Lint/SymbolConversion"),
+    ("Syntax", "Lint/Syntax"),
+    ("ToEnumArguments", "Lint/ToEnumArguments"),
+    ("ToJSON", "Lint/ToJSON"),
+    ("TopLevelReturnWithArgument", "Lint/TopLevelReturnWithArgument"),
+    ("TrailingCommaInAttributeDeclaration", "Lint/TrailingCommaInAttributeDeclaration"),
+    ("TripleQuotes", "Lint/TripleQuotes"),
+    ("UnderscorePrefixedVariableName", "Lint/UnderscorePrefixedVariableName"),
+    ("UnescapedBracketInRegexp", "Lint/UnescapedBracketInRegexp"),
+    ("UnexpectedBlockArity", "Lint/UnexpectedBlockArity"),
+    ("UnifiedInteger", "Lint/UnifiedInteger"),
+    ("UnmodifiedReduceAccumulator", "Lint/UnmodifiedReduceAccumulator"),
+    ("UnreachableCode", "Lint/UnreachableCode"),
+    ("UnreachableLoop", "Lint/UnreachableLoop"),
+    ("UnreachablePatternBranch", "Lint/UnreachablePatternBranch"),
+    ("UnusedBlockArgument", "Lint/UnusedBlockArgument"),
+    ("UnusedMethodArgument", "Lint/UnusedMethodArgument"),
+    ("UriEscapeUnescape", "Lint/UriEscapeUnescape"),
+    ("UriRegexp", "Lint/UriRegexp"),
+    ("UselessAccessModifier", "Lint/UselessAccessModifier"),
+    ("UselessAssignment", "Lint/UselessAssignment"),
+    ("UselessConstantScoping", "Lint/UselessConstantScoping"),
+    ("UselessDefaultValueArgument", "Lint/UselessDefaultValueArgument"),
+    ("UselessDefined", "Lint/UselessDefined"),
+    ("UselessElseWithoutRescue", "Lint/UselessElseWithoutRescue"),
+    ("UselessMethodDefinition", "Lint/UselessMethodDefinition"),
+    ("UselessNumericOperation", "Lint/UselessNumericOperation"),
+    ("UselessOr", "Lint/UselessOr"),
+    ("UselessRescue", "Lint/UselessRescue"),
+    ("UselessRuby2Keywords", "Lint/UselessRuby2Keywords"),
+    ("UselessSetterCall", "Lint/UselessSetterCall"),
+    ("UselessTimes", "Lint/UselessTimes"),
+    ("Void", "Lint/Void"),
+    ("AbcSize", "Metrics/AbcSize"),
+    ("BlockLength", "Metrics/BlockLength"),
+    ("BlockNesting", "Metrics/BlockNesting"),
+    ("ClassLength", "Metrics/ClassLength"),
+    ("CollectionLiteralLength", "Metrics/CollectionLiteralLength"),
+    ("CyclomaticComplexity", "Metrics/CyclomaticComplexity"),
+    ("MethodLength", "Metrics/MethodLength"),
+    ("ModuleLength", "Metrics/ModuleLength"),
+    ("ParameterLists", "Metrics/ParameterLists"),
+    ("PerceivedComplexity", "Metrics/PerceivedComplexity"),
+    ("DepartmentName", "Migration/DepartmentName"),
+    ("AccessorMethodName", "Naming/AccessorMethodName"),
+    ("AsciiIdentifiers", "Naming/AsciiIdentifiers"),
+    ("BinaryOperatorParameterName", "Naming/BinaryOperatorParameterName"),
+    ("BlockForwarding", "Naming/BlockForwarding"),
+    ("BlockParameterName", "Naming/BlockParameterName"),
+    ("ClassAndModuleCamelCase", "Naming/ClassAndModuleCamelCase"),
+    ("ConstantName", "Naming/ConstantName"),
+    ("FileName", "Naming/FileName"),
+    ("HeredocDelimiterCase", "Naming/HeredocDelimiterCase"),
+    ("HeredocDelimiterNaming", "Naming/HeredocDelimiterNaming"),
+    ("InclusiveLanguage", "Naming/InclusiveLanguage"),
+    ("MemoizedInstanceVariableName", "Naming/MemoizedInstanceVariableName"),
+    ("MethodName", "Naming/MethodName"),
+    ("MethodParameterName", "Naming/MethodParameterName"),
+    ("PredicateMethod", "Naming/PredicateMethod"),
+    ("PredicatePrefix", "Naming/PredicatePrefix"),
+    ("RescuedExceptionsVariableName", "Naming/RescuedExceptionsVariableName"),
+    ("VariableName", "Naming/VariableName"),
+    ("VariableNumber", "Naming/VariableNumber"),
+    ("CompoundHash", "Security/CompoundHash"),
+    ("Eval", "Security/Eval"),
+    ("IoMethods", "Security/IoMethods"),
+    ("JSONLoad", "Security/JSONLoad"),
+    ("MarshalLoad", "Security/MarshalLoad"),
+    ("Open", "Security/Open"),
+    ("YAMLLoad", "Security/YAMLLoad"),
+    ("AccessModifierDeclarations", "Style/AccessModifierDeclarations"),
+    ("AccessorGrouping", "Style/AccessorGrouping"),
+    ("Alias", "Style/Alias"),
+    ("AmbiguousEndlessMethodDefinition", "Style/AmbiguousEndlessMethodDefinition"),
+    ("AndOr", "Style/AndOr"),
+    ("ArgumentsForwarding", "Style/ArgumentsForwarding"),
+    ("ArrayCoercion", "Style/ArrayCoercion"),
+    ("ArrayFirstLast", "Style/ArrayFirstLast"),
+    ("ArrayIntersect", "Style/ArrayIntersect"),
+    ("ArrayIntersectWithSingleElement", "Style/ArrayIntersectWithSingleElement"),
+    ("ArrayJoin", "Style/ArrayJoin"),
+    ("AsciiComments", "Style/AsciiComments"),
+    ("Attr", "Style/Attr"),
+    ("AutoResourceCleanup", "Style/AutoResourceCleanup"),
+    ("BarePercentLiterals", "Style/BarePercentLiterals"),
+    ("BeginBlock", "Style/BeginBlock"),
+    ("BisectedAttrAccessor", "Style/BisectedAttrAccessor"),
+    ("BitwisePredicate", "Style/BitwisePredicate"),
+    ("BlockComments", "Style/BlockComments"),
+    ("BlockDelimiters", "Style/BlockDelimiters"),
+    ("CaseEquality", "Style/CaseEquality"),
+    ("CaseLikeIf", "Style/CaseLikeIf"),
+    ("CharacterLiteral", "Style/CharacterLiteral"),
+    ("ClassAndModuleChildren", "Style/ClassAndModuleChildren"),
+    ("ClassCheck", "Style/ClassCheck"),
+    ("ClassEqualityComparison", "Style/ClassEqualityComparison"),
+    ("ClassMethods", "Style/ClassMethods"),
+    ("ClassMethodsDefinitions", "Style/ClassMethodsDefinitions"),
+    ("ClassVars", "Style/ClassVars"),
+    ("CollectionCompact", "Style/CollectionCompact"),
+    ("CollectionMethods", "Style/CollectionMethods"),
+    ("CollectionQuerying", "Style/CollectionQuerying"),
+    ("ColonMethodCall", "Style/ColonMethodCall"),
+    ("ColonMethodDefinition", "Style/ColonMethodDefinition"),
+    ("CombinableDefined", "Style/CombinableDefined"),
+    ("CombinableLoops", "Style/CombinableLoops"),
+    ("CommandLiteral", "Style/CommandLiteral"),
+    ("CommentAnnotation", "Style/CommentAnnotation"),
+    ("CommentedKeyword", "Style/CommentedKeyword"),
+    ("ComparableBetween", "Style/ComparableBetween"),
+    ("ComparableClamp", "Style/ComparableClamp"),
+    ("ConcatArrayLiterals", "Style/ConcatArrayLiterals"),
+    ("ConditionalAssignment", "Style/ConditionalAssignment"),
+    ("ConstantVisibility", "Style/ConstantVisibility"),
+    ("Copyright", "Style/Copyright"),
+    ("DataInheritance", "Style/DataInheritance"),
+    ("DateTime", "Style/DateTime"),
+    ("DefWithParentheses", "Style/DefWithParentheses"),
+    ("DigChain", "Style/DigChain"),
+    ("Dir", "Style/Dir"),
+    ("DirEmpty", "Style/DirEmpty"),
+    ("DisableCopsWithinSourceCodeDirective", "Style/DisableCopsWithinSourceCodeDirective"),
+    ("DocumentDynamicEvalDefinition", "Style/DocumentDynamicEvalDefinition"),
+    ("Documentation", "Style/Documentation"),
+    ("DocumentationMethod", "Style/DocumentationMethod"),
+    ("DoubleCopDisableDirective", "Style/DoubleCopDisableDirective"),
+    ("DoubleNegation", "Style/DoubleNegation"),
+    ("EachForSimpleLoop", "Style/EachForSimpleLoop"),
+    ("EachWithObject", "Style/EachWithObject"),
+    ("EmptyBlockParameter", "Style/EmptyBlockParameter"),
+    ("EmptyCaseCondition", "Style/EmptyCaseCondition"),
+    ("EmptyClassDefinition", "Style/EmptyClassDefinition"),
+    ("EmptyElse", "Style/EmptyElse"),
+    ("EmptyHeredoc", "Style/EmptyHeredoc"),
+    ("EmptyLambdaParameter", "Style/EmptyLambdaParameter"),
+    ("EmptyLiteral", "Style/EmptyLiteral"),
+    ("EmptyMethod", "Style/EmptyMethod"),
+    ("EmptyStringInsideInterpolation", "Style/EmptyStringInsideInterpolation"),
+    ("Encoding", "Style/Encoding"),
+    ("EndBlock", "Style/EndBlock"),
+    ("EndlessMethod", "Style/EndlessMethod"),
+    ("EnvHome", "Style/EnvHome"),
+    ("EvalWithLocation", "Style/EvalWithLocation"),
+    ("EvenOdd", "Style/EvenOdd"),
+    ("ExactRegexpMatch", "Style/ExactRegexpMatch"),
+    ("ExpandPathArguments", "Style/ExpandPathArguments"),
+    ("ExplicitBlockArgument", "Style/ExplicitBlockArgument"),
+    ("ExponentialNotation", "Style/ExponentialNotation"),
+    ("FetchEnvVar", "Style/FetchEnvVar"),
+    ("FileEmpty", "Style/FileEmpty"),
+    ("FileNull", "Style/FileNull"),
+    ("FileOpen", "Style/FileOpen"),
+    ("FileRead", "Style/FileRead"),
+    ("FileTouch", "Style/FileTouch"),
+    ("FileWrite", "Style/FileWrite"),
+    ("FloatDivision", "Style/FloatDivision"),
+    ("For", "Style/For"),
+    ("FormatString", "Style/FormatString"),
+    ("FormatStringToken", "Style/FormatStringToken"),
+    ("FrozenStringLiteralComment", "Style/FrozenStringLiteralComment"),
+    ("GlobalStdStream", "Style/GlobalStdStream"),
+    ("GlobalVars", "Style/GlobalVars"),
+    ("GuardClause", "Style/GuardClause"),
+    ("HashAsLastArrayItem", "Style/HashAsLastArrayItem"),
+    ("HashConversion", "Style/HashConversion"),
+    ("HashEachMethods", "Style/HashEachMethods"),
+    ("HashExcept", "Style/HashExcept"),
+    ("HashFetchChain", "Style/HashFetchChain"),
+    ("HashLikeCase", "Style/HashLikeCase"),
+    ("HashLookupMethod", "Style/HashLookupMethod"),
+    ("HashSlice", "Style/HashSlice"),
+    ("HashSyntax", "Style/HashSyntax"),
+    ("HashTransformKeys", "Style/HashTransformKeys"),
+    ("HashTransformValues", "Style/HashTransformValues"),
+    ("IdenticalConditionalBranches", "Style/IdenticalConditionalBranches"),
+    ("IfInsideElse", "Style/IfInsideElse"),
+    ("IfUnlessModifier", "Style/IfUnlessModifier"),
+    ("IfUnlessModifierOfIfUnless", "Style/IfUnlessModifierOfIfUnless"),
+    ("IfWithBooleanLiteralBranches", "Style/IfWithBooleanLiteralBranches"),
+    ("IfWithSemicolon", "Style/IfWithSemicolon"),
+    ("ImplicitRuntimeError", "Style/ImplicitRuntimeError"),
+    ("InPatternThen", "Style/InPatternThen"),
+    ("InfiniteLoop", "Style/InfiniteLoop"),
+    ("InlineComment", "Style/InlineComment"),
+    ("InverseMethods", "Style/InverseMethods"),
+    ("InvertibleUnlessCondition", "Style/InvertibleUnlessCondition"),
+    ("IpAddresses", "Style/IpAddresses"),
+    ("ItAssignment", "Style/ItAssignment"),
+    ("ItBlockParameter", "Style/ItBlockParameter"),
+    ("KeywordArgumentsMerging", "Style/KeywordArgumentsMerging"),
+    ("KeywordParametersOrder", "Style/KeywordParametersOrder"),
+    ("Lambda", "Style/Lambda"),
+    ("LambdaCall", "Style/LambdaCall"),
+    ("LineEndConcatenation", "Style/LineEndConcatenation"),
+    ("MagicCommentFormat", "Style/MagicCommentFormat"),
+    ("MapCompactWithConditionalBlock", "Style/MapCompactWithConditionalBlock"),
+    ("MapIntoArray", "Style/MapIntoArray"),
+    ("MapJoin", "Style/MapJoin"),
+    ("MapToHash", "Style/MapToHash"),
+    ("MapToSet", "Style/MapToSet"),
+    ("MethodCallWithArgsParentheses", "Style/MethodCallWithArgsParentheses"),
+    ("MethodCallWithoutArgsParentheses", "Style/MethodCallWithoutArgsParentheses"),
+    ("MethodCalledOnDoEndBlock", "Style/MethodCalledOnDoEndBlock"),
+    ("MethodDefParentheses", "Style/MethodDefParentheses"),
+    ("MinMax", "Style/MinMax"),
+    ("MinMaxComparison", "Style/MinMaxComparison"),
+    ("MissingElse", "Style/MissingElse"),
+    ("MissingRespondToMissing", "Style/MissingRespondToMissing"),
+    ("MixinGrouping", "Style/MixinGrouping"),
+    ("MixinUsage", "Style/MixinUsage"),
+    ("ModuleFunction", "Style/ModuleFunction"),
+    ("ModuleMemberExistenceCheck", "Style/ModuleMemberExistenceCheck"),
+    ("MultilineBlockChain", "Style/MultilineBlockChain"),
+    ("MultilineIfModifier", "Style/MultilineIfModifier"),
+    ("MultilineIfThen", "Style/MultilineIfThen"),
+    ("MultilineInPatternThen", "Style/MultilineInPatternThen"),
+    ("MultilineMemoization", "Style/MultilineMemoization"),
+    ("MultilineMethodSignature", "Style/MultilineMethodSignature"),
+    ("MultilineTernaryOperator", "Style/MultilineTernaryOperator"),
+    ("MultilineWhenThen", "Style/MultilineWhenThen"),
+    ("MultipleComparison", "Style/MultipleComparison"),
+    ("MutableConstant", "Style/MutableConstant"),
+    ("NegatedIf", "Style/NegatedIf"),
+    ("NegatedIfElseCondition", "Style/NegatedIfElseCondition"),
+    ("NegatedUnless", "Style/NegatedUnless"),
+    ("NegatedWhile", "Style/NegatedWhile"),
+    ("NegativeArrayIndex", "Style/NegativeArrayIndex"),
+    ("NestedFileDirname", "Style/NestedFileDirname"),
+    ("NestedModifier", "Style/NestedModifier"),
+    ("NestedParenthesizedCalls", "Style/NestedParenthesizedCalls"),
+    ("NestedTernaryOperator", "Style/NestedTernaryOperator"),
+    ("Next", "Style/Next"),
+    ("NilComparison", "Style/NilComparison"),
+    ("NilLambda", "Style/NilLambda"),
+    ("NonNilCheck", "Style/NonNilCheck"),
+    ("Not", "Style/Not"),
+    ("NumberedParameters", "Style/NumberedParameters"),
+    ("NumberedParametersLimit", "Style/NumberedParametersLimit"),
+    ("NumericLiteralPrefix", "Style/NumericLiteralPrefix"),
+    ("NumericLiterals", "Style/NumericLiterals"),
+    ("NumericPredicate", "Style/NumericPredicate"),
+    ("ObjectThen", "Style/ObjectThen"),
+    ("OneClassPerFile", "Style/OneClassPerFile"),
+    ("OneLineConditional", "Style/OneLineConditional"),
+    ("OpenStructUse", "Style/OpenStructUse"),
+    ("OperatorMethodCall", "Style/OperatorMethodCall"),
+    ("OptionHash", "Style/OptionHash"),
+    ("OptionalArguments", "Style/OptionalArguments"),
+    ("OptionalBooleanParameter", "Style/OptionalBooleanParameter"),
+    ("OrAssignment", "Style/OrAssignment"),
+    ("ParallelAssignment", "Style/ParallelAssignment"),
+    ("ParenthesesAroundCondition", "Style/ParenthesesAroundCondition"),
+    ("PartitionInsteadOfDoubleSelect", "Style/PartitionInsteadOfDoubleSelect"),
+    ("PercentLiteralDelimiters", "Style/PercentLiteralDelimiters"),
+    ("PercentQLiterals", "Style/PercentQLiterals"),
+    ("PerlBackrefs", "Style/PerlBackrefs"),
+    ("PredicateWithKind", "Style/PredicateWithKind"),
+    ("PreferredHashMethods", "Style/PreferredHashMethods"),
+    ("Proc", "Style/Proc"),
+    ("QuotedSymbols", "Style/QuotedSymbols"),
+    ("RaiseArgs", "Style/RaiseArgs"),
+    ("RandomWithOffset", "Style/RandomWithOffset"),
+    ("ReduceToHash", "Style/ReduceToHash"),
+    ("RedundantArgument", "Style/RedundantArgument"),
+    ("RedundantArrayConstructor", "Style/RedundantArrayConstructor"),
+    ("RedundantArrayFlatten", "Style/RedundantArrayFlatten"),
+    ("RedundantAssignment", "Style/RedundantAssignment"),
+    ("RedundantBegin", "Style/RedundantBegin"),
+    ("RedundantCapitalW", "Style/RedundantCapitalW"),
+    ("RedundantCondition", "Style/RedundantCondition"),
+    ("RedundantConditional", "Style/RedundantConditional"),
+    ("RedundantConstantBase", "Style/RedundantConstantBase"),
+    ("RedundantCurrentDirectoryInPath", "Style/RedundantCurrentDirectoryInPath"),
+    ("RedundantDoubleSplatHashBraces", "Style/RedundantDoubleSplatHashBraces"),
+    ("RedundantEach", "Style/RedundantEach"),
+    ("RedundantException", "Style/RedundantException"),
+    ("RedundantFetchBlock", "Style/RedundantFetchBlock"),
+    ("RedundantFileExtensionInRequire", "Style/RedundantFileExtensionInRequire"),
+    ("RedundantFilterChain", "Style/RedundantFilterChain"),
+    ("RedundantFormat", "Style/RedundantFormat"),
+    ("RedundantFreeze", "Style/RedundantFreeze"),
+    ("RedundantHeredocDelimiterQuotes", "Style/RedundantHeredocDelimiterQuotes"),
+    ("RedundantInitialize", "Style/RedundantInitialize"),
+    ("RedundantInterpolation", "Style/RedundantInterpolation"),
+    ("RedundantInterpolationUnfreeze", "Style/RedundantInterpolationUnfreeze"),
+    ("RedundantLineContinuation", "Style/RedundantLineContinuation"),
+    ("RedundantMinMaxBy", "Style/RedundantMinMaxBy"),
+    ("RedundantParentheses", "Style/RedundantParentheses"),
+    ("RedundantPercentQ", "Style/RedundantPercentQ"),
+    ("RedundantRegexpArgument", "Style/RedundantRegexpArgument"),
+    ("RedundantRegexpCharacterClass", "Style/RedundantRegexpCharacterClass"),
+    ("RedundantRegexpConstructor", "Style/RedundantRegexpConstructor"),
+    ("RedundantRegexpEscape", "Style/RedundantRegexpEscape"),
+    ("RedundantReturn", "Style/RedundantReturn"),
+    ("RedundantSelf", "Style/RedundantSelf"),
+    ("RedundantSelfAssignment", "Style/RedundantSelfAssignment"),
+    ("RedundantSelfAssignmentBranch", "Style/RedundantSelfAssignmentBranch"),
+    ("RedundantSort", "Style/RedundantSort"),
+    ("RedundantSortBy", "Style/RedundantSortBy"),
+    ("RedundantStringEscape", "Style/RedundantStringEscape"),
+    ("RedundantStructKeywordInit", "Style/RedundantStructKeywordInit"),
+    ("RegexpLiteral", "Style/RegexpLiteral"),
+    ("RequireOrder", "Style/RequireOrder"),
+    ("RescueModifier", "Style/RescueModifier"),
+    ("RescueStandardError", "Style/RescueStandardError"),
+    ("ReturnNil", "Style/ReturnNil"),
+    ("ReturnNilInPredicateMethodDefinition", "Style/ReturnNilInPredicateMethodDefinition"),
+    ("ReverseFind", "Style/ReverseFind"),
+    ("SafeNavigation", "Style/SafeNavigation"),
+    ("SafeNavigationChainLength", "Style/SafeNavigationChainLength"),
+    ("Sample", "Style/Sample"),
+    ("SelectByKind", "Style/SelectByKind"),
+    ("SelectByRange", "Style/SelectByRange"),
+    ("SelectByRegexp", "Style/SelectByRegexp"),
+    ("SelfAssignment", "Style/SelfAssignment"),
+    ("Semicolon", "Style/Semicolon"),
+    ("Send", "Style/Send"),
+    ("SendWithLiteralMethodName", "Style/SendWithLiteralMethodName"),
+    ("SignalException", "Style/SignalException"),
+    ("SingleArgumentDig", "Style/SingleArgumentDig"),
+    ("SingleLineBlockParams", "Style/SingleLineBlockParams"),
+    ("SingleLineDoEndBlock", "Style/SingleLineDoEndBlock"),
+    ("SingleLineMethods", "Style/SingleLineMethods"),
+    ("SlicingWithRange", "Style/SlicingWithRange"),
+    ("SoleNestedConditional", "Style/SoleNestedConditional"),
+    ("SpecialGlobalVars", "Style/SpecialGlobalVars"),
+    ("StabbyLambdaParentheses", "Style/StabbyLambdaParentheses"),
+    ("StaticClass", "Style/StaticClass"),
+    ("StderrPuts", "Style/StderrPuts"),
+    ("StringChars", "Style/StringChars"),
+    ("StringConcatenation", "Style/StringConcatenation"),
+    ("StringHashKeys", "Style/StringHashKeys"),
+    ("StringLiterals", "Style/StringLiterals"),
+    ("StringLiteralsInInterpolation", "Style/StringLiteralsInInterpolation"),
+    ("StringMethods", "Style/StringMethods"),
+    ("Strip", "Style/Strip"),
+    ("StructInheritance", "Style/StructInheritance"),
+    ("SuperArguments", "Style/SuperArguments"),
+    ("SuperWithArgsParentheses", "Style/SuperWithArgsParentheses"),
+    ("SwapValues", "Style/SwapValues"),
+    ("SymbolArray", "Style/SymbolArray"),
+    ("SymbolLiteral", "Style/SymbolLiteral"),
+    ("SymbolProc", "Style/SymbolProc"),
+    ("TallyMethod", "Style/TallyMethod"),
+    ("TernaryParentheses", "Style/TernaryParentheses"),
+    ("TopLevelMethodDefinition", "Style/TopLevelMethodDefinition"),
+    ("TrailingBodyOnClass", "Style/TrailingBodyOnClass"),
+    ("TrailingBodyOnMethodDefinition", "Style/TrailingBodyOnMethodDefinition"),
+    ("TrailingBodyOnModule", "Style/TrailingBodyOnModule"),
+    ("TrailingCommaInArguments", "Style/TrailingCommaInArguments"),
+    ("TrailingCommaInArrayLiteral", "Style/TrailingCommaInArrayLiteral"),
+    ("TrailingCommaInBlockArgs", "Style/TrailingCommaInBlockArgs"),
+    ("TrailingCommaInHashLiteral", "Style/TrailingCommaInHashLiteral"),
+    ("TrailingMethodEndStatement", "Style/TrailingMethodEndStatement"),
+    ("TrailingUnderscoreVariable", "Style/TrailingUnderscoreVariable"),
+    ("TrivialAccessors", "Style/TrivialAccessors"),
+    ("UnlessElse", "Style/UnlessElse"),
+    ("UnlessLogicalOperators", "Style/UnlessLogicalOperators"),
+    ("UnpackFirst", "Style/UnpackFirst"),
+    ("VariableInterpolation", "Style/VariableInterpolation"),
+    ("WhenThen", "Style/WhenThen"),
+    ("WhileUntilDo", "Style/WhileUntilDo"),
+    ("WhileUntilModifier", "Style/WhileUntilModifier"),
+    ("WordArray", "Style/WordArray"),
+    ("YAMLFileRead", "Style/YAMLFileRead"),
+    ("YodaCondition", "Style/YodaCondition"),
+    ("YodaExpression", "Style/YodaExpression"),
+    ("ZeroLengthPredicate", "Style/ZeroLengthPredicate"),
+];
+
+/// Legacy (renamed/removed/split) cop names from `config/obsoletion.yml`
+/// (rubocop 1.87.0), in file order. Mirrors
+/// `ConfigObsoletion.legacy_cop_names` + `qualified_legacy_cop_name`'s
+/// `detect { |n| n.split('/')[1] == cop_name }`: first match wins, and the
+/// old qualified name is returned as-is (e.g. `AlignArguments` ->
+/// `Layout/AlignArguments`, not the new `Layout/ArgumentAlignment`).
+const LEGACY_COP_NAMES: &[&str] = &[
+    "Layout/AlignArguments",
+    "Layout/AlignArray",
+    "Layout/AlignHash",
+    "Layout/AlignParameters",
+    "Layout/IndentArray",
+    "Layout/IndentAssignment",
+    "Layout/IndentFirstArgument",
+    "Layout/IndentFirstArrayElement",
+    "Layout/IndentFirstHashElement",
+    "Layout/IndentFirstParameter",
+    "Layout/IndentHash",
+    "Layout/IndentHeredoc",
+    "Layout/LeadingBlankLines",
+    "Layout/Tab",
+    "Layout/TrailingBlankLines",
+    "Lint/BlockAlignment",
+    "Lint/DefEndAlignment",
+    "Lint/DuplicatedKey",
+    "Lint/EndAlignment",
+    "Lint/EndInMethod",
+    "Lint/Eval",
+    "Lint/HandleExceptions",
+    "Lint/MultipleCompare",
+    "Lint/StringConversionInInterpolation",
+    "Lint/UnneededCopDisableDirective",
+    "Lint/UnneededCopEnableDirective",
+    "Lint/UnneededRequireStatement",
+    "Lint/UnneededSplatExpansion",
+    "Metrics/LineLength",
+    "Naming/PredicateName",
+    "Naming/UncommunicativeBlockParamName",
+    "Naming/UncommunicativeMethodParamName",
+    "Style/AccessorMethodName",
+    "Style/AsciiIdentifiers",
+    "Style/ClassAndModuleCamelCase",
+    "Style/ConstantName",
+    "Style/DeprecatedHashMethods",
+    "Style/FileName",
+    "Style/FlipFlop",
+    "Style/MethodCallParentheses",
+    "Style/MethodName",
+    "Style/OpMethod",
+    "Style/PredicateName",
+    "Style/SingleSpaceBeforeFirstArg",
+    "Style/UnneededCapitalW",
+    "Style/UnneededCondition",
+    "Style/UnneededInterpolation",
+    "Style/UnneededPercentQ",
+    "Style/UnneededSort",
+    "Style/VariableName",
+    "Style/VariableNumber",
+    "Gemspec/DateAssignment",
+    "Layout/SpaceAfterControlKeyword",
+    "Layout/SpaceBeforeModifierKeyword",
+    "Lint/InvalidCharacterLiteral",
+    "Lint/RescueWithoutErrorClass",
+    "Lint/SpaceBeforeFirstArg",
+    "Lint/UselessComparison",
+    "Style/BracesAroundHashParameters",
+    "Style/MethodMissingSuper",
+    "Style/SpaceAfterControlKeyword",
+    "Style/SpaceBeforeModifierKeyword",
+    "Style/TrailingComma",
+    "Style/TrailingCommaInLiteral",
+    "Style/MethodMissing",
 ];
 
 #[derive(Default)]
@@ -96,6 +793,13 @@ impl DepartmentName {
                     let start = comment.range.start + offset as u32 + leading_ws as u32;
                     let range = Range { start, end: start + trimmed.len() as u32 };
                     cx.emit_offense(range, MSG, None);
+                    // Autocorrect: `Registry.global.qualified_cop_name` +
+                    // `qualified_legacy_cop_name` fallback. Unknown and
+                    // ambiguous bare names yield `None` (offense only, no
+                    // correction), matching RuboCop's non-correctable cases.
+                    if let Some(qualified) = qualified_cop_name(trimmed) {
+                        cx.emit_edit(range, qualified);
+                    }
                 }
 
                 // `break if contain_unexpected_character_for_department_name?`.
@@ -178,6 +882,36 @@ fn scan_tokens(s: &str) -> Vec<&str> {
         tokens.push(&s[start..i]);
     }
     tokens
+}
+
+/// `Registry.global.qualified_cop_name(name, nil, warn: false)` for core cops:
+/// a bare name mapping to exactly one qualified name resolves to it; zero
+/// matches fall through to [`qualified_legacy_cop_name`]; two matches
+/// (ambiguous) yield `None` so the caller reports an offense with no
+/// correction instead of raising `AmbiguousCopName` like RuboCop does.
+fn qualified_cop_name(bare: &str) -> Option<&'static str> {
+    let mut found: Option<&'static str> = None;
+    for &(b, q) in BARE_TO_QUALIFIED {
+        if b == bare {
+            if found.is_some() {
+                // Ambiguous (`MultipleComparison`, `SelfAssignment`).
+                return None;
+            }
+            found = Some(q);
+        }
+    }
+    if found.is_some() {
+        return found;
+    }
+    qualified_legacy_cop_name(bare)
+}
+
+/// `qualified_legacy_cop_name(cop_name)` — first `LEGACY_COP_NAMES` entry
+/// whose bare part (`split('/')[1]`) equals `cop_name`, or `None`.
+fn qualified_legacy_cop_name(bare: &str) -> Option<&'static str> {
+    LEGACY_COP_NAMES.iter().copied().find(|legacy| {
+        legacy.split_once('/').is_some_and(|(_, b)| b == bare)
+    })
 }
 
 /// `valid_content_token?(content_token)` — a token is acceptable when it
@@ -349,5 +1083,105 @@ mod tests {
             "x = 1 # rubocop:disable abc\n",
             "                        ^^^ Department name is missing.\n",
         ));
+    }
+
+    // ---- autocorrect ----
+
+    #[test]
+    fn corrects_bare_cop_name() {
+        test::<DepartmentName>().expect_correction(
+            concat!(
+                "x = 1 # rubocop:disable AbcSize\n",
+                "                        ^^^^^^^ Department name is missing.\n",
+            ),
+            "x = 1 # rubocop:disable Metrics/AbcSize\n",
+        );
+    }
+
+    #[test]
+    fn corrects_bare_cop_name_enable() {
+        test::<DepartmentName>().expect_correction(
+            concat!(
+                "x = 1 # rubocop:enable LineLength\n",
+                "                       ^^^^^^^^^^ Department name is missing.\n",
+            ),
+            "x = 1 # rubocop:enable Layout/LineLength\n",
+        );
+    }
+
+    #[test]
+    fn corrects_bare_cop_name_todo() {
+        test::<DepartmentName>().expect_correction(
+            concat!(
+                "x = 1 # rubocop:todo AbcSize\n",
+                "                     ^^^^^^^ Department name is missing.\n",
+            ),
+            "x = 1 # rubocop:todo Metrics/AbcSize\n",
+        );
+    }
+
+    #[test]
+    fn corrects_only_the_bare_cop_in_a_mixed_list() {
+        test::<DepartmentName>().expect_correction(
+            concat!(
+                "x = 1 # rubocop:disable AbcSize, Metrics/MethodLength\n",
+                "                        ^^^^^^^ Department name is missing.\n",
+            ),
+            "x = 1 # rubocop:disable Metrics/AbcSize, Metrics/MethodLength\n",
+        );
+    }
+
+    #[test]
+    fn corrects_two_known_cops_in_a_list() {
+        test::<DepartmentName>().expect_correction(
+            concat!(
+                "x = 1 # rubocop:disable AbcSize, LineLength\n",
+                "                        ^^^^^^^ Department name is missing.\n",
+                "                                 ^^^^^^^^^^ Department name is missing.\n",
+            ),
+            "x = 1 # rubocop:disable Metrics/AbcSize, Layout/LineLength\n",
+        );
+    }
+
+    #[test]
+    fn leaves_unknown_bare_names_uncorrected() {
+        // Unknown cops are flagged but not corrected (RuboCop: not correctable).
+        test::<DepartmentName>().expect_no_corrections("x = 1 # rubocop:disable Foo\n");
+    }
+
+    #[test]
+    fn leaves_ambiguous_bare_names_uncorrected() {
+        // `MultipleComparison` / `SelfAssignment` exist in two departments;
+        // RuboCop raises `AmbiguousCopName`, so we flag with no correction.
+        test::<DepartmentName>()
+            .expect_no_corrections("x = 1 # rubocop:disable MultipleComparison\n");
+        test::<DepartmentName>()
+            .expect_no_corrections("x = 1 # rubocop:disable SelfAssignment\n");
+    }
+
+    #[test]
+    fn corrects_legacy_bare_cop_name() {
+        // Legacy fallback: `AlignArguments` -> `Layout/AlignArguments`
+        // (the old qualified name, not the new `Layout/ArgumentAlignment`).
+        test::<DepartmentName>().expect_correction(
+            concat!(
+                "x = 1 # rubocop:disable AlignArguments\n",
+                "                        ^^^^^^^^^^^^^^ Department name is missing.\n",
+            ),
+            "x = 1 # rubocop:disable Layout/AlignArguments\n",
+        );
+    }
+
+    #[test]
+    fn qualified_lookup_resolves_known_cops() {
+        assert_eq!(super::qualified_cop_name("AbcSize"), Some("Metrics/AbcSize"));
+        assert_eq!(super::qualified_cop_name("LineLength"), Some("Layout/LineLength"));
+        assert_eq!(
+            super::qualified_cop_name("AlignArguments"),
+            Some("Layout/AlignArguments")
+        );
+        assert_eq!(super::qualified_cop_name("Foo"), None);
+        assert_eq!(super::qualified_cop_name("MultipleComparison"), None);
+        assert_eq!(super::qualified_cop_name("SelfAssignment"), None);
     }
 }
