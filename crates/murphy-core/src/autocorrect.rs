@@ -401,7 +401,9 @@ where
     seen.insert(state.clone());
     let mut iterations: u32 = 0;
     // Conflicts from the most-recent apply round (overwritten each round).
-    let mut last_conflicts: Vec<Conflict> = vec![];
+    // No initializer: every read follows the in-loop assignment, so `vec![]`
+    // would be a dead value (`unused_assignments` under `-D warnings`).
+    let mut last_conflicts: Vec<Conflict>;
 
     loop {
         let edits = lint(&state);

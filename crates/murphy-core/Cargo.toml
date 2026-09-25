@@ -41,6 +41,9 @@ dirs = "5"
 # Pure-Rust YAML 1.2 parser. Replaces the deprecated serde_yaml 0.9 crate.
 yaml-rust2 = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }
+# Baseline TOML (.murphy-baseline.toml, Phase 9 B3). Caret-pinned per project
+# convention (exact `=` pins are reserved for contract-affecting natives).
+toml = "0.8"
 sha2 = "0.10"
 murphy-pattern = { path = "../murphy-pattern" }
 

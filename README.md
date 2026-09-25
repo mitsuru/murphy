@@ -78,6 +78,11 @@ eliminate RuboCop's slowness with a native Rust core.
 - `# murphy:todo` suppresses all cop offenses only on that line
 - Syntax offenses are never suppressed by inline directives.
 - JSON array of offenses printed to stdout; multi-file aggregation.
+- Legacy adoption via `.murphy-baseline.toml`: `murphy lint
+  --generate-baseline .murphy-baseline.toml` freezes existing violations,
+  `murphy lint --baseline .murphy-baseline.toml` reports only new ones
+  (file+cop granularity with counts; see `docs/guides/baseline.md`).
+  Output-only filtering — the offense JSON shape is unchanged.
 - `murphy lint --profile` emits JSON profiling data, with optional
   `--profile-format speedscope` output.
 - Exit codes 0/1/2/3. A malformed `.murphy.yml` exits 2.
