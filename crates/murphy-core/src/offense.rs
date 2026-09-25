@@ -130,6 +130,9 @@ pub struct Autocorrect {
 /// frozen ADR 0006/0007 contract, unchanged since Phase 1.
 /// Phase 4 (ADR 0013) adds the optional `autocorrect` field; it is absent from
 /// JSON when `None`, preserving byte-identity for existing snapshots.
+/// B4 (murphy-fmw.2.4) adds optional `documentation_url` / `rationale` /
+/// `fix_example` (extend-only, same `skip_serializing_if` pattern); they are
+/// absent when `None` and enriched lint output sets them to `Some`.
 ///
 /// `#[non_exhaustive]` (ADR 0013): the stable Rust surface is [`Offense::new`]
 /// plus [`Offense::with_autocorrect`], NOT struct-literal construction. This
@@ -165,6 +168,27 @@ pub struct Offense {
     /// the key — it deserializes as `None` without error.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub autocorrect: Option<Autocorrect>,
+    /// Canonical docs URL for the cop (B4, murphy-fmw.2.4).
+    ///
+    /// Deterministic per-cop (`https://murphy.dev/docs/cops/<CopName>`),
+    /// built only from the registry-controlled cop name. `None` omits the
+    /// key from JSON (ADR 0006 extend-only); enriched lint output sets it
+    /// to `Some`. `default` keeps old JSON (without the key) readable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub documentation_url: Option<String>,
+    /// Fixed-template rationale (B4, murphy-fmw.2.4).
+    ///
+    /// Prompt-injection safe by construction: built ONLY from `cop_name`
+    /// and cop-author `description` (see `crate::explain`), never from
+    /// offense `message` or source text. `None` omits the key.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub rationale: Option<String>,
+    /// Fixed-template fix-example pointer (B4, murphy-fmw.2.4).
+    ///
+    /// Stable placeholder pointing at `documentation_url`; fixed text +
+    /// registry names only, never source-derived. `None` omits the key.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fix_example: Option<String>,
 }
 
 impl Offense {
@@ -188,6 +212,9 @@ impl Offense {
             severity,
             message: message.into(),
             autocorrect: None,
+            documentation_url: None,
+            rationale: None,
+            fix_example: None,
         }
     }
 
@@ -219,6 +246,9 @@ impl Offense {
             severity,
             message: message.into(),
             autocorrect: None,
+            documentation_url: None,
+            rationale: None,
+            fix_example: None,
         }
     }
 
@@ -253,6 +283,9 @@ mod tests {
             severity: Severity::Warning,
             message: "Remove debugger entry point `debugger`.".into(),
             autocorrect: None,
+            documentation_url: None,
+            rationale: None,
+            fix_example: None,
         };
         let j: serde_json::Value = serde_json::to_value(&o).unwrap();
         assert_eq!(j["range"]["start_offset"], 0);
@@ -380,5 +413,69 @@ mod tests {
         let o: Offense = serde_json::from_value(j).unwrap();
         assert_eq!(o.range, Range::NO_LOCATION);
         assert!(!o.has_location());
+    }
+
+    #[test]
+    fn b4_explain_fields_absent_when_none_extend_only() {
+        // ADR 0006 extend-only: fresh offenses carry no explain keys until
+        // enriched, so pre-B4 snapshots stay byte-identical.
+        let o = Offense::new(
+            "a.rb",
+            "Lint/Debugger",
+            Range {
+                start_offset: 0,
+                end_offset: 8,
+            },
+            Severity::Warning,
+            "Remove debugger entry point `debugger`.",
+        );
+        let j: serde_json::Value = serde_json::to_value(&o).unwrap();
+        let obj = j.as_object().unwrap();
+        assert!(obj.get("documentation_url").is_none());
+        assert!(obj.get("rationale").is_none());
+        assert!(obj.get("fix_example").is_none());
+        // Frozen keys still present.
+        assert_eq!(j["cop_name"], "Lint/Debugger");
+        assert_eq!(j["severity"], "warning");
+    }
+
+    #[test]
+    fn b4_explain_fields_present_when_enriched_and_round_trip() {
+        let mut o = Offense::new(
+            "a.rb",
+            "Lint/Debugger",
+            Range {
+                start_offset: 0,
+                end_offset: 8,
+            },
+            Severity::Warning,
+            "Remove debugger entry point `debugger`.",
+        );
+        crate::explain::enrich_offense(&mut o, "Flag debugger calls.");
+        let j: serde_json::Value = serde_json::to_value(&o).unwrap();
+        assert_eq!(
+            j["documentation_url"],
+            "https://murphy.dev/docs/cops/Lint/Debugger"
+        );
+        assert!(j["rationale"].as_str().unwrap().contains("Lint/Debugger"));
+        assert!(j["fix_example"].as_str().unwrap().contains("Lint/Debugger"));
+        let round_tripped: Offense = serde_json::from_value(j).unwrap();
+        assert_eq!(round_tripped, o);
+    }
+
+    #[test]
+    fn b4_old_json_without_explain_keys_deserializes_to_none() {
+        // Forward compat: pre-B4 JSON (no new keys) reads as None.
+        let j = serde_json::json!({
+            "file": "a.rb",
+            "cop_name": "Lint/Debugger",
+            "range": {"start_offset": 0, "end_offset": 8},
+            "severity": "warning",
+            "message": "Remove debugger entry point `debugger`."
+        });
+        let o: Offense = serde_json::from_value(j).unwrap();
+        assert_eq!(o.documentation_url, None);
+        assert_eq!(o.rationale, None);
+        assert_eq!(o.fix_example, None);
     }
 }
