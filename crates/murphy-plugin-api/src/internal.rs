@@ -274,6 +274,7 @@ mod tests {
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
             block_braces_space: true,
+            max_line_length: 120,
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
         }

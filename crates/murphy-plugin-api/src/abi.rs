@@ -307,6 +307,19 @@ pub struct CxRaw {
     /// not bumped for tail-appended CxRaw fields. Read via
     /// `Cx::block_braces_space()`.
     pub block_braces_space: bool,
+    /// Resolved `Layout/LineLength.Max` (default 120). NOT an `AllCops.*`
+    /// key — it is the run-wide cross-cop signal RuboCop's
+    /// `Style/IfUnlessModifier`, `Style/WhileUntilModifier`,
+    /// `Layout/MultilineBlockLayout` and `Layout/RedundantLineBreak` read via
+    /// `config.for_cop('Layout/LineLength')['Max']`, threaded here
+    /// (murphy-bgd8 pattern, murphy-y3h2) so a cop needing it does not require
+    /// its own cross-cop config lookup. Tail-appended into the trailing padding
+    /// after `block_braces_space` (offset 268) under ABI v4 lockstep, so this
+    /// field leaves `size_of::<CxRaw>()` unchanged. Per project policy the
+    /// numeric ABI is not bumped for tail-appended CxRaw fields. Read via
+    /// `Cx::max_line_length()`. A wire value of `0` (only observed in raw-ABI
+    /// test harnesses that build `CxRaw` by hand) falls back to 120.
+    pub max_line_length: u16,
     /// Parser diagnostics for `Lint/Syntax` parity (murphy-zpgm): one entry
     /// per prism error, in source order. Empty (`null`/`0`) when the file
     /// parsed cleanly or when the host did not harvest diagnostics (e.g.
@@ -366,6 +379,12 @@ pub struct CxRaw {
 /// `Layout/SpaceBeforeComma` / `Layout/SpaceBeforeSemicolon`) was tail-appended
 /// into the trailing padding after `block_body_empty_lines` under ABI v4
 /// lockstep for murphy-4qhr; it fits the existing tail padding so
+/// `size_of::<CxRaw>()` is unchanged.
+/// `CxRaw::max_line_length` (the resolved `Layout/LineLength.Max`, consumed by
+/// `Style/IfUnlessModifier` / `Style/WhileUntilModifier` /
+/// `Layout/MultilineBlockLayout` / `Layout/RedundantLineBreak`) was tail-appended
+/// into the trailing padding after `block_braces_space` (offset 268) under ABI v4
+/// lockstep for murphy-y3h2; it fits the existing tail padding so
 /// `size_of::<CxRaw>()` is unchanged.
 /// `CxRaw::parse_diagnostics` (+`_len`) was tail-appended under ABI v4
 /// lockstep for murphy-zpgm; it grows `size_of::<CxRaw>()` (a pointer+len do
@@ -464,6 +483,18 @@ pub struct AllCopsContext {
     /// (murphy-bgd8 pattern) so the cop need not perform its own cross-cop
     /// config lookup (murphy-4qhr). Read via `Cx::block_braces_space()`.
     pub block_braces_space: bool,
+    /// Resolved `Layout/LineLength.Max`, default
+    /// [`AllCopsContext::DEFAULT_MAX_LINE_LENGTH`]. NOT an `AllCops.*` key —
+    /// it is the shared run-wide line-length budget RuboCop\'s
+    /// `Style/IfUnlessModifier`, `Style/WhileUntilModifier`,
+    /// `Layout/MultilineBlockLayout` and `Layout/RedundantLineBreak` read via
+    /// `config.for_cop(\'Layout/LineLength\')[\'Max\']`, threaded here
+    /// (murphy-bgd8 pattern, murphy-y3h2) so a cop needing it does not require
+    /// its own cross-cop config lookup. Always a concrete positive width (the
+    /// host resolves the default); a configured `Max <= 0` falls back to the
+    /// default 120 (mirroring `Layout/LineLength`\'s own `max <= 0 → 120`
+    /// guard).
+    pub max_line_length: i64,
 }
 
 impl AllCopsContext {
@@ -472,12 +503,31 @@ impl AllCopsContext {
     /// the same fallback when no width is configured.
     pub const DEFAULT_INDENTATION_WIDTH: i64 = 2;
 
+    /// RuboCop's `Layout/LineLength` default `Max` (120). Keeps
+    /// `AllCopsContext::default()` and the host's config resolution agreed on
+    /// the same fallback when no max is configured (murphy-y3h2).
+    pub const DEFAULT_MAX_LINE_LENGTH: i64 = 120;
+
     /// The resolved indentation width packed for the `CxRaw::indentation_width`
     /// wire field. Clamps into `u16`: widths are non-negative, and a value
     /// beyond `u16::MAX` is absurd config that saturates rather than wrapping.
     /// Read back via `Cx::indentation_width()`.
     pub fn indentation_width_wire(&self) -> u16 {
         self.indentation_width.clamp(0, u16::MAX as i64) as u16
+    }
+
+    /// The resolved line-length budget packed for the `CxRaw::max_line_length`
+    /// wire field (murphy-y3h2). Clamps into `u16`: values `<= 0` fall back to
+    /// [`Self::DEFAULT_MAX_LINE_LENGTH`] (mirroring `Layout/LineLength`'s own
+    /// guard), and absurdly large values saturate rather than wrapping.
+    /// Read back via `Cx::max_line_length()`.
+    pub fn max_line_length_wire(&self) -> u16 {
+        let v = if self.max_line_length <= 0 {
+            Self::DEFAULT_MAX_LINE_LENGTH
+        } else {
+            self.max_line_length
+        };
+        v.clamp(0, u16::MAX as i64) as u16
     }
 }
 
@@ -491,6 +541,7 @@ impl Default for AllCopsContext {
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
             block_braces_space: true,
+            max_line_length: Self::DEFAULT_MAX_LINE_LENGTH,
         }
     }
 }
@@ -672,8 +723,12 @@ mod tests {
         // murphy-4qhr: tail-appended into the trailing padding after
         // `block_body_empty_lines` (265); size unchanged.
         assert_eq!(offset_of!(CxRaw, block_braces_space), 266);
+        // murphy-y3h2: tail-appended into the trailing padding after
+        // `block_braces_space` (266); u16 at offset 268 (267 is padding).
+        assert_eq!(offset_of!(CxRaw, max_line_length), 268);
         // murphy-zpgm: tail-appended pointer+len; needs 8-byte alignment so it
-        // starts at 272 (after 264-266 bools + 267-271 padding).
+        // starts at 272 (after 264-266 bools + max_line_length at 268 +
+        // 270-271 padding).
         assert_eq!(offset_of!(CxRaw, parse_diagnostics), 272);
         assert_eq!(offset_of!(CxRaw, parse_diagnostics_len), 280);
         assert_eq!(size_of::<CxRaw>(), 288);

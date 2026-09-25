@@ -843,6 +843,7 @@ impl MurphyConfig {
             block_forwarding_explicit: self.resolved_block_forwarding_explicit(),
             block_body_empty_lines: self.resolved_block_body_empty_lines(),
             block_braces_space: self.resolved_block_braces_space(),
+            max_line_length: self.resolved_max_line_length(),
         }
     }
 
@@ -929,6 +930,35 @@ impl MurphyConfig {
         width(self.cops.rules.get(COP).map(|r| &r.options))
             .or_else(|| width(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
             .unwrap_or(AllCopsContext::DEFAULT_INDENTATION_WIDTH)
+    }
+
+    /// RuboCop's `config.for_cop('Layout/LineLength')['Max']` resolved
+    /// for this config: the user's `Layout/LineLength.Max` if set, else
+    /// the bundled default, else [`AllCopsContext::DEFAULT_MAX_LINE_LENGTH`].
+    ///
+    /// Read unconditionally — RuboCop consults the cop's config whether or not
+    /// `Layout/LineLength` is enabled. A configured `Max <= 0` falls back to
+    /// the default 120 (mirroring `Layout/LineLength`'s own `max <= 0 → 120`
+    /// guard; an explicit `Max: 0` is not a usable budget). Threaded into
+    /// `CxRaw` (murphy-bgd8 pattern, murphy-y3h2) so
+    /// `Style/IfUnlessModifier`, `Style/WhileUntilModifier`,
+    /// `Layout/MultilineBlockLayout` and `Layout/RedundantLineBreak` need not
+    /// perform their own cross-cop config lookup. Read via
+    /// `Cx::max_line_length()`.
+    fn resolved_max_line_length(&self) -> i64 {
+        const COP: &str = "Layout/LineLength";
+        let max = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("Max"))
+                .and_then(serde_json::Value::as_i64)
+        };
+        let v = max(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| max(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .unwrap_or(AllCopsContext::DEFAULT_MAX_LINE_LENGTH);
+        if v <= 0 {
+            AllCopsContext::DEFAULT_MAX_LINE_LENGTH
+        } else {
+            v
+        }
     }
 
     /// Cop names the resolved config disables (`Enabled: false`), for seeding
@@ -1566,6 +1596,44 @@ mod tests {
             cfg.allcops_context().indentation_width,
             AllCopsContext::DEFAULT_INDENTATION_WIDTH
         );
+    }
+
+    #[test]
+    fn allcops_context_resolves_max_line_length() {
+        // Configured `Layout/LineLength.Max` flows into the context as
+        // the shared resolved line-length budget (murphy-y3h2).
+        let cfg =
+            MurphyConfig::from_yaml_str("Layout/LineLength:\n  Max: 80\n").expect("config parses");
+        assert_eq!(cfg.allcops_context().max_line_length, 80);
+
+        // An explicit `Max: 0` falls back to the default 120 (mirrors
+        // `Layout/LineLength`'s own `max <= 0 → 120` guard).
+        let cfg =
+            MurphyConfig::from_yaml_str("Layout/LineLength:\n  Max: 0\n").expect("config parses");
+        assert_eq!(
+            cfg.allcops_context().max_line_length,
+            AllCopsContext::DEFAULT_MAX_LINE_LENGTH
+        );
+
+        // No configuration -> RuboCop's default Max of 120.
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        assert_eq!(
+            cfg.allcops_context().max_line_length,
+            AllCopsContext::DEFAULT_MAX_LINE_LENGTH
+        );
+
+        // Bundled default is honoured when the user does not set it.
+        let cfg = MurphyConfig::with_defaults("", "Layout/LineLength:\n  Max: 100\n")
+            .expect("config parses");
+        assert_eq!(cfg.allcops_context().max_line_length, 100);
+
+        // User value overrides a bundled default.
+        let cfg = MurphyConfig::with_defaults(
+            "Layout/LineLength:\n  Max: 90\n",
+            "Layout/LineLength:\n  Max: 100\n",
+        )
+        .expect("config parses");
+        assert_eq!(cfg.allcops_context().max_line_length, 90);
     }
 
     #[test]

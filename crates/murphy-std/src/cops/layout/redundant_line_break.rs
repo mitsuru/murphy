@@ -23,8 +23,8 @@
 //!   config (default false) are ported.
 //!
 //!   Gaps vs RuboCop (documented, not silently dropped):
-//!     * `Layout/LineLength: Max` is read from cross-cop config by RuboCop;
-//!       Murphy hardcodes the RuboCop default of 120 (`MAX_LINE_LENGTH`).
+//!     * `Layout/LineLength: Max` is read via `Cx::max_line_length()`
+//!       (murphy-y3h2 cross-cop infra; default 120).
 //!     * The `to_single_line` quote-continuation regexes (`" \\\n '"` →
 //!       `" + '`, etc.) are not ported — `safe_to_split?` already rejects
 //!       multiline string literals, so the join collapses interior runs of
@@ -51,11 +51,6 @@ use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct RedundantLineBreak;
-
-/// Maximum single-line length, mirroring RuboCop's `Layout/LineLength: Max`
-/// default. RuboCop reads the user's configured value; Murphy hardcodes the
-/// default (documented gap).
-const MAX_LINE_LENGTH: usize = 120;
 
 const MSG: &str = "Redundant line break detected.";
 
@@ -290,9 +285,10 @@ fn too_long(node: NodeId, cx: &Cx<'_>) -> bool {
     let src = cx.raw_source(cx.range(node));
     let single = to_single_line(src);
     // Add the node's starting column — the single line begins at the node's
-    // indentation, so total length is indent + collapsed length.
+    // indentation, so total length is indent + collapsed length. The budget
+    // is `Layout/LineLength.Max` via `Cx::max_line_length()` (murphy-y3h2).
     let indent = column_of(cx.source(), cx.range(node).start);
-    indent + single.trim().chars().count() > MAX_LINE_LENGTH
+    indent + single.trim().chars().count() > cx.max_line_length()
 }
 
 /// True if a comment falls within the node's source range.
