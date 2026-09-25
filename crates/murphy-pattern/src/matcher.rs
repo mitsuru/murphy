@@ -497,42 +497,86 @@ fn match_node_match<P: PredicateHost + ?Sized>(
         return false;
     };
 
-    // Slot taxonomy: fixed = non-List, list_idx = index of the trailing
-    // `List` slot (at most one, always last per v1 convention).
+    // Slot taxonomy: fixed prefix + optional `List` (middle or trailing) +
+    // fixed suffix. v1 was List-last only; murphy-av7j exposes `Case::else_`
+    // and `When::body` as trailing `NilFilledOptNode` AFTER the `List`
+    // (List-middle), since RuboCop renders a missing else/body as nil.
+    // At most one `List` per schema (parser-guaranteed).
     let list_idx = slots.iter().position(|s| matches!(s, PatChild::List(_)));
-    let fixed_count = list_idx.unwrap_or(slots.len());
-    let has_list = list_idx.is_some();
     debug_assert!(
-        list_idx.is_none_or(|i| i == slots.len() - 1),
-        "schema invariant: the trailing List slot must be the last slot"
+        slots
+            .iter()
+            .filter(|s| matches!(s, PatChild::List(_)))
+            .count()
+            <= 1,
+        "schema invariant: at most one List slot"
     );
+    let (fixed_before, fixed_after, has_list) = match list_idx {
+        None => (slots.len(), 0, false),
+        Some(li) => (li, slots.len() - li - 1, true),
+    };
 
-    // Pattern-child count rules. With no `List` slot the counts must match
-    // exactly; with one, the fixed slots take the first `fixed_count` and
-    // any trailing pattern children flow into the `List` slot.
+    // Old patterns without an explicit trailing slot (e.g. `(case _ ...)` with
+    // 2 children against new 3-slot `[subject, List, else_]`, or `(when ...)`
+    // with 1 child against new 2-slot `[List, body]`) keep matching by
+    // ignoring the trailing slot(s) — backwards compat. New patterns with
+    // enough children to name the trailing slot(s) match them explicitly.
+    // Heuristic: `<= fixed_before + 1` children → old (trailing ignored);
+    // `> fixed_before + 1` → new (last `fixed_after` children are trailing).
+    // For List-last schemas (`fixed_after == 0`) both routes coincide.
+    let use_trailing = has_list && fixed_after > 0 && pattern_kids.len() > fixed_before + 1;
+
     if !has_list {
-        if pattern_kids.len() != fixed_count {
+        if pattern_kids.len() != slots.len() {
             return false;
         }
-    } else if pattern_kids.len() < fixed_count {
-        return false;
+        for (slot, pat_id) in slots.iter().zip(pattern_kids.iter()) {
+            if !match_fixed_slot(ctx, *slot, *pat_id, buf, predicates) {
+                return false;
+            }
+        }
+        return true;
     }
 
-    // Fixed slots: positional match, child-by-slot.
-    for (i, slot) in slots.iter().take(fixed_count).enumerate() {
+    // With a `List`: prefix takes the first `fixed_before` children.
+    if pattern_kids.len() < fixed_before {
+        return false;
+    }
+    for (i, slot) in slots.iter().take(fixed_before).enumerate() {
         if !match_fixed_slot(ctx, *slot, pattern_kids[i], buf, predicates) {
             return false;
         }
     }
 
-    // Trailing list slot (if any): the remaining pattern children match the
-    // node's list elements, with at most one rest-like element in the
-    // pattern (parser-guaranteed).
-    if let Some(li) = list_idx {
-        let PatChild::List(elems) = slots[li] else {
+    if use_trailing {
+        // New: middle `List` gets `children[fixed_before..len-fixed_after]`,
+        // trailing fixed get the last `fixed_after`.
+        if pattern_kids.len() < fixed_before + fixed_after {
+            return false;
+        }
+        let list_end = pattern_kids.len() - fixed_after;
+        let PatChild::List(elems) = slots[list_idx.expect("has_list")] else {
             unreachable!("list_idx points at a List slot")
         };
-        let list_pat = &pattern_kids[fixed_count..];
+        let list_pat = &pattern_kids[fixed_before..list_end];
+        if !match_list_slot(ctx, list_pat, elems, buf, predicates) {
+            return false;
+        }
+        let trailing_slots = &slots[list_idx.expect("has_list") + 1..];
+        let trailing_pats = &pattern_kids[list_end..];
+        debug_assert_eq!(trailing_slots.len(), trailing_pats.len());
+        for (slot, pat_id) in trailing_slots.iter().zip(trailing_pats.iter()) {
+            if !match_fixed_slot(ctx, *slot, *pat_id, buf, predicates) {
+                return false;
+            }
+        }
+    } else {
+        // Old (or List-last): `List` consumes all remaining children;
+        // trailing fixed slots (if any) are ignored (backwards compat).
+        let PatChild::List(elems) = slots[list_idx.expect("has_list")] else {
+            unreachable!("list_idx points at a List slot")
+        };
+        let list_pat = &pattern_kids[fixed_before..];
         if !match_list_slot(ctx, list_pat, elems, buf, predicates) {
             return false;
         }
@@ -570,12 +614,16 @@ fn match_fixed_slot<P: PredicateHost + ?Sized>(
         // A `$_` capture lowers to `IrNode::Capture`, NOT `IrNode::Wildcard`, so
         // it falls through to `(None, _) => false`: a captured receiver still
         // requires a present node (an absent slot has no `NodeId` to bind).
-        PatChild::RecvOptNode(opt) => match (opt, ctx.ir_node(pat_id)) {
-            (None, IrNode::Wildcard | IrNode::NilTest) => true,
-            (Some(n), IrNode::NilTest) => matches!(*ctx.ast.kind(n), NodeKind::Nil),
-            (None, _) => false,
-            (Some(n), _) => match_pat(ctx, pat_id, n, buf, predicates),
-        },
+        // `NilFilledOptNode` (murphy-av7j) shares these semantics for the
+        // remaining nil-filled slots (const scope, if branches, case subject).
+        PatChild::RecvOptNode(opt) | PatChild::NilFilledOptNode(opt) => {
+            match (opt, ctx.ir_node(pat_id)) {
+                (None, IrNode::Wildcard | IrNode::NilTest) => true,
+                (Some(n), IrNode::NilTest) => matches!(*ctx.ast.kind(n), NodeKind::Nil),
+                (None, _) => false,
+                (Some(n), _) => match_pat(ctx, pat_id, n, buf, predicates),
+            }
+        }
 
         // Symbol slots accept `_`, a `:sym` literal, or a `{:a :b ...}`
         // union whose arms are all `:sym` literals (murphy-rs7) — same

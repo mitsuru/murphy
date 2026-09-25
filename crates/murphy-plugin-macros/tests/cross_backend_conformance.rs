@@ -417,8 +417,290 @@ fn wildcard_matches_absent_send_receiver_but_not_omitted_return_value() {
         Some((recv,)),
         "(send $_ :foo) must bind the present receiver of x.foo"
     );
+
     assert_c_matches("(send $_ :foo)", &ast, bare_send, false);
     assert_c_matches("(send $_ :foo)", &ast, recv_send, true);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 2c. Wildcard `_` on remaining nil-filled slots (murphy-av7j): const scope,
+// if branches, case subject/else, when body — RuboCop parity (`_` matches an
+// absent nil-filled slot, `$_` still requires a present node). Scoped: plain
+// `OptNode` slots (`return`/`break`/`next` value, `Block` body — RuboCop
+// omitted) keep `_` require-present, pinned as negatives. All B==C.
+// ────────────────────────────────────────────────────────────────────────
+
+def_node_matcher!(b_const_wild_scope, "(const _ :Foo)");
+def_node_matcher!(b_const_cap_scope, "(const $_ :Foo)");
+def_node_matcher!(b_if_wild_branches, "(if _ _ _)");
+def_node_matcher!(b_case_wild_subject, "(case _ ...)");
+def_node_matcher!(b_case_wild_else, "(case _ ... _)");
+def_node_matcher!(b_case_nil_else, "(case _ ... nil?)");
+def_node_matcher!(b_when_wild_body, "(when _ _)");
+def_node_matcher!(b_when_nil_body, "(when _ nil?)");
+def_node_matcher!(b_block_wild_body, "(block _ _ _)");
+
+#[test]
+fn wildcard_matches_absent_nil_filled_slots_but_not_omitted() {
+    let mut b = AstBuilder::new("Foo; Bar::Foo; if a then b end; case; when", "t.rb");
+    let foo_sym = b.intern_symbol("Foo");
+    let bar_sym = b.intern_symbol("Bar");
+    // Top-level `Foo` — `Const { scope: None, .. }`.
+    let top_const = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: foo_sym,
+        },
+        r(),
+    );
+    // `Bar::Foo` — scope present.
+    let bar_const = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: bar_sym,
+        },
+        r(),
+    );
+    let scoped_const = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::some(bar_const),
+            name: foo_sym,
+        },
+        r(),
+    );
+    // `if a then b end` (else absent) and `if a then b else c end` (all present).
+    let cond = b.push(NodeKind::True_, r());
+    let then_node = b.push(NodeKind::Int(1), r());
+    let else_node = b.push(NodeKind::Int(2), r());
+    let if_no_else = b.push(
+        NodeKind::If {
+            cond,
+            then_: OptNodeId::some(then_node),
+            else_: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let if_full = b.push(
+        NodeKind::If {
+            cond,
+            then_: OptNodeId::some(then_node),
+            else_: OptNodeId::some(else_node),
+        },
+        r(),
+    );
+    let if_empty = b.push(
+        NodeKind::If {
+            cond,
+            then_: OptNodeId::NONE,
+            else_: OptNodeId::NONE,
+        },
+        r(),
+    );
+    // `when` nodes: one cond + present/missing body.
+    let cond1 = b.push(NodeKind::Int(1), r());
+    let body_node = b.push(NodeKind::Int(2), r());
+    let conds_one = b.push_list(&[cond1]);
+    let when_with_body = b.push(
+        NodeKind::When {
+            conds: conds_one,
+            body: OptNodeId::some(body_node),
+        },
+        r(),
+    );
+    let when_no_body = b.push(
+        NodeKind::When {
+            conds: conds_one,
+            body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    // `case` nodes: with/without subject, with/without else.
+    let whens_for_case = b.push_list(&[when_with_body]);
+    let case_full = b.push(
+        NodeKind::Case {
+            subject: OptNodeId::some(cond),
+            whens: whens_for_case,
+            else_: OptNodeId::some(else_node),
+        },
+        r(),
+    );
+    let case_no_else = b.push(
+        NodeKind::Case {
+            subject: OptNodeId::some(cond),
+            whens: whens_for_case,
+            else_: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let case_no_subject = b.push(
+        NodeKind::Case {
+            subject: OptNodeId::NONE,
+            whens: whens_for_case,
+            else_: OptNodeId::NONE,
+        },
+        r(),
+    );
+    // Omitted slots: bodiless vs bodied `block` (`break`/`next` have no v1
+    // pattern schema at all — tags 51/52 unsupported — so the marker cannot
+    // leak there by construction; `return` (tag 29) is the supported-kind
+    // negative, pinned in 2b and below via `block`).
+    let send_sym = b.intern_symbol("foo");
+    let call = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: send_sym,
+            args: murphy_ast::NodeList::EMPTY,
+        },
+        r(),
+    );
+    let args_empty = b.push(NodeKind::Args(murphy_ast::NodeList::EMPTY), r());
+    let block_no_body = b.push(
+        NodeKind::Block {
+            call,
+            args: args_empty,
+            body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let block_with_body = b.push(
+        NodeKind::Block {
+            call,
+            args: args_empty,
+            body: OptNodeId::some(body_node),
+        },
+        r(),
+    );
+    let root_list = b.push_list(&[
+        top_const,
+        scoped_const,
+        if_no_else,
+        if_full,
+        if_empty,
+        when_with_body,
+        when_no_body,
+        case_full,
+        case_no_else,
+        case_no_subject,
+        block_no_body,
+        block_with_body,
+    ]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // `(const _ :Foo)` matches top-level AND scoped (nil-filled scope). B==C.
+    assert!(
+        b_const_wild_scope(top_const, &cx),
+        "(const _ :Foo) must match top-level Foo"
+    );
+    assert!(
+        b_const_wild_scope(scoped_const, &cx),
+        "(const _ :Foo) must match Bar::Foo"
+    );
+    assert_c_matches("(const _ :Foo)", &ast, top_const, true);
+    assert_c_matches("(const _ :Foo)", &ast, scoped_const, true);
+
+    // `(const $_ :Foo)` — capture still requires a present scope. B==C.
+    assert!(
+        b_const_cap_scope(top_const, &cx).is_none(),
+        "(const $_ :Foo) must NOT match top-level Foo"
+    );
+    assert_eq!(
+        b_const_cap_scope(scoped_const, &cx),
+        Some((bar_const,)),
+        "(const $_ :Foo) must bind Bar in Bar::Foo"
+    );
+    assert_c_matches("(const $_ :Foo)", &ast, top_const, false);
+    assert_c_matches("(const $_ :Foo)", &ast, scoped_const, true);
+
+    // `(if _ _ _)` matches missing branches (nil-filled). B==C.
+    for (node, label) in [
+        (if_no_else, "if without else"),
+        (if_full, "full if"),
+        (if_empty, "empty if"),
+    ] {
+        assert!(
+            b_if_wild_branches(node, &cx),
+            "(if _ _ _) must match {label}"
+        );
+        assert_c_matches("(if _ _ _)", &ast, node, true);
+    }
+
+    // `(case _ ...)` (old, trailing ignored) matches with and without subject.
+    assert!(
+        b_case_wild_subject(case_full, &cx),
+        "(case _ ...) must match case with subject"
+    );
+    assert!(
+        b_case_wild_subject(case_no_subject, &cx),
+        "(case _ ...) must match subjectless case"
+    );
+    assert_c_matches("(case _ ...)", &ast, case_full, true);
+    assert_c_matches("(case _ ...)", &ast, case_no_subject, true);
+
+    // `(case _ ... _)` (new, explicit else) matches missing AND present else.
+    assert!(
+        b_case_wild_else(case_no_else, &cx),
+        "(case _ ... _) must match case without else"
+    );
+    assert!(
+        b_case_wild_else(case_full, &cx),
+        "(case _ ... _) must match case with else"
+    );
+    assert_c_matches("(case _ ... _)", &ast, case_no_else, true);
+    assert_c_matches("(case _ ... _)", &ast, case_full, true);
+
+    // `(case _ ... nil?)` matches missing else only. B==C.
+    assert!(
+        b_case_nil_else(case_no_else, &cx),
+        "(case _ ... nil?) must match case without else"
+    );
+    assert!(
+        !b_case_nil_else(case_full, &cx),
+        "(case _ ... nil?) must NOT match case with else"
+    );
+    assert_c_matches("(case _ ... nil?)", &ast, case_no_else, true);
+    assert_c_matches("(case _ ... nil?)", &ast, case_full, false);
+
+    // `(when _ _)` matches missing AND present body (1 cond + body). B==C.
+    assert!(
+        b_when_wild_body(when_no_body, &cx),
+        "(when _ _) must match when without body"
+    );
+    assert!(
+        b_when_wild_body(when_with_body, &cx),
+        "(when _ _) must match when with body"
+    );
+    assert_c_matches("(when _ _)", &ast, when_no_body, true);
+    assert_c_matches("(when _ _)", &ast, when_with_body, true);
+
+    // `(when _ nil?)` matches missing body only. B==C.
+    assert!(
+        b_when_nil_body(when_no_body, &cx),
+        "(when _ nil?) must match when without body"
+    );
+    assert!(
+        !b_when_nil_body(when_with_body, &cx),
+        "(when _ nil?) must NOT match when with body"
+    );
+    assert_c_matches("(when _ nil?)", &ast, when_no_body, true);
+    assert_c_matches("(when _ nil?)", &ast, when_with_body, false);
+
+    // Omitted slots stay require-present: `block` body (plus `return` in 2b).
+    // B==C. (`break`/`next` are not v1 pattern kinds — no schema — so the new
+    // marker cannot leak there; `return`/`block` prove scoping on supported kinds.)
+    assert!(
+        b_block_wild_body(block_with_body, &cx),
+        "(block _ _ _) must match block with body"
+    );
+    assert!(
+        !b_block_wild_body(block_no_body, &cx),
+        "(block _ _ _) must NOT match bodiless block"
+    );
+    assert_c_matches("(block _ _ _)", &ast, block_with_body, true);
+    assert_c_matches("(block _ _ _)", &ast, block_no_body, false);
 }
 
 // ────────────────────────────────────────────────────────────────────────

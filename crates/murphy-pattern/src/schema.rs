@@ -83,8 +83,8 @@ pub fn node_child_allows_bare_predicate(tag: murphy_ast::NodeKindTag, child_idx:
         22 | 23 | 28 => true, // array / hash / begin (single trailing list)
         24 => child_idx <= 1, // pair (2 fixed, no trailing list)
         25 => child_idx <= 2, // if (3 fixed, no trailing list)
-        26 => true,           // case (1 fixed + trailing list)
-        27 => true,           // when (single trailing list)
+        26 => child_idx <= 2, // case (subject + List + else_, List-middle, murphy-av7j)
+        27 => child_idx <= 1, // when (List + body, List-middle, murphy-av7j)
         29 => child_idx == 0, // return (1 fixed, no trailing list)
         30 | 31 | 47 | 48 => child_idx <= 1, // and/or/while/until (2 fixed, no trailing list)
         32 => child_idx == 1 || child_idx == 2, // def (Sym, Node, OptNode — Sym at 0)
@@ -126,6 +126,18 @@ pub enum PatChild<'a> {
     /// [`OptNode`]: PatChild::OptNode
     /// [`Node`]: PatChild::Node
     RecvOptNode(Option<NodeId>),
+    /// A nil-filled `OptNodeId` slot (murphy-av7j). Same matching semantics as
+    /// [`RecvOptNode`] — a bare `_` wildcard (and `nil?`) matches an absent
+    /// slot, while `$_` (a capture, not a wildcard) still requires a present
+    /// node — but for the remaining RuboCop nil-filled slots beyond the `Send`
+    /// receiver: `Const` scope (`(const _ :Name)` matches top-level `Name`),
+    /// `If` branches (`then_`/`else_`), and `Case` subject. Plain [`OptNode`]
+    /// stays for omitted slots (`return`/`break`/`next` value, `Block` body)
+    /// where `_` must NOT match absence.
+    ///
+    /// [`RecvOptNode`]: PatChild::RecvOptNode
+    /// [`OptNode`]: PatChild::OptNode
+    NilFilledOptNode(Option<NodeId>),
     /// A `Symbol` field (e.g. `Send::method`, `Lvasgn::name`).
     Sym(Symbol),
     /// A `NodeList` field (e.g. `Send::args`). Borrowed against the
@@ -175,7 +187,11 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
         | NodeKind::Gvar(name) => vec![PatChild::Sym(name)],
 
         // ── Variable reads with payload ────────────────────────────────
-        NodeKind::Const { scope, name } => vec![PatChild::OptNode(opt(scope)), PatChild::Sym(name)],
+        // `Const` scope is nil-filled in RuboCop (`(const nil :Name)` for
+        // top-level `Name`), so `_` matches an absent scope (murphy-av7j).
+        NodeKind::Const { scope, name } => {
+            vec![PatChild::NilFilledOptNode(opt(scope)), PatChild::Sym(name)]
+        }
 
         // ── Assignments ───────────────────────────────────────────────
         NodeKind::Lvasgn { name, value }
@@ -221,22 +237,41 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
         NodeKind::Pair { key, value } => vec![PatChild::Node(key), PatChild::Node(value)],
 
         // ── Control flow ──────────────────────────────────────────────
+        // `If` branches are nil-filled in RuboCop (`(if c t nil)` for
+        // `if c then t end`), so `_` matches an absent branch (murphy-av7j).
+        // `cond` is always present (`Node`).
         NodeKind::If { cond, then_, else_ } => vec![
             PatChild::Node(cond),
-            PatChild::OptNode(opt(then_)),
-            PatChild::OptNode(opt(else_)),
+            PatChild::NilFilledOptNode(opt(then_)),
+            PatChild::NilFilledOptNode(opt(else_)),
         ],
-        // `Case { subject, whens, else_ }`: `else_` follows the `NodeList`,
-        // but the v1 slot convention allows at most one trailing `List`. The
-        // B backend therefore omits `else_` from `case`'s schema, so `case`
-        // patterns expose only `subject` + `whens`. Mirrored here.
-        NodeKind::Case { subject, whens, .. } => vec![
-            PatChild::OptNode(opt(subject)),
+        // `Case { subject, whens, else_ }`: `else_` follows the `NodeList`.
+        // v1 allowed at most one trailing `List`, so `else_` was omitted
+        // (`covers_all_fields = false`). murphy-av7j exposes it as a trailing
+        // `NilFilledOptNode` after the `List` (List-middle schema): RuboCop
+        // renders a missing `else` as nil (`(case s (when ..) nil)`), so `_`
+        // matches an absent `else_`. Old patterns without an explicit `else_`
+        // (`(case _ ...)`) keep matching by ignoring the trailing slot
+        // (backwards compat, see `match_node_match`).
+        NodeKind::Case {
+            subject,
+            whens,
+            else_,
+        } => vec![
+            // `Case` subject is nil-filled in RuboCop (`(case nil ...)` for
+            // `case; when ...`), so `_` matches an absent subject (murphy-av7j).
+            PatChild::NilFilledOptNode(opt(subject)),
             PatChild::List(list(whens, lists)),
+            PatChild::NilFilledOptNode(opt(else_)),
         ],
-        // `When { conds, body }`: `body` follows the `NodeList`; same reason
-        // as `Case::else_` above — omitted to keep the trailing-List rule.
-        NodeKind::When { conds, .. } => vec![PatChild::List(list(conds, lists))],
+        // `When { conds, body }`: `body` follows the `NodeList`. Same
+        // List-middle exposure as `Case::else_` above (murphy-av7j): a missing
+        // body is nil (`(when c nil)`), so `_` matches an absent `body`.
+        // Old `(when ...)` patterns keep matching by ignoring `body`.
+        NodeKind::When { conds, body } => vec![
+            PatChild::List(list(conds, lists)),
+            PatChild::NilFilledOptNode(opt(body)),
+        ],
         NodeKind::Return(o) => vec![PatChild::OptNode(opt(o))],
         NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
             vec![PatChild::Node(lhs), PatChild::Node(rhs)]
@@ -828,13 +863,12 @@ mod tests {
     }
 
     #[test]
-    fn case_when_omit_trailing_optnode_slots() {
+    fn case_when_expose_trailing_nil_filled_slots() {
         // `Case { subject, whens, else_ }` and `When { conds, body }` both
-        // have a trailing `OptNodeId` AFTER a `NodeList`. The v1 slot
-        // convention allows at most one trailing `List`, so `else_`/`body`
-        // are dropped — the schema exposes only the slots up to and
-        // including the `List`. Guards against drift back to a 3-slot
-        // `case` / 2-slot `when` schema.
+        // have a trailing `OptNodeId` AFTER a `NodeList`. v1 omitted them to
+        // keep one trailing `List`; murphy-av7j exposes them as trailing
+        // `NilFilledOptNode` after the `List` (List-middle), since RuboCop
+        // renders a missing else/body as nil (`_` matches absence).
         let mut b = AstBuilder::new("case x; when y; end", "t.rb");
         let x = b.push(NodeKind::Nil, r());
         let y = b.push(NodeKind::Nil, r());
@@ -857,11 +891,14 @@ mod tests {
         );
         let ast = b.finish(case);
         let case_kids = pattern_children(ast.kind(case), ast.raw_parts().node_lists).expect("case");
-        assert_eq!(case_kids.len(), 2);
+        assert_eq!(case_kids.len(), 3);
+        assert!(matches!(case_kids[0], PatChild::NilFilledOptNode(Some(_))));
         assert!(matches!(case_kids[1], PatChild::List(_)));
+        assert!(matches!(case_kids[2], PatChild::NilFilledOptNode(Some(_))));
         let when_kids =
             pattern_children(ast.kind(when_), ast.raw_parts().node_lists).expect("when");
-        assert_eq!(when_kids.len(), 1);
+        assert_eq!(when_kids.len(), 2);
         assert!(matches!(when_kids[0], PatChild::List(_)));
+        assert!(matches!(when_kids[1], PatChild::NilFilledOptNode(Some(_))));
     }
 }
