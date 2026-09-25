@@ -328,6 +328,12 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(inner);
         }
 
+        // murphy-28xr FlipFlop
+        NodeKind::FlipFlop { left, right, .. } => {
+            push_opt(out, left);
+            push_opt(out, right);
+        }
+
         NodeKind::Itblock { send, body } => {
             out.push(send);
             push_opt(out, body);
@@ -748,6 +754,13 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         // murphy-j1j2 PM-E pin & guard
         NodeKind::Pin(inner) | NodeKind::IfGuard(inner) | NodeKind::UnlessGuard(inner) => {
             slot_node(out, inner);
+        }
+
+        // murphy-28xr FlipFlop — parser-gem `(iflipflop left right)` /
+        // `(eflipflop left right)`: two node slots, no phantom.
+        NodeKind::FlipFlop { left, right, .. } => {
+            slot_opt(out, left);
+            slot_opt(out, right);
         }
 
         // `(itblock call :it body)` — `:it` marker is a phantom slot.

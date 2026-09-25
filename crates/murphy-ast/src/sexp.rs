@@ -727,6 +727,20 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
 
+        // murphy-28xr FlipFlop — collapsed `(flip_flop exclusive=.. left right)`,
+        // mirroring `(range exclusive=..)`.
+        NodeKind::FlipFlop {
+            left,
+            right,
+            exclusive,
+        } => {
+            let _ = writeln!(out, "(flip_flop exclusive={exclusive}");
+            write_opt(ast, left, d, out);
+            out.push('\n');
+            write_opt(ast, right, d, out);
+            out.push(')');
+        }
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }

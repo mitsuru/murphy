@@ -168,6 +168,9 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("if_guard", 111),
     ("unless_guard", 112),
     ("match_with_lvasgn", 113),
+    // murphy-28xr FlipFlop (`FlipFlopNode`; collapses parser-gem
+    // `iflipflop` / `eflipflop`, mirroring `range` for `irange` / `erange`).
+    ("flip_flop", 114),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -287,6 +290,7 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     ("pin", &[NodeKindTag(110)]),
     ("if_guard", &[NodeKindTag(111)]),
     ("match_with_lvasgn", &[NodeKindTag(113)]),
+    ("flip_flop", &[NodeKindTag(114)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
     (
         "any_block",
@@ -613,6 +617,12 @@ mod tests {
                 call: n,
                 targets: NodeList::EMPTY,
             },
+            // murphy-28xr FlipFlop (tag 114)
+            NodeKind::FlipFlop {
+                left: OptNodeId::NONE,
+                right: OptNodeId::NONE,
+                exclusive: false,
+            },
         ]
     }
 
@@ -775,6 +785,8 @@ mod tests {
             NodeKind::Pin(_) => "pin",
             NodeKind::IfGuard(_) => "if_guard",
             NodeKind::UnlessGuard(_) => "unless_guard",
+            // murphy-28xr FlipFlop
+            NodeKind::FlipFlop { .. } => "flip_flop",
         })
     }
 

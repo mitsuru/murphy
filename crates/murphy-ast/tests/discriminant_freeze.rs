@@ -370,6 +370,15 @@ fn node_kind_discriminants_are_frozen() {
         },
         113,
     );
+    // murphy-28xr FlipFlop
+    freeze(
+        NodeKind::FlipFlop {
+            left: OptNodeId::NONE,
+            right: OptNodeId::NONE,
+            exclusive: false,
+        },
+        114,
+    );
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
@@ -377,19 +386,20 @@ fn node_kind_discriminants_are_frozen() {
 /// list above: the freeze list must cover **every** variant, so its length
 /// must equal the highest valid tag + 1.
 ///
-/// `NodeKind::MatchWithLvasgn` is the current highest variant. Bumping it without
+/// `NodeKind::FlipFlop` is the current highest variant. Bumping it without
 /// touching this file means the new tag falls outside the test and slips
 /// in undetected.
 #[test]
 fn highest_frozen_tag_matches_last_variant() {
-    let last = NodeKind::MatchWithLvasgn {
-        call: NodeId(0),
-        targets: NodeList::EMPTY,
+    let last = NodeKind::FlipFlop {
+        left: OptNodeId::NONE,
+        right: OptNodeId::NONE,
+        exclusive: false,
     }
     .tag()
     .0;
     assert_eq!(
-        last, 113,
+        last, 114,
         "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \
          (add the new variant to both `node_kind_discriminants_are_frozen` and update \
          the expected last-tag here)."
