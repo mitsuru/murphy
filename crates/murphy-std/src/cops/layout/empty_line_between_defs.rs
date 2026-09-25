@@ -7,72 +7,178 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/EmptyLineBetweenDefs
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-upgm]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ports RuboCop's `on_begin`: walk each `begin` body's children in
 //!   consecutive pairs; when both members are definition candidates
 //!   (`def`/`defs`/`class`/`module`, gated by `EmptyLineBetweenMethodDefs` /
-//!   `EmptyLineBetweenClassDefs` / `EmptyLineBetweenModuleDefs`), count the
-//!   blank lines between the first def's end line and the second def's start
-//!   line. If the count is outside `NumberOfEmptyLines`, flag the second def.
-//!   `AllowAdjacentOneLineDefs` (default true) suppresses the offense when both
-//!   defs are single-line. Offense location is `keyword..name` of the second
-//!   def (RuboCop's `def_location`).
+//!   `EmptyLineBetweenClassDefs` / `EmptyLineBetweenModuleDefs`, plus
+//!   `DefLikeMacros` block/send macros), count the blank lines between the
+//!   first def's end line and the second def's start line. If the count is
+//!   outside `NumberOfEmptyLines` (an integer or a `[min, max]` allowance
+//!   range), flag the second def unless `multiple_blank_lines_groups?`
+//!   (blank lines split by a comment) or `AllowAdjacentOneLineDefs` (both
+//!   single-line) applies. Offense location is `keyword..name` of the second
+//!   def, or the whole node for macro sends/blocks (RuboCop's `def_location`).
 //!
-//!   Autocorrect inserts/removes blank lines at the first newline after the
-//!   previous def's end (RuboCop's `autocorrect`), handling the same-line
-//!   one-liner case by anchoring before the second def instead.
-//!
-//!   Documented gaps (filed as murphy-upgm):
-//!     - `NumberOfEmptyLines` is modelled as a single integer (min == max).
-//!       RuboCop also accepts an array `[min, max]`; the array (allowance
-//!       range) form is not supported, so `expected_lines` always renders a
-//!       fixed count.
-//!     - `DefLikeMacros` (treating configured macro calls like defs) is not
-//!       supported — only true `def`/`defs`/`class`/`module` are candidates.
-//!     - `multiple_blank_lines_groups?` (skip when blank lines are split by a
-//!       comment group) is not modelled; such cases still flag, matching the
-//!       common single-group layout.
+//!   Autocorrect inserts (up to the minimum) or removes (down to the maximum)
+//!   blank lines at the first newline after the previous def's end (RuboCop's
+//!   `autocorrect`), handling the same-line one-liner case by anchoring before
+//!   the second def instead. Surplus removal deletes whole blank lines so
+//!   trailing whitespace and intervening comments are preserved.
+//! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 /// Stateless unit struct (ADR 0035 const-metadata cop pattern).
 #[derive(Default)]
 pub struct EmptyLineBetweenDefs;
 
-#[derive(CopOptions)]
+/// Options for [`EmptyLineBetweenDefs`].
+///
+/// Hand-rolled `CopOptions` impl because `NumberOfEmptyLines` accepts two
+/// shapes (an integer or a `[min, max]` array), which
+/// `#[derive(CopOptions)]` does not model. Follows the
+/// `Layout/HashAlignment` precedent (see `hash_alignment.rs`).
+#[derive(Clone, Debug)]
 pub struct EmptyLineBetweenDefsOptions {
-    #[option(
-        name = "EmptyLineBetweenMethodDefs",
-        default = true,
-        description = "Check for empty lines between method definitions."
-    )]
     pub method_defs: bool,
-    #[option(
-        name = "EmptyLineBetweenClassDefs",
-        default = true,
-        description = "Check for empty lines between class definitions."
-    )]
     pub class_defs: bool,
-    #[option(
-        name = "EmptyLineBetweenModuleDefs",
-        default = true,
-        description = "Check for empty lines between module definitions."
-    )]
     pub module_defs: bool,
-    #[option(
-        name = "AllowAdjacentOneLineDefs",
-        default = true,
-        description = "Allow adjacent one-line definitions without a blank line."
-    )]
     pub allow_adjacent_one_line_defs: bool,
-    #[option(
-        name = "NumberOfEmptyLines",
-        default = 1,
-        description = "Number of empty lines required between definitions."
-    )]
-    pub number_of_empty_lines: i64,
+    pub minimum_empty_lines: i64,
+    pub maximum_empty_lines: i64,
+    pub def_like_macros: Vec<String>,
+}
+
+impl Default for EmptyLineBetweenDefsOptions {
+    fn default() -> Self {
+        Self {
+            method_defs: true,
+            class_defs: true,
+            module_defs: true,
+            allow_adjacent_one_line_defs: true,
+            minimum_empty_lines: 1,
+            maximum_empty_lines: 1,
+            def_like_macros: Vec::new(),
+        }
+    }
+}
+
+fn decode_bool(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    default: bool,
+) -> Result<bool, ConfigError> {
+    match obj.get(key) {
+        None => Ok(default),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| ConfigError::type_mismatch(key, "bool")),
+    }
+}
+
+fn decode_number_of_empty_lines(value: &serde_json::Value) -> Result<(i64, i64), ConfigError> {
+    const KEY: &str = "NumberOfEmptyLines";
+    if let Some(n) = value.as_i64() {
+        return Ok((n, n));
+    }
+    if let Some(arr) = value.as_array() {
+        if arr.is_empty() {
+            return Err(ConfigError::type_mismatch(KEY, "int or array of ints"));
+        }
+        let mut nums = Vec::with_capacity(arr.len());
+        for (i, elem) in arr.iter().enumerate() {
+            let n = elem
+                .as_i64()
+                .ok_or_else(|| ConfigError::type_mismatch(format!("{KEY}[{i}]"), "int"))?;
+            nums.push(n);
+        }
+        let min = nums[0];
+        let max = nums[nums.len() - 1];
+        return Ok((min, max));
+    }
+    Err(ConfigError::type_mismatch(KEY, "int or array of ints"))
+}
+
+impl CopOptions for EmptyLineBetweenDefsOptions {
+    fn from_config_json(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(ConfigError::parse)?;
+        let obj = value.as_object().ok_or_else(ConfigError::not_an_object)?;
+        let method_defs = decode_bool(obj, "EmptyLineBetweenMethodDefs", true)?;
+        let class_defs = decode_bool(obj, "EmptyLineBetweenClassDefs", true)?;
+        let module_defs = decode_bool(obj, "EmptyLineBetweenModuleDefs", true)?;
+        let allow_adjacent_one_line_defs = decode_bool(obj, "AllowAdjacentOneLineDefs", true)?;
+        let (minimum_empty_lines, maximum_empty_lines) = match obj.get("NumberOfEmptyLines") {
+            None | Some(serde_json::Value::Null) => (1, 1),
+            Some(v) => decode_number_of_empty_lines(v)?,
+        };
+        let def_like_macros = match obj.get("DefLikeMacros") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(v) => {
+                let arr = v.as_array().ok_or_else(|| {
+                    ConfigError::type_mismatch("DefLikeMacros", "array of strings")
+                })?;
+                let mut out = Vec::with_capacity(arr.len());
+                for (i, elem) in arr.iter().enumerate() {
+                    let s = elem.as_str().ok_or_else(|| {
+                        ConfigError::type_mismatch(format!("DefLikeMacros[{i}]"), "string")
+                    })?;
+                    out.push(s.to_string());
+                }
+                out
+            }
+        };
+        Ok(Self {
+            method_defs,
+            class_defs,
+            module_defs,
+            allow_adjacent_one_line_defs,
+            minimum_empty_lines,
+            maximum_empty_lines,
+            def_like_macros,
+        })
+    }
+
+    fn to_config_json(&self) -> String {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "EmptyLineBetweenMethodDefs".to_string(),
+            serde_json::Value::Bool(self.method_defs),
+        );
+        obj.insert(
+            "EmptyLineBetweenClassDefs".to_string(),
+            serde_json::Value::Bool(self.class_defs),
+        );
+        obj.insert(
+            "EmptyLineBetweenModuleDefs".to_string(),
+            serde_json::Value::Bool(self.module_defs),
+        );
+        obj.insert(
+            "AllowAdjacentOneLineDefs".to_string(),
+            serde_json::Value::Bool(self.allow_adjacent_one_line_defs),
+        );
+        let number: serde_json::Value = if self.minimum_empty_lines == self.maximum_empty_lines {
+            serde_json::Value::Number(serde_json::Number::from(self.minimum_empty_lines))
+        } else {
+            serde_json::Value::Array(vec![
+                serde_json::Value::Number(serde_json::Number::from(self.minimum_empty_lines)),
+                serde_json::Value::Number(serde_json::Number::from(self.maximum_empty_lines)),
+            ])
+        };
+        obj.insert("NumberOfEmptyLines".to_string(), number);
+        obj.insert(
+            "DefLikeMacros".to_string(),
+            serde_json::Value::Array(
+                self.def_like_macros
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
+        serde_json::Value::Object(obj).to_string()
+    }
 }
 
 #[cop(
@@ -101,24 +207,60 @@ impl EmptyLineBetweenDefs {
 }
 
 /// RuboCop `candidate?`: a method/class/module definition gated by the
-/// corresponding enable flag.
+/// corresponding enable flag, or a `DefLikeMacros` macro call.
 fn candidate(node: NodeId, cx: &Cx<'_>, options: &EmptyLineBetweenDefsOptions) -> bool {
     match *cx.kind(node) {
         NodeKind::Def { .. } | NodeKind::Defs { .. } => options.method_defs,
         NodeKind::Class { .. } => options.class_defs,
         NodeKind::Module { .. } => options.module_defs,
+        NodeKind::Send { .. }
+        | NodeKind::Block { .. }
+        | NodeKind::Numblock { .. }
+        | NodeKind::Itblock { .. } => macro_candidate(node, cx, options),
         _ => false,
+    }
+}
+
+/// RuboCop `macro_candidate?`: a receiverless macro call whose method name is
+/// listed in `DefLikeMacros`. Block-family nodes unwrap to their send.
+fn macro_candidate(node: NodeId, cx: &Cx<'_>, options: &EmptyLineBetweenDefsOptions) -> bool {
+    if options.def_like_macros.is_empty() {
+        return false;
+    }
+    let send = if cx.is_any_block_type(node) {
+        match cx.block_call(node).get() {
+            Some(call) => call,
+            None => return false,
+        }
+    } else if matches!(*cx.kind(node), NodeKind::Send { .. }) {
+        node
+    } else {
+        return false;
+    };
+    if !cx.is_macro(send) {
+        return false;
+    }
+    match cx.method_name(send) {
+        Some(name) => options.def_like_macros.iter().any(|m| m == name),
+        None => false,
     }
 }
 
 /// RuboCop `check_defs`.
 fn check_defs(prev: NodeId, cur: NodeId, cx: &Cx<'_>, options: &EmptyLineBetweenDefsOptions) {
     let count = blank_lines_count_between(prev, cur, cx);
-    let expected = options.number_of_empty_lines.max(0) as usize;
+    let min = options.minimum_empty_lines.max(0) as usize;
+    let max = options.maximum_empty_lines.max(0) as usize;
+    // RuboCop orders the range as written; a reversed `[2, 0]` still covers
+    // `min..=max` after normalising.
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
 
-    // RuboCop: `return if line_count_allowed?(count)` (min..max cover); here
-    // min == max == expected.
-    if count == expected {
+    // RuboCop: `return if line_count_allowed?(count)`.
+    if (lo..=hi).contains(&count) {
+        return;
+    }
+    // RuboCop: `return if multiple_blank_lines_groups?(*nodes)`.
+    if multiple_blank_lines_groups(prev, cur, cx) {
         return;
     }
     // RuboCop: `return if nodes.all?(&:single_line?) && AllowAdjacentOneLineDefs`.
@@ -129,17 +271,25 @@ fn check_defs(prev: NodeId, cur: NodeId, cx: &Cx<'_>, options: &EmptyLineBetween
     let location = def_location(cur, cx);
     let message = format!(
         "Expected {} between {} definitions; found {count}.",
-        expected_lines(expected),
+        expected_lines(lo, hi),
         node_type(cur, cx),
     );
     cx.emit_offense(location, &message, None);
-    autocorrect(prev, cur, count, expected, cx);
+    autocorrect(prev, cur, count, lo, hi, cx);
 }
 
-/// RuboCop `def_location`: `loc.keyword.join(loc.name)`. For `def`/`defs`/
-/// `class`/`module` the node starts at the keyword, so the range spans from the
-/// node start to the end of the definition's name.
+/// RuboCop `def_location`: `loc.keyword.join(loc.name)` for def-like nodes;
+/// the whole node for macro sends/blocks.
 fn def_location(node: NodeId, cx: &Cx<'_>) -> Range {
+    if matches!(
+        *cx.kind(node),
+        NodeKind::Send { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
+    ) {
+        return cx.range(node);
+    }
     let loc = cx.loc(node);
     let name_end = loc.name.end;
     let start = cx.range(node).start;
@@ -154,29 +304,32 @@ fn def_location(node: NodeId, cx: &Cx<'_>) -> Range {
         if keyword != Range::ZERO {
             keyword
         } else {
-            Range {
-                start,
-                end: start,
-            }
+            Range { start, end: start }
         }
     }
 }
 
-/// RuboCop `node_type`: defs map to `method`; everything else uses its type.
+/// RuboCop `node_type`: defs map to `method`, numblock/itblock/block to
+/// `block`, send to `send`; everything else uses its type.
 fn node_type(node: NodeId, cx: &Cx<'_>) -> &'static str {
     match *cx.kind(node) {
         NodeKind::Def { .. } | NodeKind::Defs { .. } => "method",
         NodeKind::Class { .. } => "class",
         NodeKind::Module { .. } => "module",
+        NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => "block",
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => "send",
         _ => "definition",
     }
 }
 
-/// RuboCop `expected_lines` for the fixed-count case (allowance range is a
-/// documented gap).
-fn expected_lines(expected: usize) -> String {
-    let lines = if expected == 1 { "line" } else { "lines" };
-    format!("{expected} empty {lines}")
+/// RuboCop `expected_lines`: a range renders `min..max`, otherwise a fixed
+/// count with singular/plural handling.
+fn expected_lines(min: usize, max: usize) -> String {
+    if min != max {
+        return format!("{min}..{max} empty lines");
+    }
+    let lines = if max == 1 { "line" } else { "lines" };
+    format!("{max} empty {lines}")
 }
 
 /// True iff the node occupies a single source line.
@@ -184,6 +337,80 @@ fn is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
     let range = cx.range(node);
     let src = cx.source().as_bytes();
     !src[range.start as usize..range.end as usize].contains(&b'\n')
+}
+
+/// 1-based source line number containing byte `offset`.
+fn line_of(src: &str, offset: usize) -> usize {
+    let off = offset.min(src.len());
+    src.as_bytes()[..off]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        + 1
+}
+
+/// RuboCop `def_start`: the first line of the definition. Block-family nodes
+/// start at their send; sends start at their own line; everything else starts
+/// at the keyword line (== range start line).
+fn def_start_line(node: NodeId, cx: &Cx<'_>) -> usize {
+    let src = cx.source();
+    if cx.is_any_block_type(node)
+        && let Some(call) = cx.block_call(node).get()
+    {
+        return line_of(src, cx.range(call).start as usize);
+    }
+    line_of(src, cx.range(node).start as usize)
+}
+
+/// RuboCop `def_end` (`end_loc(node).line`): the last line of the definition.
+fn def_end_line(node: NodeId, cx: &Cx<'_>) -> usize {
+    let src = cx.source();
+    let end = cx.range(node).end as usize;
+    if end == 0 {
+        return 1;
+    }
+    // `range.end` is exclusive; the last byte of the node decides its line.
+    line_of(src, end.saturating_sub(1))
+}
+
+/// RuboCop `lines_between_defs`: physical lines strictly between the two defs.
+fn lines_between_defs<'a>(prev: NodeId, cur: NodeId, cx: &Cx<'_>, src: &'a str) -> Vec<&'a str> {
+    let all: Vec<&str> = src.lines().collect();
+    if all.is_empty() {
+        return Vec::new();
+    }
+    let begin = def_end_line(prev, cx);
+    let end_def_start = def_start_line(cur, cx);
+    if end_def_start < 2 {
+        return Vec::new();
+    }
+    // 0-based slice: start just after `prev`'s last line, end just before
+    // `cur`'s first line. `begin` is 1-based, so it doubles as the 0-based
+    // start index; `end_def_start - 1` is the exclusive 0-based end.
+    let start_idx = begin.min(all.len());
+    let end_idx = (end_def_start - 1).min(all.len());
+    if end_idx <= start_idx {
+        return Vec::new();
+    }
+    all[start_idx..end_idx].to_vec()
+}
+
+/// RuboCop `multiple_blank_lines_groups?`: skip when blank lines between the
+/// defs are split by a comment (the last blank comes after the first
+/// non-blank line).
+fn multiple_blank_lines_groups(prev: NodeId, cur: NodeId, cx: &Cx<'_>) -> bool {
+    let src = cx.source();
+    let lines = lines_between_defs(prev, cur, cx, src);
+    if lines.is_empty() {
+        return false;
+    }
+    let is_blank = |line: &str| line.bytes().all(crate::cops::util::is_ruby_blank_byte);
+    let blank_start = lines.iter().rposition(|l| is_blank(l));
+    let non_blank_end = lines.iter().position(|l| !is_blank(l));
+    match (blank_start, non_blank_end) {
+        (Some(b), Some(n)) => b > n,
+        _ => false,
+    }
 }
 
 /// RuboCop `blank_lines_count_between`: blank lines strictly between the first
@@ -231,8 +458,9 @@ fn blank_lines_count_between(prev: NodeId, cur: NodeId, cx: &Cx<'_>) -> usize {
 }
 
 /// RuboCop `autocorrect`: anchor at the first newline after `prev`'s end, then
-/// remove surplus or insert missing blank lines.
-fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx<'_>) {
+/// remove surplus (down to the maximum) or insert missing (up to the minimum)
+/// blank lines.
+fn autocorrect(prev: NodeId, cur: NodeId, count: usize, min: usize, max: usize, cx: &Cx<'_>) {
     let src = cx.source().as_bytes();
     let end_pos = cx.range(prev).end as usize;
     let Some(rel) = src[end_pos..].iter().position(|&b| b == b'\n') else {
@@ -252,15 +480,15 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
         newline_pos + 1
     };
 
-    if count > expected {
-        // Remove `count - expected` *blank* physical lines that lie between the
+    if count > max {
+        // Remove `count - max` *blank* physical lines that lie between the
         // two definitions. Each removed line is deleted whole (line start to
         // next line start, including any spaces/tabs), so trailing whitespace is
         // never merged onto an adjacent line. Non-blank lines (e.g. comments
         // between the defs) are skipped, so only surplus blank lines are
         // removed — a contiguous range removal would otherwise eat an
         // intervening comment line.
-        let difference = count - expected;
+        let difference = count - max;
         // Blank lines start at `region_start`; stop at `cur`'s line.
         let mut pos = region_start;
         let cur_start = begin_pos;
@@ -294,7 +522,7 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
         // Insert missing blank lines at the blank-line region start. If both
         // definitions share a line, an additional newline is needed to move the
         // second definition onto its own line before adding blank lines.
-        let difference = expected - count;
+        let difference = min.saturating_sub(count);
         let newlines = difference + usize::from(same_line);
         let anchor = Range {
             start: region_start as u32,
@@ -309,6 +537,7 @@ murphy_plugin_api::submit_cop!(EmptyLineBetweenDefs);
 #[cfg(test)]
 mod tests {
     use super::{EmptyLineBetweenDefs, EmptyLineBetweenDefsOptions};
+    use murphy_plugin_api::CopOptions;
     use murphy_plugin_api::test_support::{
         indoc, run_cop_with_edits, run_cop_with_options, run_cop_with_options_and_edits, test,
     };
@@ -325,6 +554,26 @@ mod tests {
             );
         }
         out
+    }
+
+    fn opts_with_number(value: serde_json::Value) -> EmptyLineBetweenDefsOptions {
+        let json = serde_json::json!({
+            "EmptyLineBetweenMethodDefs": true,
+            "EmptyLineBetweenClassDefs": true,
+            "EmptyLineBetweenModuleDefs": true,
+            "AllowAdjacentOneLineDefs": true,
+            "NumberOfEmptyLines": value,
+            "DefLikeMacros": [],
+        });
+        EmptyLineBetweenDefsOptions::from_config_json(json.to_string().as_bytes()).unwrap()
+    }
+
+    fn opts_with_macros(macros: &[&str], allow_adjacent: bool) -> EmptyLineBetweenDefsOptions {
+        EmptyLineBetweenDefsOptions {
+            def_like_macros: macros.iter().map(|s| s.to_string()).collect(),
+            allow_adjacent_one_line_defs: allow_adjacent,
+            ..Default::default()
+        }
     }
 
     // ── Clean ────────────────────────────────────────────────────────────────
@@ -372,7 +621,8 @@ mod tests {
 
     #[test]
     fn flags_missing_blank_line_between_methods() {
-        let offenses = murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(indoc! {r#"
+        let offenses =
+            murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(indoc! {r#"
             def a
             end
             def b
@@ -397,11 +647,8 @@ mod tests {
     fn corrects_same_line_one_line_defs_when_adjacency_is_disabled() {
         let src = "def a; end; def b; end\n";
         let options = EmptyLineBetweenDefsOptions {
-            method_defs: true,
-            class_defs: true,
-            module_defs: true,
             allow_adjacent_one_line_defs: false,
-            number_of_empty_lines: 1,
+            ..Default::default()
         };
         let run = run_cop_with_options_and_edits::<EmptyLineBetweenDefs>(src, &options);
         assert_eq!(run.offenses.len(), 1);
@@ -412,7 +659,8 @@ mod tests {
 
     #[test]
     fn flags_missing_blank_line_between_classes() {
-        let offenses = murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(indoc! {r#"
+        let offenses =
+            murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(indoc! {r#"
             class A
             end
             class B
@@ -427,7 +675,8 @@ mod tests {
 
     #[test]
     fn flags_missing_blank_line_between_modules() {
-        let offenses = murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(indoc! {r#"
+        let offenses =
+            murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(indoc! {r#"
             module A
             end
             module B
@@ -479,14 +728,161 @@ mod tests {
 
     #[test]
     fn corrects_too_many_blank_lines_preserves_comment() {
-        // A comment sits between the defs alongside surplus blank lines. The
-        // autocorrect must remove only the surplus blank line and keep the
+        // Surplus blanks before a comment (single blank group) still flag.
+        // The autocorrect must remove only the surplus blank line and keep the
         // comment line intact.
-        let src = "def a\nend\n# c\n\n\ndef b\nend\n";
+        let src = "def a\nend\n\n\n# c\ndef b\nend\n";
         let run = run_cop_with_edits::<EmptyLineBetweenDefs>(src);
         assert_eq!(run.offenses.len(), 1, "got {:?}", run.offenses);
         let corrected = apply(src, &run.edits);
-        assert_eq!(corrected, "def a\nend\n# c\n\ndef b\nend\n");
+        assert_eq!(corrected, "def a\nend\n\n# c\ndef b\nend\n");
         assert!(corrected.contains("# c"), "comment must be preserved");
+    }
+
+    // ── NumberOfEmptyLines allowance range ───────────────────────────────────
+
+    #[test]
+    fn allows_zero_or_one_blank_lines_with_range() {
+        let options = opts_with_number(serde_json::json!([0, 1]));
+        assert!(
+            run_cop_with_options::<EmptyLineBetweenDefs>("def a\nend\ndef b\nend\n", &options)
+                .is_empty()
+        );
+        assert!(
+            run_cop_with_options::<EmptyLineBetweenDefs>("def a\nend\n\ndef b\nend\n", &options)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn flags_two_blank_lines_with_range_and_reports_range() {
+        let options = opts_with_number(serde_json::json!([0, 1]));
+        let offenses =
+            run_cop_with_options::<EmptyLineBetweenDefs>("def a\nend\n\n\ndef b\nend\n", &options);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Expected 0..1 empty lines between method definitions; found 2."
+        );
+    }
+
+    #[test]
+    fn corrects_two_blank_lines_down_to_maximum() {
+        let options = opts_with_number(serde_json::json!([0, 1]));
+        let src = "def a\nend\n\n\ndef b\nend\n";
+        let run = run_cop_with_options_and_edits::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(apply(src, &run.edits), "def a\nend\n\ndef b\nend\n");
+    }
+
+    #[test]
+    fn requires_two_blank_lines_with_fixed_count() {
+        let options = opts_with_number(serde_json::json!(2));
+        let offenses =
+            run_cop_with_options::<EmptyLineBetweenDefs>("def a\nend\n\ndef b\nend\n", &options);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Expected 2 empty lines between method definitions; found 1."
+        );
+        let src = "def a\nend\n\ndef b\nend\n";
+        let run = run_cop_with_options_and_edits::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(apply(src, &run.edits), "def a\nend\n\n\ndef b\nend\n");
+    }
+
+    #[test]
+    fn number_of_empty_lines_roundtrips_through_json() {
+        let options = opts_with_number(serde_json::json!([0, 1]));
+        let json = options.to_config_json();
+        let back = EmptyLineBetweenDefsOptions::from_config_json(json.as_bytes()).unwrap();
+        assert_eq!(back.minimum_empty_lines, 0);
+        assert_eq!(back.maximum_empty_lines, 1);
+        let single = opts_with_number(serde_json::json!(2));
+        let json = single.to_config_json();
+        let back = EmptyLineBetweenDefsOptions::from_config_json(json.as_bytes()).unwrap();
+        assert_eq!((back.minimum_empty_lines, back.maximum_empty_lines), (2, 2));
+    }
+
+    // ── multiple_blank_lines_groups ──────────────────────────────────────────
+
+    #[test]
+    fn skips_offense_when_blanks_are_split_by_comment() {
+        // Two blank lines with a comment between them: the blank groups are
+        // split, so RuboCop skips (autocorrect would be ambiguous).
+        let src = "def a\nend\n\n# c\n\ndef b\nend\n";
+        let offenses = murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    #[test]
+    fn still_flags_comment_only_gap() {
+        // Only a comment between the defs (no split blank groups) still flags.
+        let src = "def a\nend\n# c\ndef b\nend\n";
+        let offenses = murphy_plugin_api::test_support::run_cop::<EmptyLineBetweenDefs>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+    }
+
+    // ── DefLikeMacros ────────────────────────────────────────────────────────
+
+    #[test]
+    fn flags_missing_blank_line_between_macro_blocks() {
+        let options = opts_with_macros(&["foo"], true);
+        let src = "foo \'first\' do\nend\nfoo \'second\' do\nend\n";
+        let offenses = run_cop_with_options::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Expected 1 empty line between block definitions; found 0."
+        );
+    }
+
+    #[test]
+    fn corrects_missing_blank_line_between_macro_blocks() {
+        let options = opts_with_macros(&["foo"], true);
+        let src = "foo \'first\' do\nend\nfoo \'second\' do\nend\n";
+        let run = run_cop_with_options_and_edits::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(
+            apply(src, &run.edits),
+            "foo \'first\' do\nend\n\nfoo \'second\' do\nend\n"
+        );
+    }
+
+    #[test]
+    fn ignores_unlisted_macro_names() {
+        let options = opts_with_macros(&["foo"], true);
+        let src = "bar \'a\' do\nend\nbar \'b\' do\nend\n";
+        assert!(run_cop_with_options::<EmptyLineBetweenDefs>(src, &options).is_empty());
+    }
+
+    #[test]
+    fn flags_bare_macro_sends_when_adjacency_disabled() {
+        let options = opts_with_macros(&["foo"], false);
+        let src = "foo :a\nfoo :b\n";
+        let offenses = run_cop_with_options::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Expected 1 empty line between send definitions; found 0."
+        );
+    }
+
+    #[test]
+    fn allows_adjacent_one_line_macro_sends_by_default() {
+        let options = opts_with_macros(&["foo"], true);
+        let src = "foo :a\nfoo :b\n";
+        assert!(run_cop_with_options::<EmptyLineBetweenDefs>(src, &options).is_empty());
+    }
+
+    #[test]
+    fn flags_mixed_def_and_macro() {
+        let options = opts_with_macros(&["foo"], true);
+        let src = "def a\nend\nfoo \'b\' do\nend\n";
+        let offenses = run_cop_with_options::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Expected 1 empty line between block definitions; found 0."
+        );
     }
 }
