@@ -196,6 +196,7 @@ struct T5;
     default_severity = "warning",
     default_enabled = false,
     minimum_target_ruby_version = "3.2",
+    maximum_target_ruby_version = "3.4",
     safe = false,
     safe_autocorrect = false,
     options = NoOptions
@@ -454,6 +455,11 @@ fn cop_metadata_propagates_to_trait_consts() {
         <T5 as Cop>::MINIMUM_TARGET_RUBY_VERSION,
         Some(RubyVersion::new(3, 2)),
         "minimum_target_ruby_version should be 3.2"
+    );
+    assert_eq!(
+        <T5 as Cop>::MAXIMUM_TARGET_RUBY_VERSION,
+        Some(RubyVersion::new(3, 4)),
+        "maximum_target_ruby_version should be 3.4"
     );
     assert_eq!(
         <T5 as Cop>::SAFE_AUTOCORRECT,

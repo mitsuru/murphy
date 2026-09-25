@@ -381,6 +381,7 @@ pub fn build_mruby_cop(proxy: &MrubyCopProxy) -> PluginCopV1 {
         safe: TRISTATE_UNSET,
         safe_autocorrect: TRISTATE_UNSET,
         minimum_target_ruby_version: 0,
+        maximum_target_ruby_version: 0,
         options_ptr: std::ptr::null(),
         options_len: 0,
         kinds_ptr: proxy.kinds.as_ptr(),
