@@ -67,7 +67,26 @@ An installed pack is a directory: `murphy-plugin.toml` at the root,
 per-arch binaries under `lib/<arch>/` (`linux-x86_64`, `darwin-arm64`, …).
 Multi-arch matrix releases are a future option — the template's CI builds
 and tests the host arch only; the `lib/<arch>/` slots are where cross-built
-binaries go. There is no marketplace or `murphy plugin install <name>` yet.
+binaries go. There is no marketplace yet.
+
+Install a pack to the user-local dir (`~/.local/share/murphy/plugins/`,
+search-path layer 5) with `murphy plugins install` (`murphy plugin
+install` is an alias). It resolves `<name>` via the thin registry (compat
+check, same gate as `murphy add`) plus installed gems, copies the pack,
+and verifies the installed copy (manifest + ABI + cdylib):
+
+```sh
+murphy plugins install murphy-rails --from ./dist   # local pack dir
+murphy plugins install murphy-rails                 # from installed gems
+murphy plugins install murphy-rails --dry-run       # no copy
+murphy plugins install murphy-rails --force         # overwrite
+```
+
+After install, `plugins = ["murphy-rails"]` resolves with no `path:` pin.
+`murphy add murphy-rails` remains the `.murphy.yml` config half; `plugins
+install` is the artifact half for non-Bundler users (Bundler users resolve
+gems directly, no copy needed). Remote download (marketplace) and
+multi-arch auto-selection are follow-ups.
 
 Packs also ship as Ruby gems (C2; ADR 0048): a `murphy-*` gem holding
 `murphy-plugin.toml` (+ `lib/<arch>/` cdylibs) at its root, under

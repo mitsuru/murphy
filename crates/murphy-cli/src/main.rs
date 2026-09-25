@@ -17,6 +17,7 @@
 //!   `murphy_ast::ast_to_sexp` (re-exported via `murphy_core`).
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
 //! - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` — scaffold git-hook configs (see `install.rs`).
+//! - `murphy plugins install <pack> [--from DIR] [--dry-run] [--force]` — install a pack to the user dir (see `plugins.rs`; `plugin` is an alias).
 //! - `murphy add <pack> [--registry PATH] [--dry-run]` — add a registry pack to `.murphy.yml` (see `add.rs`).
 //! - `murphy init [--preset <name>] [--force] [--hook [TOOL]] [--from <.rubocop.yml>]` — scaffold `.murphy.yml` + `.murphyignore` (see `init.rs`).
 //!
@@ -151,7 +152,8 @@ enum CliCommand {
     /// Run mruby cop spec files.
     #[command(name = "test-cop")]
     TestCop(TestCopArgs),
-    /// Maintain staged plugin packs in `.murphy/plugins/`.
+    /// Maintain staged plugin packs in `.murphy/plugins/` (`plugin` is an alias).
+    #[command(visible_alias = "plugin")]
     Plugins(PluginsArgs),
     /// Add a cop pack from the official registry to `.murphy.yml` (C1).
     Add(AddArgs),
@@ -385,6 +387,8 @@ struct PluginsArgs {
 enum PluginsCommand {
     /// Refresh staged `.so` packs in `.murphy/plugins/` from fresher builds.
     Sync(PluginsSyncArgs),
+    /// Install a pack to the user-local dir (`~/.local/share/murphy/plugins/`).
+    Install(PluginsInstallArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -397,6 +401,27 @@ struct PluginsSyncArgs {
     /// Dry run for CI: warn on stale without copying (exit 2 when stale).
     #[arg(long)]
     check: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct PluginsInstallArgs {
+    /// Pack name (e.g. `murphy-rails`).
+    #[arg(value_name = "PACK")]
+    pack: String,
+    /// Custom registry index file (overrides the bundled official index;
+    /// `$MURPHY_REGISTRY_PATH` does the same without a flag).
+    #[arg(long, value_name = "PATH")]
+    registry: Option<PathBuf>,
+    /// Local dir holding the pack (pack dir itself or a parent of
+    /// `<name>/`). When omitted, installed gems are searched.
+    #[arg(long = "from", value_name = "DIR")]
+    from: Option<PathBuf>,
+    /// Show what would be installed without copying.
+    #[arg(long)]
+    dry_run: bool,
+    /// Overwrite an existing install.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1687,6 +1712,15 @@ fn run_plugins(args: &PluginsArgs) -> Result<u8, AppError> {
             from: sync_args.from.clone(),
             check: sync_args.check,
         }),
+        PluginsCommand::Install(install_args) => {
+            plugins::run_install_pack(&plugins::InstallPackOptions {
+                pack: install_args.pack.clone(),
+                registry: install_args.registry.clone(),
+                from: install_args.from.clone(),
+                dry_run: install_args.dry_run,
+                force: install_args.force,
+            })
+        }
     }
 }
 

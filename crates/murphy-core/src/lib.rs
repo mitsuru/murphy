@@ -34,6 +34,7 @@ mod mruby;
 mod offense;
 pub mod pack_registry;
 mod parse;
+pub mod plugin_install;
 pub mod plugin_loader;
 pub mod plugin_manifest;
 pub mod plugin_resolver;
