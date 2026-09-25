@@ -1177,6 +1177,28 @@ impl Translator {
             );
         }
 
+        // --- flip-flop (murphy-28xr) ---
+        if let Some(f) = node.as_flip_flop_node() {
+            // `left`/`right` は `Option<Node>`。`is_exclude_end` で `..`/`...`
+            // を `exclusive` に畳む（`RangeExpr` と同形）。
+            let left = f
+                .left()
+                .map(|n| OptNodeId::some(self.translate_node(&n)))
+                .unwrap_or(OptNodeId::NONE);
+            let right = f
+                .right()
+                .map(|n| OptNodeId::some(self.translate_node(&n)))
+                .unwrap_or(OptNodeId::NONE);
+            return self.builder.push(
+                NodeKind::FlipFlop {
+                    left,
+                    right,
+                    exclusive: f.is_exclude_end(),
+                },
+                range,
+            );
+        }
+
         // --- definitions ---
         if let Some(d) = node.as_def_node() {
             // singleton `def self.foo` は `receiver` Some に畳む。
@@ -3647,6 +3669,52 @@ mod tests {
             }
             other => panic!("expected RangeExpr, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_flip_flop() {
+        // `if a .. b` の条件部 → FlipFlop { exclusive: false, 両端 Some }。
+        let ast = translate("baz if foo .. bar", "t.rb");
+        let cond = match ast.kind(ast.root()) {
+            NodeKind::If { cond, .. } => *cond,
+            other => panic!("expected If, got {other:?}"),
+        };
+        match ast.kind(cond) {
+            NodeKind::FlipFlop {
+                left,
+                right,
+                exclusive,
+            } => {
+                assert!(!exclusive);
+                assert!(left.get().is_some() && right.get().is_some());
+            }
+            other => panic!("expected FlipFlop, got {other:?}"),
+        }
+        // `...` → exclusive: true。
+        let ast2 = translate("baz if foo ... bar", "t.rb");
+        let cond2 = match ast2.kind(ast2.root()) {
+            NodeKind::If { cond, .. } => *cond,
+            other => panic!("expected If, got {other:?}"),
+        };
+        match ast2.kind(cond2) {
+            NodeKind::FlipFlop { exclusive, .. } => assert!(exclusive),
+            other => panic!("expected FlipFlop, got {other:?}"),
+        }
+        // sexp に `flip_flop` が現れ、`Unknown` が混ざらないこと。
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(sexp.contains("flip_flop"), "no flip_flop in sexp: {sexp}");
+        assert!(!sexp.contains("unknown"), "Unknown in sexp: {sexp}");
+        // serialize round-trip で tag 114 を保持すること。
+        let bytes = ast.to_bytes().expect("serialize flip_flop");
+        let back = murphy_ast::Ast::from_bytes(&bytes).expect("deserialize flip_flop");
+        assert_eq!(back.kind(back.root()), ast.kind(ast.root()));
+        assert!(matches!(
+            back.kind(cond),
+            NodeKind::FlipFlop {
+                exclusive: false,
+                ..
+            }
+        ));
     }
 
     #[test]

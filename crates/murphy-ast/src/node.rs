@@ -687,6 +687,18 @@ pub enum NodeKind {
         call: NodeId,
         targets: NodeList,
     },
+
+    // ── murphy-28xr FlipFlop (tag 114) ──────────────────────────────────
+    /// `left .. right` / `left ... right` as a flip-flop condition
+    /// (`FlipFlopNode`, `PM_FLIP_FLOP_NODE`). `left` / `right` are `None`
+    /// when omitted; `exclusive` is `true` for `...` (`EXCLUDE_END` flag).
+    /// Collapses parser-gem `iflipflop` / `eflipflop` into one variant with
+    /// a bool, mirroring [`NodeKind::RangeExpr`] (`irange` / `erange`).
+    FlipFlop {
+        left: OptNodeId,
+        right: OptNodeId,
+        exclusive: bool,
+    },
 }
 
 /// A source comment, stored outside the node tree.
@@ -869,6 +881,8 @@ impl NodeKind {
             NodeKind::Pin(_) => 110,
             NodeKind::IfGuard(_) => 111,
             NodeKind::UnlessGuard(_) => 112,
+            // murphy-28xr FlipFlop
+            NodeKind::FlipFlop { .. } => 114,
         };
         crate::NodeKindTag(t)
     }

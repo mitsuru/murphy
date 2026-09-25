@@ -700,6 +700,17 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 112);
             put_u32(out, inner.0);
         }
+        // murphy-28xr FlipFlop (tag 114)
+        NodeKind::FlipFlop {
+            left,
+            right,
+            exclusive,
+        } => {
+            put_u8(out, 114);
+            put_u32(out, left.0);
+            put_u32(out, right.0);
+            put_u8(out, u8::from(exclusive));
+        }
     }
 }
 
@@ -990,6 +1001,12 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         110 => NodeKind::Pin(NodeId(get_u32(cur)?)),
         111 => NodeKind::IfGuard(NodeId(get_u32(cur)?)),
         112 => NodeKind::UnlessGuard(NodeId(get_u32(cur)?)),
+        // murphy-28xr FlipFlop (tag 114)
+        114 => NodeKind::FlipFlop {
+            left: OptNodeId(get_u32(cur)?),
+            right: OptNodeId(get_u32(cur)?),
+            exclusive: get_u8(cur)? != 0,
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1538,6 +1555,11 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             // murphy-j1j2 PM-E pin & guard
             NodeKind::Pin(inner) | NodeKind::IfGuard(inner) | NodeKind::UnlessGuard(inner) => {
                 check_node(inner.0)?;
+            }
+            // murphy-28xr FlipFlop
+            NodeKind::FlipFlop { left, right, .. } => {
+                check_opt_node(left)?;
+                check_opt_node(right)?;
             }
         }
     }

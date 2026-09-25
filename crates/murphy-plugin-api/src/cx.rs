@@ -1912,11 +1912,10 @@ impl<'a> Cx<'a> {
     /// `Node#pure?`.
     ///
     /// **Divergences (Murphy translator gaps, documented):** `__FILE__` /
-    /// `__LINE__` and flip-flops parse to [`NodeKind::Unknown`] in Murphy,
-    /// so they fall through to `false` where RuboCop would treat the former
-    /// as pure and recurse into the latter. `until_post`/`while_post` are
-    /// folded into [`NodeKind::Until`]/[`NodeKind::While`] (a `post` flag),
-    /// so both forms are covered.
+    /// `__LINE__` parse to [`NodeKind::Unknown`] in Murphy, so they fall
+    /// through to `false` where RuboCop would treat them as pure.
+    /// `until_post`/`while_post` are folded into [`NodeKind::Until`]/
+    /// [`NodeKind::While`] (a `post` flag), so both forms are covered.
     pub fn is_pure(&self, id: NodeId) -> bool {
         match self.kind(id) {
             // Pure value leaves — always pure.
@@ -1945,6 +1944,7 @@ impl<'a> Cx<'a> {
             | NodeKind::Dsym(..)
             | NodeKind::Ensure { .. }
             | NodeKind::RangeExpr { .. }
+            | NodeKind::FlipFlop { .. }
             | NodeKind::For { .. }
             | NodeKind::Hash(..)
             | NodeKind::If { .. }
@@ -2029,8 +2029,8 @@ impl<'a> Cx<'a> {
     /// unused.
     ///
     /// `while_post`/`until_post` fold into [`NodeKind::While`]/
-    /// [`NodeKind::Until`]; flip-flops parse to [`NodeKind::Unknown`]
-    /// (handled by the `_ => true` arm, as RuboCop's pass-through would).
+    /// [`NodeKind::Until`]; [`NodeKind::FlipFlop`] is a pass-through
+    /// container like [`NodeKind::RangeExpr`].
     pub fn is_value_used(&self, id: NodeId) -> bool {
         let Some(parent) = self.parent(id).get() else {
             return false;
@@ -2042,6 +2042,7 @@ impl<'a> Cx<'a> {
             | NodeKind::Dstr(..)
             | NodeKind::Dsym(..)
             | NodeKind::RangeExpr { .. }
+            | NodeKind::FlipFlop { .. }
             | NodeKind::Float(..)
             | NodeKind::Hash(..)
             | NodeKind::Not(..)
