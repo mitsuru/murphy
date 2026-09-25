@@ -1429,6 +1429,24 @@ impl MurphyConfig {
                 "SpaceInsideHashLiteralBracesEnforcedStyle".to_string(),
                 serde_json::Value::String(self.resolved_space_inside_hash_literal_braces_style()),
             )),
+            // murphy-bjrg.3 (no ABI bump): RuboCop's
+            // `allowed_camel_case_file?` exempts a file matching an
+            // AllCops:Include pattern containing an uppercase letter
+            // (e.g. `**/Gemfile`, `**/Rakefile`). The cop cannot read the
+            // merged Include list via `CxRaw`, so the host bakes the
+            // matching subset here; the baked key always wins over any
+            // same-named user key, mirroring the sibling-style bakings.
+            "Naming/FileName" => Some((
+                "AllowedCamelCaseIncludePatterns".to_string(),
+                serde_json::Value::Array(
+                    self.files
+                        .include
+                        .iter()
+                        .filter(|p| p.chars().any(|c| c.is_ascii_uppercase()))
+                        .map(|p| serde_json::Value::String(p.clone()))
+                        .collect(),
+                ),
+            )),
             _ => None,
         };
         let default_rule = self.base_defaults.cop_rules.get(name);
@@ -2586,6 +2604,37 @@ Style/StringLiterals:
         assert!(
             matches!(err, ConfigError::BadGlob(_)),
             "expected BadGlob, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cop_options_json_bakes_camel_case_includes_for_file_name() {
+        // murphy-bjrg.3 (no ABI bump): the baked key carries exactly the
+        // effective AllCops:Include patterns containing an uppercase letter.
+        let cfg = MurphyConfig::with_defaults(
+            "",
+            "AllCops:\n  Include:\n    - '**/*.rb'\n    - '**/Gemfile'\n    - '**/lower'\n",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/FileName")).expect("valid JSON");
+        let baked = parsed["AllowedCamelCaseIncludePatterns"]
+            .as_array()
+            .expect("baked key is an array");
+        assert_eq!(baked.len(), 1);
+        assert_eq!(baked[0], "**/Gemfile");
+
+        // Empty effective list bakes an empty array (strict cop behavior).
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  Include:\n    - '**/*.rb'\n")
+            .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/FileName")).expect("valid JSON");
+        assert_eq!(
+            parsed["AllowedCamelCaseIncludePatterns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
         );
     }
 

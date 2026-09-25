@@ -4,18 +4,17 @@
 //! ```murphy-parity
 //! upstream: rubocop-rails
 //! upstream_cop: Rails/LexicallyScopedActionFilter
-//! upstream_version_checked: 2.35.0
+//! upstream_version_checked: 2.38.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
 //!   Send-dispatch port of RuboCop's on_send with RESTRICT_ON_SEND gating.
-//!   Bare-call gating, whole-send offense range, and backtick message all
-//!   mirror upstream. Defined methods (direct `def` children with no
-//!   receiver), `delegate` with `:to`, and `alias`/`alias_method` (old->new)
-//!   are all implemented. Two intentional narrowings vs upstream are
-//!   documented below: Include path gating is absent (flags in all files),
-//!   and hash matching is permissive (any hash arg / any pair position)
-//!   to avoid false negatives for `only: ..., if: ...` multi-option calls.
+//!   Bare-call gating, exact 2-arg single-pair-hash shape, whole-send offense
+//!   range, and backtick message all mirror upstream. Defined methods (direct
+//!   `def` children with no receiver), `delegate` with `:to`, and
+//!   `alias`/`alias_method` (old->new) are all implemented. One intentional
+//!   narrowing vs upstream is documented below: Include path gating is absent
+//!   (flags in all files).
 //! ```
 //!
 //! Checks that methods specified in the filter's `only` or `except` options
@@ -30,11 +29,9 @@
 //!
 //! Upstream NodePattern is exact:
 //! `(send nil? {filters} _ (hash (pair (sym {:only :except}) $_)))`
-//! (exactly 2 args, single-pair hash). Murphy is permissive here: any hash
-//! argument containing an `only:`/`except:` pair matches, and extra pairs
-//! (`if:`, `unless:`) or extra filter names do not suppress the check.
-//! All upstream spec cases are 2-arg single-pair, so parity holds and the
-//! permissive form only removes false negatives.
+//! (exactly 2 args, single-pair hash). Murphy ports this exactly: extra
+//! pairs (`if:`, `unless:`) or extra positional args suppress the check,
+//! matching upstream (verified vs rubocop-rails 2.38.0, Mastodon bjrg.3).
 //!
 //! ## Lexical scope
 //!
@@ -220,27 +217,34 @@ fn array_values<'a>(id: NodeId, cx: &'a Cx<'a>) -> Vec<&'a str> {
 
 /// Find the `only:`/`except:` value node in the filter call.
 ///
-/// Permissive vs upstream (see module docs): scan all hash arguments for
-/// the first `only:`/`except:` pair instead of requiring exactly
-/// `(_, single-pair-hash)`.
+/// Exact port of upstream
+/// `(send nil? {filters} _ (hash (pair (sym {:only :except}) $_)))`:
+/// exactly 2 arguments, the second a hash with exactly one pair whose key
+/// is `only`/`except`. Multi-pair hashes (`only: ..., if: ...`) and extra
+/// positional args never match upstream and return `None` here.
 fn only_or_except_value(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    for &arg in cx.call_arguments(node) {
-        let NodeKind::Hash(pairs) = *cx.kind(arg) else {
-            continue;
-        };
-        for &pair_id in cx.list(pairs) {
-            let NodeKind::Pair { key, value } = *cx.kind(pair_id) else {
-                continue;
-            };
-            let NodeKind::Sym(key_sym) = *cx.kind(key) else {
-                continue;
-            };
-            if matches!(cx.symbol_str(key_sym), "only" | "except") {
-                return Some(value);
-            }
-        }
+    let args = cx.call_arguments(node);
+    if args.len() != 2 {
+        return None;
     }
-    None
+    let NodeKind::Hash(pairs) = *cx.kind(args[1]) else {
+        return None;
+    };
+    let pair_ids = cx.list(pairs);
+    if pair_ids.len() != 1 {
+        return None;
+    }
+    let NodeKind::Pair { key, value } = *cx.kind(pair_ids[0]) else {
+        return None;
+    };
+    let NodeKind::Sym(key_sym) = *cx.kind(key) else {
+        return None;
+    };
+    if matches!(cx.symbol_str(key_sym), "only" | "except") {
+        Some(value)
+    } else {
+        None
+    }
 }
 
 /// Upstream `defined_action_methods`: direct `def`s (receiver-less only)
@@ -666,14 +670,49 @@ mod tests {
     }
 
     #[test]
-    fn flags_multi_option_hash() {
-        // Permissive improvement over upstream's single-pair pattern:
-        // `only:` alongside `if:` still checks.
-        test::<LexicallyScopedActionFilter>().expect_offense(indoc! {r#"
+    fn no_offense_for_multi_option_hash() {
+        // Upstream NodePattern `(send nil? {filters} _ (hash (pair ...)))`
+        // requires exactly 2 args and a single-pair options hash: `only:`
+        // alongside `if:`/`unless:` never matches (verified vs rubocop-rails
+        // 2.38.0). Mastodon bjrg.3 FPs (passwords_controller `only: :edit,
+        // unless: ...`, authorized_applications_controller `only: :index,
+        // unless: ...`, two_factor concern `only: [...], if: ...`).
+        test::<LexicallyScopedActionFilter>().expect_no_offenses(indoc! {r#"
                 class C
                   before_action :foo, only: :bar, if: :cond
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `bar` is not explicitly defined on the class.
                   def cond; end
+                end
+            "#});
+    }
+
+    #[test]
+    fn no_offense_for_multi_option_hash_unless() {
+        test::<LexicallyScopedActionFilter>().expect_no_offenses(indoc! {r#"
+                class C
+                  before_action :foo, only: :bar, unless: :cond
+                  def cond; end
+                end
+            "#});
+    }
+
+    #[test]
+    fn no_offense_for_extra_positional_arg() {
+        // Three positional args never match upstream's 2-arg pattern.
+        test::<LexicallyScopedActionFilter>().expect_no_offenses(indoc! {r#"
+                class C
+                  before_action :foo, :baz, only: :bar
+                end
+            "#});
+    }
+
+    #[test]
+    fn no_offense_for_only_plus_unless_proc() {
+        // Mastodon OAuth::AuthorizedApplicationsController shape: `only:`
+        // with an `unless:` lambda still never matches.
+        test::<LexicallyScopedActionFilter>().expect_no_offenses(indoc! {r#"
+                class C
+                  before_action :foo, only: :bar, unless: -> { x }
+                  def foo; end
                 end
             "#});
     }

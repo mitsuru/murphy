@@ -346,6 +346,95 @@ fn applying_rails_pack_layer_flips_active_support_extensions_enabled() {
 }
 
 #[test]
+fn rails_pack_scopes_http_positional_arguments_to_spec_and_test() {
+    // Mastodon bjrg.3: `Rails/HttpPositionalArguments` ships
+    // `Include: ['**/spec/**/*', '**/test/**/*']` upstream, so the routing-DSL
+    // `get :export, constraints: {...}` in `config/routes/admin.rb` is out of
+    // scope. The pack's bundled default.yml must carry that file scope so the
+    // engine's `cop_applies_to_file` gate skips non-spec files.
+    use murphy_core::{CopRegistry, MurphyConfig};
+
+    let rails = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
+        rails.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let mut config =
+        MurphyConfig::load_with_defaults(dir.path(), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .expect("config loads with std defaults");
+    let registry = CopRegistry::discover_with_config(dir.path(), &config, &[])
+        .expect("registry discovers the rails pack");
+    config.apply_pack_default_layers(&registry.pack_default_configs());
+
+    assert!(
+        !config.cop_applies_to_file(
+            "Rails/HttpPositionalArguments",
+            std::path::Path::new("config/routes/admin.rb")
+        ),
+        "routes file must be out of scope for HttpPositionalArguments"
+    );
+    assert!(
+        config.cop_applies_to_file(
+            "Rails/HttpPositionalArguments",
+            std::path::Path::new("spec/requests/admin_spec.rb")
+        ),
+        "spec files must stay in scope for HttpPositionalArguments"
+    );
+}
+
+#[test]
+fn rails_pack_leaves_opt_in_cops_disabled_by_default() {
+    // Upstream `Rails/DefaultScope: Enabled: false` (opt-in cop, unchanged
+    // through 2.38.0). Mastodon bjrg.3: `default_scope { recent.kept }` in
+    // `app/models/status.rb` must not flag unless the user opts in — the
+    // pack's bundled default.yml must carry the upstream opt-out so the
+    // engine's `cop_enabled` gate skips it.
+    use murphy_core::{CopRegistry, MurphyConfig};
+
+    let rails = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
+        rails.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let mut config =
+        MurphyConfig::load_with_defaults(dir.path(), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .expect("config loads with std defaults");
+    let registry = CopRegistry::discover_with_config(dir.path(), &config, &[])
+        .expect("registry discovers the rails pack");
+    config.apply_pack_default_layers(&registry.pack_default_configs());
+
+    assert!(
+        !config.cop_enabled("Rails/DefaultScope"),
+        "DefaultScope is opt-in upstream and must be disabled by default"
+    );
+
+    // Explicit user opt-in still enables it.
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/DefaultScope:\n  Enabled: true\n",
+        rails.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+    let config = MurphyConfig::load_with_defaults(dir.path(), murphy_std::BUNDLED_DEFAULTS_YAML)
+        .expect("config loads with std defaults");
+    assert!(
+        config.cop_enabled("Rails/DefaultScope"),
+        "explicit user Enabled: true must opt DefaultScope back in"
+    );
+}
+
+#[test]
 fn rails_pack_excludes_db_schema_from_discovery() {
     // End-to-end payoff for murphy-ynoq: loading the rails pack folds its
     // bundled `AllCops.Exclude` (notably `db/*schema.rb`) into the default base
@@ -418,6 +507,70 @@ fn rails_pack_excludes_db_schema_from_discovery() {
     assert!(
         discovered.iter().any(|p| p == "app/models/foo.rb"),
         "app/models/* must NOT be excluded: {discovered:?}"
+    );
+}
+
+#[test]
+fn rails_pack_opt_out_disables_default_scope_through_full_lint_pipeline() {
+    // Mastodon bjrg.3 payoff: `default_scope { ... }` in a model must NOT
+    // flag when the rails pack is loaded with default config (upstream
+    // `Enabled: false`), but MUST flag when the user opts in. Runs the REAL
+    // `murphy lint` binary: the pack-default `Enabled: false` layer lands
+    // AFTER registry discovery, so dispatch must re-check enablement
+    // post-layer (not just the discovery-time filter).
+    let pack = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let fixture = "class Status < ApplicationRecord\n  default_scope { where(x: 1) }\nend\n";
+
+    // ── pack-loaded arm (default config): silent ──
+    let with_pack = tempdir().expect("tempdir");
+    let rb = with_pack.path().join("status.rb");
+    fs::write(&rb, fixture).expect("write rb");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
+        pack.display().to_string()
+    );
+    fs::write(with_pack.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(with_pack.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        !stdout.contains("Rails/DefaultScope"),
+        "pack-default opt-out must silence DefaultScope; got:\n{stdout}"
+    );
+
+    // ── opt-in arm: SAME fixture + `Enabled: true` → flags ──
+    let opt_in = tempdir().expect("tempdir");
+    let rb2 = opt_in.path().join("status.rb");
+    fs::write(&rb2, fixture).expect("write rb");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/DefaultScope:\n  Enabled: true\n",
+        pack.display().to_string()
+    );
+    fs::write(opt_in.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let assert2 = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(opt_in.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb2)
+        .assert()
+        .code(1);
+    let stdout2 = String::from_utf8_lossy(&assert2.get_output().stdout);
+    assert!(
+        stdout2.contains("Rails/DefaultScope"),
+        "explicit opt-in must re-enable DefaultScope; got:\n{stdout2}"
     );
 }
 

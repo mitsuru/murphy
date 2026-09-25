@@ -65,7 +65,7 @@ pub enum Format {
 }
 
 pub fn list_with_format(format: Format) -> Result<u8, AppError> {
-    let config =
+    let mut config =
         MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
             .map_err(|e| AppError::setup(e.to_string()))?;
 
@@ -79,6 +79,11 @@ pub fn list_with_format(format: Format) -> Result<u8, AppError> {
     let registry =
         CopRegistry::discover_with_config(Path::new("."), &config, super::builtin_pack())
             .map_err(|e| AppError::setup(e.to_string()))?;
+    // Fold pack-bundled defaults (e.g. the rails pack's opt-out
+    // `Enabled: false` entries) so statuses mirror real lint runs
+    // (murphy-bjrg.3); the catalogue otherwise reports pack-default
+    // opt-outs as enabled.
+    config.apply_pack_default_layers(&registry.pack_default_configs());
 
     let mut listings: Vec<Listing> = Vec::new();
 
