@@ -7,8 +7,9 @@ dir (`~/.local/share/murphy/plugins/`, search-path layer 5 of ADR 0042)
 and verifies the installed copy.
 
 Design: murphy-uk7.1 (local sources) + murphy-uk7.2 (remote fallback;
-ADR 0053). No `bundle`/`gem` subprocess, no ABI bump. Multi-arch
-auto-selection remains a follow-up (uk7.3).
+ADR 0053) + murphy-uk7.3 (multi-arch slots; ADR 0054). No `bundle`/`gem`
+subprocess, no ABI bump. Installed multi-slot packs auto-select the host
+slot (exact → extension → sorted-first).
 
 ## Usage
 

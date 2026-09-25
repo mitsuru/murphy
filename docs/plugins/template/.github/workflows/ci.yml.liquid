@@ -20,7 +20,97 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --check
-      # Multi-arch matrix builds (linux-x86_64, darwin-arm64, ...) are a
-      # future option: cross-compile the cdylib per arch and stage each
-      # under `lib/<arch>/` next to `murphy-plugin.toml` (see ADR 0046).
-      # The matrix itself is out of scope for the template (murphy-1f7).
+
+  # Multi-arch pack release (ADR 0054, murphy-uk7.3): cross-build the cdylib
+  # per platform and stage each under its `lib/<platform>/` slot next to
+  # `murphy-plugin.toml`. The host loader picks the exact slot, then falls
+  # back to the platform extension (see `resolve_pack_cdylib`). Runners
+  # mirror `release-gem.yml`'s 4-platform matrix (C2).
+  build:
+    name: build (${{ matrix.slot }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slot: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: so
+          - slot: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: so
+          - slot: darwin-x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            ext: dylib
+          - slot: darwin-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            ext: dylib
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build cdylib for target
+        run: cargo build --target ${{ matrix.target }}
+      - name: Stage lib/<slot>/ pack dir
+        shell: bash
+        run: |
+          set -eu
+          SLOT="${{ matrix.slot }}"
+          TARGET="${{ matrix.target }}"
+          EXT="${{ matrix.ext }}"
+          SRC="target/$TARGET/debug/lib{{crate_name}}.$EXT"
+          if [ ! -f "$SRC" ]; then
+            echo "expected cdylib $SRC missing (crate lib name mismatch?)" >&2
+            ls -la "target/$TARGET/debug/" >&2 || true
+            exit 1
+          fi
+          mkdir -p "dist/{{project-name}}/lib/$SLOT"
+          cp -f "$SRC" "dist/{{project-name}}/lib/$SLOT/"
+          cp -f murphy-plugin.toml "dist/{{project-name}}/murphy-plugin.toml"
+          echo "staged:"
+          find "dist/{{project-name}}" -type f | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pack-${{ matrix.slot }}
+          path: dist/{{project-name}}/lib/${{ matrix.slot }}/
+
+  pack:
+    name: pack (all slots)
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: slots
+          merge-multiple: false
+      - name: Assemble multi-arch pack
+        shell: bash
+        run: |
+          set -eu
+          PACK="pack-all/{{project-name}}"
+          mkdir -p "$PACK/lib"
+          cp -f murphy-plugin.toml "$PACK/murphy-plugin.toml"
+          for slot in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-arm64; do
+            SRC="slots/pack-$slot/lib/$slot"
+            if [ ! -d "$SRC" ]; then
+              echo "missing slot artifact pack-$slot ($SRC)" >&2
+              exit 1
+            fi
+            mkdir -p "$PACK/lib/$slot"
+            cp -f "$SRC"/* "$PACK/lib/$slot/"
+          done
+          echo "assembled:"
+          find "$PACK" -type f | sort
+          tar czf "{{project-name}}.tar.gz" -C pack-all "{{project-name}}"
+          ls -la "{{project-name}}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: "{{project-name}}-multi-arch"
+          path: "{{project-name}}.tar.gz"

@@ -12,10 +12,10 @@
 //! 3. verify the installed copy (manifest + ABI + cdylib, then resolver
 //!    visibility) before reporting success.
 //!
-//! The marketplace (remote download) and multi-arch auto-selection are
-//! follow-ups; this module only copies from already-local sources
-//! (installed gems, `--from` dirs). No network, no `bundle`/`gem`
-//! subprocess, no ABI bump.
+//! Remote download lives in `plugin_marketplace` (uk7.2); multi-arch
+//! packs are copied whole and the host auto-selects the exact
+//! `lib/<platform>/` slot at load (ADR 0054, uk7.3). No network here, no
+//! `bundle`/`gem` subprocess, no ABI bump.
 
 use std::path::{Path, PathBuf};
 

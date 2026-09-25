@@ -23,15 +23,17 @@
 //! ```
 //!
 //! It also defines the on-disk pack-dir convention (a `murphy-plugin.toml`
-//! file plus a `lib/<arch>/` binary dir) and the helpers that map a pack
-//! dir to the cdylib the loader actually opens. `Detailed { path }` accepts **either** a
-//! direct `.so` path (legacy, unchanged) **or** a pack dir; the search
-//! path probes the pack-dir form first and falls back to the legacy
-//! `lib<name>.so` file (backward compatibility, ADR 0046 §3).
+//! file plus a `lib/<platform>/` binary dir) and the helpers that map a
+//! pack dir to the cdylib the loader actually opens. `Detailed { path }`
+//! accepts **either** a direct `.so` path (legacy, unchanged) **or** a pack
+//! dir; the search path probes the pack-dir form first and falls back to
+//! the legacy `lib<name>.so` file (backward compatibility, ADR 0046 §3).
 //!
-//! Deliberately out of scope (ADR 0046 §5): multi-arch auto-selection
-//! (first sorted platform-matching cdylib wins for now), `cargo install`
-//! / `murphy plugin install` UX, and pack signing (ADR 0004 trust model).
+//! Multi-arch auto-selection (ADR 0054, `murphy-uk7.3`): the loader prefers
+//! the exact host `lib/<platform>/` slot, then the current platform's
+//! extension, then the first sorted entry (single-arch packs keep working).
+//! Still out of scope: `cargo install` / `murphy plugin install` UX and
+//! pack signing (ADR 0004 trust model).
 
 use std::path::{Path, PathBuf};
 
@@ -236,14 +238,121 @@ pub fn is_pack_dir(path: &Path) -> bool {
     path.is_dir() && path.join(MANIFEST_FILENAME).is_file()
 }
 
+/// Canonical `lib/<platform>/` slot names (ADR 0054, `murphy-uk7.3`).
+///
+/// `os-arch` order (`linux-x86_64`, …) matches ADR 0046's examples and the
+/// template matrix. The reversed gem tags (`x86_64-linux`, …) and Rust
+/// triples are accepted as aliases by [`normalize_platform_slot`].
+pub const SUPPORTED_PLATFORM_SLOTS: [&str; 4] = [
+    "linux-x86_64",
+    "linux-aarch64",
+    "darwin-x86_64",
+    "darwin-arm64",
+];
+
+/// The current host's `lib/<platform>/` slot.
+///
+/// `darwin-arm64` uses the `arm64` spelling (Apple / RubyGems convention);
+/// the Linux ARM slot uses `aarch64` (Rust / kernel convention). Unknown
+/// hosts return a non-matching sentinel so resolution falls through to the
+/// extension tier (the pre-`uk7.3` narrow rule).
+pub fn host_platform_slot() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64" | "x86" | "amd64") => "linux-x86_64",
+        ("linux", "aarch64" | "arm64") => "linux-aarch64",
+        ("macos", "x86_64") => "darwin-x86_64",
+        ("macos", "aarch64" | "arm64") => "darwin-arm64",
+        _ => "unknown-unknown",
+    }
+}
+
+/// Normalize a `lib/<platform>/` dir name (or gem tag / Rust triple) to its
+/// canonical slot, or `None` when it names no known platform.
+pub fn normalize_platform_slot(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    let s = lower.as_str();
+    Some(match s {
+        "linux-x86_64"
+        | "linux-x86-64"
+        | "x86_64-linux"
+        | "x86_64-unknown-linux-gnu"
+        | "x86_64-unknown-linux-musl" => "linux-x86_64",
+        "linux-aarch64"
+        | "linux-arm64"
+        | "aarch64-linux"
+        | "arm64-linux"
+        | "aarch64-unknown-linux-gnu"
+        | "aarch64-unknown-linux-musl" => "linux-aarch64",
+        "darwin-x86_64" | "x86_64-darwin" | "x86_64-apple-darwin" => "darwin-x86_64",
+        "darwin-arm64"
+        | "darwin-aarch64"
+        | "arm64-darwin"
+        | "aarch64-darwin"
+        | "aarch64-apple-darwin" => "darwin-arm64",
+        _ => return None,
+    })
+}
+
+/// The cdylib extension for a canonical slot (`dylib` on `darwin-*`).
+fn platform_slot_extension(slot: &str) -> &'static str {
+    if slot.starts_with("darwin-") {
+        "dylib"
+    } else {
+        "so"
+    }
+}
+
+/// The `lib/<platform>/` slot a candidate cdylib was staged under: the
+/// first path component below `<pack>/lib/`, or `None` when the file sits
+/// directly under `lib/` (legacy single-file staging).
+fn candidate_slot(pack_dir: &Path, candidate: &Path) -> Option<String> {
+    let lib_dir = pack_dir.join("lib");
+    let rel = candidate.strip_prefix(&lib_dir).ok()?;
+    rel.components().next().and_then(|first| {
+        // A bare `lib/<file>.so` has no slot dir (single component).
+        if rel.components().count() < 2 {
+            return None;
+        }
+        match first {
+            std::path::Component::Normal(os) => Some(os.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    })
+}
+
+/// Pick the loadable binary for `slot` from sorted `candidates` (three
+/// tiers: exact slot → platform extension → sorted first). Pure helper so
+/// tests can pin a slot without depending on the build host.
+fn pick_cdylib_for_slot(pack_dir: &Path, candidates: &[PathBuf], slot: &str) -> Option<PathBuf> {
+    let wanted = normalize_platform_slot(slot).unwrap_or(slot);
+    if let Some(hit) = candidates.iter().find(|p| {
+        candidate_slot(pack_dir, p)
+            .as_deref()
+            .and_then(normalize_platform_slot)
+            == Some(wanted)
+    }) {
+        return Some(hit.clone());
+    }
+    let platform_ext = platform_slot_extension(wanted);
+    if let Some(hit) = candidates
+        .iter()
+        .find(|p| p.extension().is_some_and(|e| e == platform_ext))
+    {
+        return Some(hit.clone());
+    }
+    candidates.first().cloned()
+}
+
 /// Map a pack dir to the cdylib the loader opens: parse (and validate)
 /// the manifest, check host-ABI compatibility, then pick the loadable
 /// binary under `<pack_dir>/lib/`.
 ///
-/// Selection is deliberately narrow (multi-arch auto-select is follow-up
-/// scope): all `*.so` / `*.dylib` files under `lib/` (any depth, sorted
-/// for determinism) are collected and the first with the current
-/// platform's extension wins; otherwise the first sorted entry wins.
+/// Selection is three tiers, all deterministic (candidates are sorted):
+/// the exact host `lib/<platform>/` slot wins; otherwise the first entry
+/// with the current platform's extension wins (the pre-`uk7.3` narrow
+/// rule); otherwise the first sorted entry wins so single-arch packs load
+/// anywhere. Slot-dir spellings accept gem-tag and Rust-triple aliases
+/// (see [`normalize_platform_slot`]).
 pub fn resolve_pack_cdylib(pack_dir: &Path) -> Result<PathBuf, ManifestError> {
     let manifest = PluginManifest::from_pack_dir(pack_dir)?;
     manifest.check_api_compat()?;
@@ -256,18 +365,10 @@ pub fn resolve_pack_cdylib(pack_dir: &Path) -> Result<PathBuf, ManifestError> {
             pack_dir: pack_dir.to_path_buf(),
         });
     }
-    let platform_ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-    let picked = candidates
-        .iter()
-        .find(|p| p.extension().is_some_and(|e| e == platform_ext))
-        .or(candidates.first())
-        .expect("non-empty checked above")
-        .clone();
-    Ok(picked)
+    Ok(
+        pick_cdylib_for_slot(pack_dir, &candidates, host_platform_slot())
+            .expect("non-empty checked above"),
+    )
 }
 
 fn collect_cdylibs(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -475,5 +576,156 @@ provided = ["Rails/HttpStatus", "Rails/SaveBang"]
                 "Example/TodoFormat".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn supported_slots_cover_the_template_matrix() {
+        assert_eq!(
+            SUPPORTED_PLATFORM_SLOTS,
+            [
+                "linux-x86_64",
+                "linux-aarch64",
+                "darwin-x86_64",
+                "darwin-arm64"
+            ]
+        );
+        assert!(
+            SUPPORTED_PLATFORM_SLOTS.contains(&host_platform_slot())
+                || host_platform_slot() == "unknown-unknown"
+        );
+    }
+
+    #[test]
+    fn normalize_accepts_gem_tags_and_rust_triples() {
+        let cases = [
+            ("linux-x86_64", "linux-x86_64"),
+            ("x86_64-linux", "linux-x86_64"),
+            ("x86_64-unknown-linux-gnu", "linux-x86_64"),
+            ("linux-aarch64", "linux-aarch64"),
+            ("aarch64-linux", "linux-aarch64"),
+            ("aarch64-unknown-linux-gnu", "linux-aarch64"),
+            ("darwin-x86_64", "darwin-x86_64"),
+            ("x86_64-darwin", "darwin-x86_64"),
+            ("x86_64-apple-darwin", "darwin-x86_64"),
+            ("darwin-arm64", "darwin-arm64"),
+            ("arm64-darwin", "darwin-arm64"),
+            ("aarch64-apple-darwin", "darwin-arm64"),
+            ("darwin-aarch64", "darwin-arm64"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_platform_slot(input),
+                Some(expected),
+                "alias {input:?}"
+            );
+        }
+        assert_eq!(normalize_platform_slot("windows-x86_64"), None);
+        assert_eq!(normalize_platform_slot("linux"), None);
+    }
+
+    /// Build a pack dir with one fake cdylib per slot name in `slots`.
+    fn multi_slot_pack(slots: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pack = dir.path().join("p");
+        for slot in slots {
+            let slot_dir = pack.join("lib").join(slot);
+            std::fs::create_dir_all(&slot_dir).expect("mkdir lib/<slot>");
+            let ext = if slot.starts_with("darwin-") {
+                "dylib"
+            } else {
+                "so"
+            };
+            std::fs::write(slot_dir.join(format!("libp.{ext}")), b"").expect("write");
+        }
+        std::fs::write(
+            pack.join(MANIFEST_FILENAME),
+            "[plugin]\nname = \"p\"\nversion = \"1\"\nmurphy-api-version = 4\n",
+        )
+        .expect("write manifest");
+        dir
+    }
+
+    #[test]
+    fn exact_slot_beats_extension_and_sort_order() {
+        // All four slots ship: the pinned slot must win even when another
+        // slot's path sorts first (e.g. `darwin-arm64` < `linux-x86_64`).
+        let dir = multi_slot_pack(&SUPPORTED_PLATFORM_SLOTS);
+        let pack = dir.path().join("p");
+        let lib = pack.join("lib");
+        let mut candidates = Vec::new();
+        collect_cdylibs(&lib, &mut candidates);
+        candidates.sort();
+        assert_eq!(candidates.len(), SUPPORTED_PLATFORM_SLOTS.len());
+        for slot in SUPPORTED_PLATFORM_SLOTS {
+            let got = pick_cdylib_for_slot(&pack, &candidates, slot).expect("picks");
+            let got_slot = candidate_slot(&pack, &got).expect("has slot");
+            assert_eq!(
+                normalize_platform_slot(&got_slot),
+                normalize_platform_slot(slot),
+                "slot {slot} must resolve to its own dir, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gem_tag_alias_resolves_to_canonical_slot() {
+        let dir = multi_slot_pack(&["linux-x86_64", "linux-aarch64"]);
+        let pack = dir.path().join("p");
+        let lib = pack.join("lib");
+        let mut candidates = Vec::new();
+        collect_cdylibs(&lib, &mut candidates);
+        candidates.sort();
+        let got = pick_cdylib_for_slot(&pack, &candidates, "aarch64-linux").expect("picks");
+        assert!(
+            got.to_string_lossy().contains("linux-aarch64"),
+            "gem tag must hit canonical slot, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn missing_slot_falls_back_to_extension_then_sorted_first() {
+        // Pack ships only foreign slots: no exact match, so the platform
+        // extension tier (then sorted-first) applies — single-arch packs
+        // keep loading anywhere (backward compat with the narrow rule).
+        let dir = multi_slot_pack(&["darwin-arm64"]);
+        let pack = dir.path().join("p");
+        let lib = pack.join("lib");
+        let mut candidates = Vec::new();
+        collect_cdylibs(&lib, &mut candidates);
+        candidates.sort();
+        assert_eq!(candidates.len(), 1);
+        let got = pick_cdylib_for_slot(&pack, &candidates, "linux-x86_64").expect("picks");
+        assert_eq!(got, candidates[0]);
+    }
+
+    #[test]
+    fn template_ci_matrix_covers_all_supported_slots() {
+        // The template's `ci.yml.liquid` is the matrix-config source of
+        // truth: every supported `lib/<platform>/` slot needs a runner +
+        // Rust target + staging step, or cross-built packs silently miss a
+        // slot. This guard keeps the matrix and `SUPPORTED_PLATFORM_SLOTS`
+        // in step.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/plugins/template/.github/workflows/ci.yml.liquid");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read template CI {}: {e}", path.display()));
+        for slot in SUPPORTED_PLATFORM_SLOTS {
+            assert!(
+                text.contains(slot),
+                "template CI must stage slot `{slot}` ({})",
+                path.display()
+            );
+        }
+        for target in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ] {
+            assert!(
+                text.contains(target),
+                "template CI must build Rust target `{target}`"
+            );
+        }
     }
 }
