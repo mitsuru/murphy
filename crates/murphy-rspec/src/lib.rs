@@ -97,6 +97,11 @@
 //! - `RSpec/RepeatedSubjectCall` — no repeated `subject` calls (murphy-4gd.3.19).
 //! - `RSpec/ReturnFromStub` — consistent stub return style (murphy-4gd.3.19).
 //! - `RSpec/ScatteredLet` — keep `let` definitions together (murphy-4gd.3.19).
+//! - `RSpec/ScatteredSetup` — no scattered setup hooks (murphy-4gd.3.20).
+//! - `RSpec/SharedContext` — proper `shared_context` / `shared_examples` usage (murphy-4gd.3.20).
+//! - `RSpec/SharedExamples` — consistent shared-example name style (murphy-4gd.3.20).
+//! - `RSpec/SingleArgumentMessageChain` — no single-argument message chains (murphy-4gd.3.20).
+//! - `RSpec/SkipBlockInsideExample` — no `skip` block inside examples (murphy-4gd.3.20).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
