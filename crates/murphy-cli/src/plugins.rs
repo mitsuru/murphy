@@ -1,5 +1,6 @@
-//! `murphy plugins` subcommand — staged plugin-pack maintenance (murphy-ghxy)
-//! plus user-local pack install (murphy-uk7.1).
+//! `murphy plugins` subcommand — staged plugin-pack maintenance (murphy-ghxy),
+//! user-local pack install (murphy-uk7.1), and static-index remote
+//! discovery (murphy-uk7.2; ADR 0053).
 //!
 //! A rebuilt pack `.so` under `target/release` (or `debug`) is NOT
 //! automatically propagated to a project's `.murphy/plugins/` dir, so the
@@ -26,7 +27,21 @@
 //! and verifies the installed copy before reporting success:
 //!
 //! - `murphy plugins install <name> [--registry PATH] [--from DIR]
-//!   [--dry-run] [--force]` — install one pack to the user dir.
+//!   [--dry-run] [--force] [--no-remote] [--cache-dir DIR]` — install one
+//!   pack to the user dir (uk7.2: falls back to the registry `source-url`
+//!   remote fetch when local gems / `--from` miss).
+//!
+//! Remote discovery (uk7.2) adds three flows over the registry
+//! `source-url` field (static index + `git`/`curl`/`tar`, no hosted
+//! service):
+//!
+//! - `murphy plugins search [query] [--registry PATH]` — substring search
+//!   over name/description/gem.
+//! - `murphy plugins fetch <name> [--registry PATH] [--to DIR]` —
+//!   materialize the remote source to the fetch cache (or `--to`) and
+//!   verify it.
+//! - `murphy plugins publish [--from DIR]` — validate a local pack dir
+//!   and print the `[[packs]]` TOML snippet to append to a static index.
 //!
 //! `murphy plugin install` (singular) is accepted as an alias.
 
@@ -51,6 +66,32 @@ pub struct InstallPackOptions {
     pub from: Option<PathBuf>,
     pub dry_run: bool,
     pub force: bool,
+    /// Disable the uk7.2 remote-source fallback (local gems / `--from` only).
+    pub no_remote: bool,
+    /// Fetch cache root override (defaults to
+    /// `$MURPHY_PLUGIN_CACHE_DIR` else the system cache dir).
+    pub cache_dir: Option<PathBuf>,
+}
+
+/// `murphy plugins search` options (parsed via clap in `main.rs`).
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    pub query: Option<String>,
+    pub registry: Option<PathBuf>,
+}
+
+/// `murphy plugins fetch` options (parsed via clap in `main.rs`).
+#[derive(Debug, Clone)]
+pub struct FetchOptions {
+    pub pack: String,
+    pub registry: Option<PathBuf>,
+    pub to: Option<PathBuf>,
+}
+
+/// `murphy plugins publish` options (parsed via clap in `main.rs`).
+#[derive(Debug, Clone)]
+pub struct PublishOptions {
+    pub from: Option<PathBuf>,
 }
 
 pub fn run_sync(opts: &SyncOptions) -> Result<u8, AppError> {
@@ -137,13 +178,61 @@ fn run_install_pack_in(project_root: &Path, opts: &InstallPackOptions) -> Result
         },
         Err(e) => return Err(AppError::setup(e)),
     };
-    let source = murphy_core::plugin_install::find_install_source(&opts.pack, opts.from.as_deref())
-        .map_err(AppError::setup)?;
     let user_dir = murphy_core::plugin_install::user_plugins_dir().ok_or_else(|| {
         AppError::setup(
             "cannot locate user plugins dir (no home dir; set $MURPHY_USER_PLUGINS_DIR)",
         )
     })?;
+    // Local sources first (`--from` / installed gems, the uk7.1 path).
+    // When they miss and the registry entry carries a uk7.2 remote source,
+    // fall back to fetching it into the fetch cache (unless `--no-remote`).
+    match murphy_core::plugin_install::find_install_source(&opts.pack, opts.from.as_deref()) {
+        Ok(source) => install_from_source(project_root, opts, &registry_pack, &source, &user_dir),
+        Err(local_err) => {
+            let entry = match &registry_pack {
+                Some(e) => e,
+                None => return Err(AppError::setup(local_err)),
+            };
+            if opts.no_remote || !entry.has_remote_source() {
+                return Err(AppError::setup(local_err));
+            }
+            if opts.dry_run {
+                println!(
+                    "dry run: would fetch pack `{}` from {} to the fetch cache, then install to `{}`",
+                    opts.pack,
+                    murphy_core::plugin_marketplace::describe_remote_source(entry),
+                    user_dir.join(&opts.pack).display(),
+                );
+                return Ok(super::EXIT_OK);
+            }
+            let cache_root = opts
+                .cache_dir
+                .clone()
+                .unwrap_or_else(murphy_core::plugin_marketplace::plugin_cache_dir_or_temp);
+            println!(
+                "fetching pack `{}` from {}",
+                opts.pack,
+                murphy_core::plugin_marketplace::describe_remote_source(entry),
+            );
+            let fetched = murphy_core::plugin_marketplace::fetch_pack_to_cache(entry, &cache_root)
+                .map_err(AppError::setup)?;
+            let source = murphy_core::plugin_install::find_install_source(
+                &opts.pack,
+                Some(fetched.as_path()),
+            )
+            .map_err(AppError::setup)?;
+            install_from_source(project_root, opts, &registry_pack, &source, &user_dir)
+        }
+    }
+}
+
+fn install_from_source(
+    project_root: &Path,
+    opts: &InstallPackOptions,
+    registry_pack: &Option<murphy_core::pack_registry::PackEntry>,
+    source: &murphy_core::plugin_install::InstallSource,
+    user_dir: &Path,
+) -> Result<u8, AppError> {
     if opts.dry_run {
         println!(
             "dry run: would install pack `{}` from {} to `{}`",
@@ -151,7 +240,7 @@ fn run_install_pack_in(project_root: &Path, opts: &InstallPackOptions) -> Result
             source.describe(),
             user_dir.join(&opts.pack).display(),
         );
-        if let Some(entry) = &registry_pack {
+        if let Some(entry) = registry_pack {
             println!(
                 "registry: {} {} ({})",
                 entry.name, entry.version, entry.description
@@ -165,10 +254,10 @@ fn run_install_pack_in(project_root: &Path, opts: &InstallPackOptions) -> Result
         return Ok(super::EXIT_OK);
     }
     let report = murphy_core::plugin_install::install_source_to_user_dir(
-        &opts.pack, &source, &user_dir, opts.force,
+        &opts.pack, source, user_dir, opts.force,
     )
     .map_err(AppError::setup)?;
-    let cdylib = murphy_core::plugin_install::verify_installed(&opts.pack, &user_dir)
+    let cdylib = murphy_core::plugin_install::verify_installed(&opts.pack, user_dir)
         .map_err(AppError::setup)?;
     if report.overwrote {
         println!(
@@ -197,6 +286,124 @@ fn run_install_pack_in(project_root: &Path, opts: &InstallPackOptions) -> Result
             opts.pack,
         );
     }
+    Ok(super::EXIT_OK)
+}
+
+pub fn run_search(opts: &SearchOptions) -> Result<u8, AppError> {
+    let index =
+        murphy_core::pack_registry::PackRegistryIndex::load_with_override(opts.registry.as_deref())
+            .map_err(AppError::setup)?;
+    let query = opts.query.as_deref().unwrap_or("");
+    let hits = murphy_core::plugin_marketplace::search_packs(&index, query);
+    if hits.is_empty() {
+        println!(
+            "no packs matching `{query}` ({} pack(s) in index)",
+            index.packs.len()
+        );
+        return Ok(super::EXIT_OK);
+    }
+    for entry in hits {
+        let remote = if entry.has_remote_source() {
+            " [remote]"
+        } else {
+            ""
+        };
+        if entry.description.is_empty() {
+            println!("{} {}{}", entry.name, entry.version, remote);
+        } else {
+            println!(
+                "{} {} - {}{}",
+                entry.name, entry.version, entry.description, remote
+            );
+        }
+    }
+    Ok(super::EXIT_OK)
+}
+
+pub fn run_fetch(opts: &FetchOptions) -> Result<u8, AppError> {
+    murphy_core::plugin_resolver::validate_plugin_name(&opts.pack)
+        .map_err(|e| AppError::setup(e.to_string()))?;
+    let index =
+        murphy_core::pack_registry::PackRegistryIndex::load_with_override(opts.registry.as_deref())
+            .map_err(AppError::setup)?;
+    let entry = index.find(&opts.pack).ok_or_else(|| {
+        AppError::setup(format!(
+            "unknown pack `{}` (available: {})",
+            opts.pack,
+            index
+                .pack_names()
+                .join(", ")
+                .chars()
+                .take(500)
+                .collect::<String>()
+        ))
+    })?;
+    murphy_core::pack_registry::check_compat(
+        entry,
+        murphy_plugin_api::MURPHY_PLUGIN_ABI_VERSION,
+        murphy_core::version(),
+    )
+    .map_err(|e| AppError::setup(e.to_string()))?;
+    if !entry.has_remote_source() {
+        return Err(AppError::setup(format!(
+            "pack `{}` has no remote source (`source-url` is unset; use `--from <dir>` or installed gems)",
+            opts.pack
+        )));
+    }
+    let dest = match &opts.to {
+        Some(to) => {
+            murphy_core::plugin_marketplace::fetch_pack(entry, to).map_err(AppError::setup)?
+        }
+        None => {
+            let cache = murphy_core::plugin_marketplace::plugin_cache_dir_or_temp();
+            println!(
+                "fetching pack `{}` from {}",
+                opts.pack,
+                murphy_core::plugin_marketplace::describe_remote_source(entry),
+            );
+            murphy_core::plugin_marketplace::fetch_pack_to_cache(entry, &cache)
+                .map_err(AppError::setup)?
+        }
+    };
+    // Verify the fetched copy (manifest + ABI + cdylib) before reporting.
+    let manifest = murphy_core::plugin_manifest::PluginManifest::from_pack_dir(&dest)
+        .map_err(|e| AppError::setup(format!("fetched pack `{}`: {e}", dest.display())))?;
+    manifest
+        .check_api_compat()
+        .map_err(|e| AppError::setup(format!("fetched pack `{}`: {e}", opts.pack)))?;
+    let cdylib = murphy_core::plugin_manifest::resolve_pack_cdylib(&dest)
+        .map_err(|e| AppError::setup(format!("fetched pack `{}`: {e}", dest.display())))?;
+    println!(
+        "fetched pack `{}` {} to `{}` (verified: {})",
+        opts.pack,
+        manifest.plugin.version,
+        dest.display(),
+        cdylib.display(),
+    );
+    Ok(super::EXIT_OK)
+}
+
+pub fn run_publish(opts: &PublishOptions) -> Result<u8, AppError> {
+    let pack_dir = opts.from.clone().unwrap_or_else(|| PathBuf::from("."));
+    let report = murphy_core::plugin_marketplace::check_publish_source(&pack_dir)
+        .map_err(AppError::setup)?;
+    let manifest = murphy_core::plugin_manifest::PluginManifest::from_pack_dir(&pack_dir)
+        .map_err(|e| AppError::setup(format!("pack `{}`: {e}", pack_dir.display())))?;
+    let snippet = murphy_core::plugin_marketplace::render_index_snippet(&manifest, None, None);
+    println!(
+        "pack `{}` {} is publishable (verified: {})",
+        report.name,
+        report.version,
+        report.cdylib.display(),
+    );
+    println!("--- append to your static index (`registry/index.toml`) ---");
+    println!("{snippet}---");
+    println!(
+        "next: `tar czf {}-{}.tar.gz -C {} murphy-plugin.toml lib`, upload it, set `source-url`/`source-sha256`, and share the index (see `docs/guides/plugin-marketplace.md`)",
+        report.name,
+        report.version,
+        pack_dir.display(),
+    );
     Ok(super::EXIT_OK)
 }
 
@@ -234,6 +441,8 @@ mod tests {
             from,
             dry_run: false,
             force: false,
+            no_remote: false,
+            cache_dir: None,
         }
     }
 
@@ -317,6 +526,190 @@ mod tests {
         assert!(
             msg.contains("invalid character") || msg.contains(".."),
             "got: {msg}"
+        );
+    }
+
+    fn write_mirror_registry(dir: &Path, source_url: &str) -> PathBuf {
+        let path = dir.join("mirror.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[registry]\nversion = 1\n\n\
+                 [[packs]]\nname = \"murphy-foo\"\ngem = \"murphy-foo\"\n\
+                 version = \"0.1.0\"\ndescription = \"Foo cops\"\n\
+                 homepage = \"https://example.invalid\"\n\
+                 murphy-api-version = 4\nmin-murphy-version = \"0.1.0\"\n\
+                 source-url = \"{source_url}\"\n"
+            ),
+        )
+        .expect("write mirror");
+        path
+    }
+
+    fn write_search_registry(dir: &Path) -> PathBuf {
+        let path = dir.join("search.toml");
+        std::fs::write(
+            &path,
+            "[registry]\nversion = 1\n\n\
+             [[packs]]\nname = \"murphy-rails\"\ngem = \"murphy-rails\"\n\
+             version = \"0.1.0\"\ndescription = \"Rails cops\"\n\
+             homepage = \"https://example.invalid\"\n\
+             murphy-api-version = 4\nmin-murphy-version = \"0.1.0\"\n\
+             source-url = \"https://example.invalid/murphy-rails.tar.gz\"\n\n\
+             [[packs]]\nname = \"murphy-rspec\"\ngem = \"murphy-rspec\"\n\
+             version = \"0.1.0\"\ndescription = \"RSpec cops\"\n\
+             homepage = \"https://example.invalid\"\n\
+             murphy-api-version = 4\nmin-murphy-version = \"0.1.0\"\n",
+        )
+        .expect("write search registry");
+        path
+    }
+
+    #[test]
+    fn search_lists_all_and_filters() {
+        let reg_dir = tempfile::tempdir().expect("regdir");
+        let reg = write_search_registry(reg_dir.path());
+        // Empty query lists both (no panic = success).
+        unwrap_code(run_search(&SearchOptions {
+            query: None,
+            registry: Some(reg.clone()),
+        }));
+        unwrap_code(run_search(&SearchOptions {
+            query: Some("rails".to_string()),
+            registry: Some(reg.clone()),
+        }));
+        // No match is still exit 0.
+        unwrap_code(run_search(&SearchOptions {
+            query: Some("nope".to_string()),
+            registry: Some(reg),
+        }));
+    }
+
+    #[test]
+    fn fetch_from_file_dir_to_custom_to() {
+        let src_parent = tempfile::tempdir().expect("src");
+        make_pack_dir(src_parent.path(), "murphy-foo");
+        let reg_dir = tempfile::tempdir().expect("regdir");
+        let url = format!("file://{}", src_parent.path().display());
+        let reg = write_mirror_registry(reg_dir.path(), &url);
+        let dest_parent = tempfile::tempdir().expect("dest");
+        let to = dest_parent.path().join("fetched");
+        unwrap_code(run_fetch(&FetchOptions {
+            pack: "murphy-foo".to_string(),
+            registry: Some(reg),
+            to: Some(to.clone()),
+        }));
+        assert!(
+            to.join(murphy_core::plugin_manifest::MANIFEST_FILENAME)
+                .is_file(),
+            "fetched pack must hold a manifest"
+        );
+    }
+
+    #[test]
+    fn fetch_without_remote_errors() {
+        let reg_dir = tempfile::tempdir().expect("regdir");
+        let path = reg_dir.path().join("plain.toml");
+        std::fs::write(
+            &path,
+            "[registry]\nversion = 1\n\n[[packs]]\nname = \"murphy-foo\"\n\
+             gem = \"murphy-foo\"\nversion = \"0.1.0\"\n\
+             murphy-api-version = 4\nmin-murphy-version = \"0.1.0\"\n",
+        )
+        .expect("write registry");
+        let msg = unwrap_err_msg(run_fetch(&FetchOptions {
+            pack: "murphy-foo".to_string(),
+            registry: Some(path),
+            to: None,
+        }));
+        assert!(msg.contains("no remote source"), "got: {msg}");
+    }
+
+    #[test]
+    fn publish_validates_pack_dir() {
+        let src_parent = tempfile::tempdir().expect("src");
+        let pack = make_pack_dir(src_parent.path(), "murphy-foo");
+        unwrap_code(run_publish(&PublishOptions { from: Some(pack) }));
+    }
+
+    #[test]
+    fn install_falls_back_to_remote_when_local_misses() {
+        let src_parent = tempfile::tempdir().expect("src");
+        make_pack_dir(src_parent.path(), "murphy-foo");
+        let reg_dir = tempfile::tempdir().expect("regdir");
+        let url = format!("file://{}", src_parent.path().display());
+        let reg = write_mirror_registry(reg_dir.path(), &url);
+        let user = tempfile::tempdir().expect("user");
+        let cache = tempfile::tempdir().expect("cache");
+        let project = tempfile::tempdir().expect("project");
+        let opts = InstallPackOptions {
+            pack: "murphy-foo".to_string(),
+            registry: Some(reg),
+            from: None,
+            dry_run: false,
+            force: false,
+            no_remote: false,
+            cache_dir: Some(cache.path().to_path_buf()),
+        };
+        with_user_dir(user.path(), || {
+            unwrap_code(run_install_pack_in(project.path(), &opts));
+        });
+        assert!(user.path().join("murphy-foo").is_dir());
+        assert!(cache.path().join("murphy-foo").is_dir());
+    }
+
+    #[test]
+    fn install_no_remote_disables_fallback() {
+        let src_parent = tempfile::tempdir().expect("src");
+        make_pack_dir(src_parent.path(), "murphy-foo");
+        let reg_dir = tempfile::tempdir().expect("regdir");
+        let url = format!("file://{}", src_parent.path().display());
+        let reg = write_mirror_registry(reg_dir.path(), &url);
+        let user = tempfile::tempdir().expect("user");
+        let cache = tempfile::tempdir().expect("cache");
+        let project = tempfile::tempdir().expect("project");
+        let opts = InstallPackOptions {
+            pack: "murphy-foo".to_string(),
+            registry: Some(reg),
+            from: None,
+            dry_run: false,
+            force: false,
+            no_remote: true,
+            cache_dir: Some(cache.path().to_path_buf()),
+        };
+        with_user_dir(user.path(), || {
+            let msg = unwrap_err_msg(run_install_pack_in(project.path(), &opts));
+            assert!(msg.contains("installed gems"), "got: {msg}");
+        });
+        assert!(!user.path().join("murphy-foo").exists());
+    }
+
+    #[test]
+    fn install_dry_run_with_remote_does_not_fetch() {
+        let src_parent = tempfile::tempdir().expect("src");
+        make_pack_dir(src_parent.path(), "murphy-foo");
+        let reg_dir = tempfile::tempdir().expect("regdir");
+        let url = format!("file://{}", src_parent.path().display());
+        let reg = write_mirror_registry(reg_dir.path(), &url);
+        let user = tempfile::tempdir().expect("user");
+        let cache = tempfile::tempdir().expect("cache");
+        let project = tempfile::tempdir().expect("project");
+        let opts = InstallPackOptions {
+            pack: "murphy-foo".to_string(),
+            registry: Some(reg),
+            from: None,
+            dry_run: true,
+            force: false,
+            no_remote: false,
+            cache_dir: Some(cache.path().to_path_buf()),
+        };
+        with_user_dir(user.path(), || {
+            unwrap_code(run_install_pack_in(project.path(), &opts));
+        });
+        assert!(!user.path().join("murphy-foo").exists());
+        assert!(
+            !cache.path().join("murphy-foo").exists(),
+            "dry run must not fetch"
         );
     }
 }

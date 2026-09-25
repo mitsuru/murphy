@@ -17,7 +17,8 @@
 //!   `murphy_ast::ast_to_sexp` (re-exported via `murphy_core`).
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
 //! - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` — scaffold git-hook configs (see `install.rs`).
-//! - `murphy plugins install <pack> [--from DIR] [--dry-run] [--force]` — install a pack to the user dir (see `plugins.rs`; `plugin` is an alias).
+//! - `murphy plugins install <pack> [--from DIR] [--dry-run] [--force] [--no-remote]` — install a pack to the user dir (see `plugins.rs`; `plugin` is an alias).
+//! - `murphy plugins search [query]`, `murphy plugins fetch <pack>`, `murphy plugins publish [--from DIR]` — static-index remote discovery (uk7.2; ADR 0053).
 //! - `murphy add <pack> [--registry PATH] [--dry-run]` — add a registry pack to `.murphy.yml` (see `add.rs`).
 //! - `murphy init [--preset <name>] [--force] [--hook [TOOL]] [--from <.rubocop.yml>]` — scaffold `.murphy.yml` + `.murphyignore` (see `init.rs`).
 //!
@@ -389,6 +390,12 @@ enum PluginsCommand {
     Sync(PluginsSyncArgs),
     /// Install a pack to the user-local dir (`~/.local/share/murphy/plugins/`).
     Install(PluginsInstallArgs),
+    /// Search the static pack index by name/description.
+    Search(PluginsSearchArgs),
+    /// Fetch a pack remote source into the local cache.
+    Fetch(PluginsFetchArgs),
+    /// Validate a local pack dir and print its static-index snippet.
+    Publish(PluginsPublishArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -413,7 +420,8 @@ struct PluginsInstallArgs {
     #[arg(long, value_name = "PATH")]
     registry: Option<PathBuf>,
     /// Local dir holding the pack (pack dir itself or a parent of
-    /// `<name>/`). When omitted, installed gems are searched.
+    /// `<name>/`). When omitted, installed gems are searched first and the
+    /// registry remote source second (uk7.2).
     #[arg(long = "from", value_name = "DIR")]
     from: Option<PathBuf>,
     /// Show what would be installed without copying.
@@ -422,6 +430,44 @@ struct PluginsInstallArgs {
     /// Overwrite an existing install.
     #[arg(long)]
     force: bool,
+    /// Disable the remote-source fallback (local gems / `--from` only).
+    #[arg(long)]
+    no_remote: bool,
+    /// Fetch cache root override (`$MURPHY_PLUGIN_CACHE_DIR` by default).
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct PluginsSearchArgs {
+    /// Substring query over name/description/gem (empty lists all packs).
+    #[arg(value_name = "QUERY", default_value = "")]
+    query: String,
+    /// Custom registry index file (overrides the bundled official index;
+    /// `$MURPHY_REGISTRY_PATH` does the same without a flag).
+    #[arg(long, value_name = "PATH")]
+    registry: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct PluginsFetchArgs {
+    /// Pack name (e.g. `murphy-rails`).
+    #[arg(value_name = "PACK")]
+    pack: String,
+    /// Custom registry index file (overrides the bundled official index;
+    /// `$MURPHY_REGISTRY_PATH` does the same without a flag).
+    #[arg(long, value_name = "PATH")]
+    registry: Option<PathBuf>,
+    /// Fetch destination dir (defaults to the fetch cache `<cache>/<name>/`).
+    #[arg(long, value_name = "DIR")]
+    to: Option<PathBuf>,
+}
+
+#[derive(Debug, clap::Args)]
+struct PluginsPublishArgs {
+    /// Pack dir holding `murphy-plugin.toml` + `lib/` (defaults to `.`).
+    #[arg(long = "from", value_name = "DIR")]
+    from: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1719,8 +1765,26 @@ fn run_plugins(args: &PluginsArgs) -> Result<u8, AppError> {
                 from: install_args.from.clone(),
                 dry_run: install_args.dry_run,
                 force: install_args.force,
+                no_remote: install_args.no_remote,
+                cache_dir: install_args.cache_dir.clone(),
             })
         }
+        PluginsCommand::Search(search_args) => plugins::run_search(&plugins::SearchOptions {
+            query: if search_args.query.trim().is_empty() {
+                None
+            } else {
+                Some(search_args.query.clone())
+            },
+            registry: search_args.registry.clone(),
+        }),
+        PluginsCommand::Fetch(fetch_args) => plugins::run_fetch(&plugins::FetchOptions {
+            pack: fetch_args.pack.clone(),
+            registry: fetch_args.registry.clone(),
+            to: fetch_args.to.clone(),
+        }),
+        PluginsCommand::Publish(publish_args) => plugins::run_publish(&plugins::PublishOptions {
+            from: publish_args.from.clone(),
+        }),
     }
 }
 
