@@ -23,6 +23,7 @@
 
 mod cops;
 mod lsp;
+mod plugins;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use murphy_cache::Cache;
@@ -133,6 +134,8 @@ enum CliCommand {
     /// Run mruby cop spec files.
     #[command(name = "test-cop")]
     TestCop(TestCopArgs),
+    /// Maintain staged plugin packs in `.murphy/plugins/`.
+    Plugins(PluginsArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -253,6 +256,30 @@ struct TestCopArgs {
     /// Spec files to run.
     #[arg(value_name = "spec_file", num_args = 1..)]
     spec_files: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct PluginsArgs {
+    #[command(subcommand)]
+    command: PluginsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginsCommand {
+    /// Refresh staged `.so` packs in `.murphy/plugins/` from fresher builds.
+    Sync(PluginsSyncArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct PluginsSyncArgs {
+    /// Extra dirs to search for fresher builds (repeatable).
+    /// `MURPHY_PLUGIN_PATH`, the `murphy` binary's dir, and
+    /// `<project>/target/{debug,release}/` are always searched.
+    #[arg(long = "from", value_name = "DIR")]
+    from: Vec<PathBuf>,
+    /// Dry run for CI: warn on stale without copying (exit 2 when stale).
+    #[arg(long)]
+    check: bool,
 }
 
 #[cfg_attr(not(feature = "mruby-user-cops"), allow(dead_code))]
@@ -1159,6 +1186,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         CliCommand::Lsp(lsp_args) => lsp::run(&lsp_args.args),
         CliCommand::NewCop(new_cop_args) => new_cop_command(&new_cop_args.cop),
         CliCommand::TestCop(test_cop_args) => test_cop_command(&test_cop_args.spec_files),
+        CliCommand::Plugins(plugins_args) => run_plugins(&plugins_args),
     }
 }
 
@@ -1180,6 +1208,15 @@ fn run_migrate(args: &MigrateArgs) -> Result<u8, AppError> {
 fn run_cops(args: &CopsArgs) -> Result<u8, AppError> {
     match &args.command {
         CopsCommand::List(list_args) => cops::list_with_format(list_args.format.into()),
+    }
+}
+
+fn run_plugins(args: &PluginsArgs) -> Result<u8, AppError> {
+    match &args.command {
+        PluginsCommand::Sync(sync_args) => plugins::run_sync(&plugins::SyncOptions {
+            from: sync_args.from.clone(),
+            check: sync_args.check,
+        }),
     }
 }
 
@@ -1212,6 +1249,14 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             "murphy: debug: cop registry load start elapsed_ms={}",
             run_started.elapsed().as_millis()
         );
+    }
+    // Warn when a staged `.murphy/plugins/*.so` is older than a fresher
+    // build found in the usual candidate dirs (murphy-ghxy). Runs before
+    // the registry `dlopen` so the hint shows even when the stale pack
+    // would otherwise fail to load. Non-failing: the stale pack still
+    // loads; the user refreshes via `murphy plugins sync --from <dir>`.
+    for stale in murphy_core::plugin_sync::check_project_with_config(Path::new("."), &config, &[]) {
+        eprintln!("{}", stale.warning());
     }
     let registry = CopRegistry::discover_with_config(Path::new("."), &config, builtin_pack())
         .map_err(|e| AppError::setup(e.to_string()))?;
