@@ -423,148 +423,23 @@ submit_cop!(BulkChangeTable);
 // `HttpStatusNameConsistency` promoted to real cop in
 // `cops::rails::http_status_name_consistency`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/I18nLazyLookup
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct I18nLazyLookup;
-
-#[cop(
-    name = "Rails/I18nLazyLookup",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl I18nLazyLookup {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(I18nLazyLookup);
+// `I18nLazyLookup` promoted to real cop in
+// `cops::rails::i18n_lazy_lookup`.
 
 // `I18nLocaleAssignment` promoted to real cop in
 // `cops::rails::i18n_locale_assignment`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/I18nLocaleTexts
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct I18nLocaleTexts;
+// `I18nLocaleTexts` promoted to real cop in
+// `cops::rails::i18n_locale_texts`.
 
-#[cop(
-    name = "Rails/I18nLocaleTexts",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl I18nLocaleTexts {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(I18nLocaleTexts);
+// `IgnoredColumnsAssignment` promoted to real cop in
+// `cops::rails::ignored_columns_assignment`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/IgnoredColumnsAssignment
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct IgnoredColumnsAssignment;
+// `IgnoredSkipActionFilterOption` promoted to real cop in
+// `cops::rails::ignored_skip_action_filter_option`.
 
-#[cop(
-    name = "Rails/IgnoredColumnsAssignment",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl IgnoredColumnsAssignment {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(IgnoredColumnsAssignment);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/IgnoredSkipActionFilterOption
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct IgnoredSkipActionFilterOption;
-
-#[cop(
-    name = "Rails/IgnoredSkipActionFilterOption",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl IgnoredSkipActionFilterOption {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(IgnoredSkipActionFilterOption);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/IndexBy
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct IndexBy;
-
-#[cop(
-    name = "Rails/IndexBy",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl IndexBy {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(IndexBy);
+// `IndexBy` promoted to real cop in
+// `cops::rails::index_by`.
 
 /// ## RuboCop parity
 ///
