@@ -19,9 +19,10 @@
 //!   `cx.sorted_tokens()`, pairing each terminator to a pending opener by
 //!   delimiter LABEL. Same-line siblings (`foo(<<~A, <<~B)`) close FIFO and
 //!   nested interpolated heredocs (`<<~OUTER` with `#{<<~INNER}` in its body)
-//!   close LIFO; label-pairing (FIFO among same-label openers) handles both —
-//!   verified against rubocop 1.87.0 for stacked siblings, stacked empty-body
-//!   siblings, and nested interpolated heredocs. Body-emptiness uses a
+//!   close LIFO; label-pairing (LIFO among same-label openers, matching Prism)
+//!   handles both — verified against rubocop 1.87.0 for stacked siblings,
+//!   stacked empty-body siblings, nested interpolated heredocs, same-label
+//!   siblings, and same-label nesting (murphy-e7bz.41.3). Body-emptiness uses a
 //!   per-opener-line cursor so sequential same-line bodies chain without
 //!   nested (different-line) bodies sharing state.
 //!
@@ -131,9 +132,17 @@ struct Heredoc {
 ///
 /// A plain arrival-order FIFO queue mispairs the nested case: it would terminate
 /// the OUTER opener with the INNER terminator, reading the wrong delimiter at the
-/// wrong line. Pairing each `HeredocEnd` to the nearest pending `HeredocStart`
-/// whose delimiter matches the terminator's label handles both orders (FIFO is
-/// applied only among same-label openers).
+/// wrong line. Pairing each `HeredocEnd` to the most-recent pending
+/// `HeredocStart` whose delimiter matches the terminator's label (LIFO among
+/// same-label openers) matches Prism/Ruby for both shapes. For distinct labels
+/// there is only one match, so FIFO vs LIFO is identical. For same-label
+/// siblings (`foo(<<~FOO, <<~FOO)`) LIFO permutes which opener owns which
+/// sequential body, but the body set is identical and every range stays inside
+/// a true body. For same-label nesting (`<<~FOO` containing `#{<<~FOO}`) LIFO
+/// pairs the inner opener with the first terminator, matching Prism's
+/// `content_loc` (verified against `Prism.parse` and RuboCop 1.87.0); FIFO
+/// would attach the outer opener to the inner terminator and stretch the inner
+/// body across the outer terminator. See `murphy-e7bz.41.3`.
 ///
 /// Body-emptiness is computed with a per-opener-line cursor. Same-line siblings
 /// share an opener line and their bodies are sequential, so the cursor chains
@@ -144,12 +153,16 @@ struct Heredoc {
 /// opener_line_end).min(term_line_start)`; an empty body has `body_start >=
 /// term_line_start`.
 fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let source = cx.source().as_bytes();
     // Pending openers in arrival order, each tagged with its delimiter label so a
     // terminator can be matched to the right opener even across LIFO nesting.
+    // Same-label overlap is NOT ambiguous: Ruby/Prism close nested same-label
+    // heredocs LIFO (inner first) and same-line same-label siblings in order;
+    // LIFO among same-label openers covers both (siblings only permute which
+    // opener owns which sequential body). Only a missing label match (malformed
+    // source) or an empty label is unsafe.
     let mut pending: Vec<(Range, String)> = Vec::new();
-    let mut ambiguous_openers = HashSet::new();
     let mut out: Vec<Heredoc> = Vec::new();
     // Per-opener-line body cursor: maps an opener line-start to the byte offset
     // just past the most recently consumed terminator that opened on that line.
@@ -160,12 +173,6 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
             SourceTokenKind::HeredocStart => {
                 let opener_src = cx.raw_source(tok.range);
                 let label = heredoc_label(opener_src).map(str::to_owned).unwrap_or_default();
-                for (existing_opener, existing_label) in &pending {
-                    if existing_label == &label {
-                        ambiguous_openers.insert(existing_opener.start);
-                        ambiguous_openers.insert(tok.range.start);
-                    }
-                }
                 pending.push((tok.range, label));
             }
             SourceTokenKind::HeredocEnd => {
@@ -174,25 +181,24 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
                 // leading indent and the trailing newline, so trim BOTH ends to
                 // recover the bare delimiter for label matching.
                 let term_label = cx.raw_source(tok.range).trim();
-                // Match the EARLIEST pending opener with this delimiter (FIFO
+                // Match the MOST-RECENT pending opener with this delimiter (LIFO
                 // among same-label openers); fall back to the earliest pending
                 // opener if no label matches (defensive — should not happen for
-                // valid source).
-                let (matching_idx, ambiguous_label) = {
-                    let mut matching = pending
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, (_, label))| label == term_label);
-                    let index = matching.next().map(|(index, _)| index);
-                    (index, matching.next().is_some())
-                };
-                let safe_pair = matching_idx.is_some() && !ambiguous_label;
+                // valid source, marked unsafe below).
+                let matching_idx = pending
+                    .iter()
+                    .rposition(|(_, label)| label == term_label);
+                let safe_pair = matching_idx.is_some()
+                    && !term_label.is_empty()
+                    && pending
+                        .get(matching_idx.expect("checked is_some"))
+                        .is_some_and(|(_, label)| !label.is_empty());
                 let idx = matching_idx.or(if pending.is_empty() { None } else { Some(0) });
                 let Some(idx) = idx else {
                     continue;
                 };
                 let (opener, _) = pending.remove(idx);
-                let safe_body = safe_pair && !ambiguous_openers.contains(&opener.start);
+                let safe_body = safe_pair;
 
                 let opener_line = line_start(source, opener.start);
                 let opener_line_end = next_line_start(source, opener.end);
@@ -202,15 +208,24 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
                 line_cursor.insert(opener_line, next_line_start(source, tok.range.start));
 
                 // The `HeredocEnd` token spans the terminator line's label and
-                // its trailing `\n`; strip the newline so the range matches
-                // RuboCop's `heredoc_end` (label only, no newline). Guard the
-                // strip: a terminator at EOF with no final newline has no `\n`
-                // to remove.
+                // its trailing newline; strip it so the range matches RuboCop's
+                // `heredoc_end` (label only, no newline). Handles LF (`\n`),
+                // CRLF (`\r\n`), and EOF without a final newline (nothing to
+                // strip). Leading indent is preserved: `end_label` starts at
+                // `term_line_start`.
                 let end = if source
                     .get(tok.range.end.saturating_sub(1) as usize)
                     == Some(&b'\n')
                 {
-                    tok.range.end - 1
+                    let without_lf = tok.range.end - 1;
+                    if source
+                        .get(without_lf.saturating_sub(1) as usize)
+                        == Some(&b'\r')
+                    {
+                        without_lf - 1
+                    } else {
+                        without_lf
+                    }
                 } else {
                     tok.range.end
                 };
