@@ -71,10 +71,8 @@ impl CommentAnnotation {
                         if after_kw.starts_with(": ") {
                             continue;
                         }
-                    } else {
-                        if after_kw.starts_with(' ') {
-                            continue;
-                        }
+                    } else if after_kw.starts_with(' ') {
+                        continue;
                     }
                 }
                 let msg = if opts.require_colon { MSG_COLON } else { MSG_SPACE };

@@ -31,7 +31,7 @@ use murphy_cache::Cache;
 #[cfg(feature = "mruby-user-cops")]
 use murphy_core::{AstContext, run_mruby_cop_isolated};
 use murphy_core::{
-    CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
+    Baseline, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
     migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
@@ -163,6 +163,16 @@ struct LintArgs {
     /// (`--explain <cop_id>`).
     #[arg(long, value_name = "COP")]
     explain: Option<String>,
+    /// Suppress offenses frozen in a baseline TOML file (`.murphy-baseline.toml`).
+    /// Only new offenses — not in the baseline, or over its per-entry count —
+    /// are reported. All `--format` outputs see the filtered list.
+    #[arg(long, value_name = "PATH", conflicts_with = "generate_baseline")]
+    baseline: Option<PathBuf>,
+    /// Freeze current offenses into a baseline TOML file (legacy adoption:
+    /// generate once, then lint with `--baseline`). The run still reports
+    /// all offenses; the file records them for the next run.
+    #[arg(long, value_name = "PATH")]
+    generate_baseline: Option<PathBuf>,
     /// Files or directories to lint. With no paths, Murphy discovers from cwd.
     #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
     paths: Vec<String>,
@@ -1525,6 +1535,39 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             let desc =
                 explain::lookup_description(&desc_map, &offense.cop_name).unwrap_or_default();
             murphy_core::enrich_offense(offense, &desc);
+        }
+    }
+    // ── baseline generate / filter (Phase 9 B3) ────────────────────────────
+    // Filtering happens AFTER aggregation and B4 enrichment, BEFORE
+    // formatting, so every `--format` sees the filtered list while the ADR
+    // 0006 default JSON shape itself is unchanged (output-only filtering).
+    // Generating from enriched offenses keeps frozen counts aligned with
+    // reported output.
+    if let Some(out) = &args.generate_baseline {
+        let baseline = Baseline::generate(&offenses);
+        baseline.save(out).map_err(|e| {
+            AppError::setup(format!("cannot write baseline {}: {e}", out.display()))
+        })?;
+        eprintln!(
+            "murphy: baseline: froze {} offenses in {} entries to {}",
+            offenses.len(),
+            baseline.entry_count(),
+            out.display()
+        );
+    }
+    if let Some(path) = &args.baseline {
+        let baseline = Baseline::load(path).map_err(|e| {
+            AppError::setup(format!("cannot load baseline {}: {e}", path.display()))
+        })?;
+        let before = offenses.len();
+        offenses = baseline.filter_offenses(offenses);
+        if debug {
+            eprintln!(
+                "murphy: debug: baseline {} suppressed={} remaining={}",
+                path.display(),
+                before - offenses.len(),
+                offenses.len()
+            );
         }
     }
     if debug {

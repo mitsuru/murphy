@@ -17,10 +17,12 @@
 //! - [`aggregate`] / [`run_to_fixpoint`] — offense aggregator + autocorrect
 //!   fixpoint loop (unchanged contract, ADR 0006/0011/0013).
 //! - [`MurphyConfig`] — `.murphy.yml` schema (ADR 0015).
+//! - [`Baseline`] — `.murphy-baseline.toml` freeze file (Phase 9 B3).
 //! - [`discover`] — file discovery (ADR 0014).
 
 mod aggregator;
 pub mod autocorrect;
+mod baseline;
 mod config;
 mod discovery;
 pub mod dispatch;
@@ -40,6 +42,7 @@ pub use autocorrect::{
     ApplyOutcome, Conflict, ConflictReason, FixpointOutcome, FixpointStatus, apply_edits,
     apply_edits_logged, run_to_fixpoint,
 };
+pub use baseline::{BASELINE_VERSION, Baseline, BaselineError, DEFAULT_BASELINE_FILENAME};
 pub use config::{
     CopRule, MurphyConfig, PluginConfig, PluginDetailed, migrate_rubocop_yml_to_murphy_yml,
 };

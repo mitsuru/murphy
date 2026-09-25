@@ -67,6 +67,9 @@ mod tests {
     use super::*;
 
     #[test]
+    // Intentionally asserts the schema is empty; the const-known `is_empty`
+    // is the point of the test (`const_is_empty` under `-D warnings`).
+    #[allow(clippy::const_is_empty)]
     fn no_options_has_empty_schema_and_ignores_input() {
         assert!(<NoOptions as CopOptions>::SCHEMA.is_empty());
         assert!(<NoOptions as CopOptions>::from_config_json(b"not json").is_ok());
