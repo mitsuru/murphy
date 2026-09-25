@@ -250,3 +250,160 @@ pub(crate) fn send_without_block_range(cx: &Cx<'_>, send: NodeId) -> Range {
         end,
     }
 }
+
+/// `true` when `call` is a bare `let` / `let!` send (any args).
+///
+/// Mirrors the block arm of upstream `Language#let?` (`(block (send nil?
+/// #Helpers.all ...) ...)`); `Helpers.all` is exactly `let` / `let!`.
+/// The bare-send `block_pass` arm (`let(:a, &blk)`) can never be a
+/// single-line brace block, so the align cops only need this predicate.
+pub(crate) fn is_bare_let_call(cx: &Cx<'_>, call: NodeId) -> bool {
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(call)
+    else {
+        return false;
+    };
+    if receiver != OptNodeId::NONE {
+        return false;
+    }
+    matches!(cx.symbol_str(method), "let" | "let!")
+}
+
+/// Every single-line bare `let` / `let!` block in the file, in document
+/// order.
+///
+/// Mirrors upstream `AlignLetBrace#single_line_lets`
+/// (`root.each_node(:block).select { let? && single_line? }`): only
+/// `Block` nodes (never `Numblock` / `Itblock`, same as upstream's
+/// `:block` search), bare `let` / `let!` calls, spanning exactly one
+/// line. Sorted by (first line, start offset) so chunking below sees
+/// document order.
+pub(crate) fn single_line_let_blocks(cx: &Cx<'_>) -> Vec<NodeId> {
+    let root = cx.root();
+    let mut out: Vec<NodeId> = core::iter::once(root)
+        .chain(cx.descendants(root))
+        .filter(|&id| {
+            let NodeKind::Block { call, .. } = *cx.kind(id) else {
+                return false;
+            };
+            if !is_bare_let_call(cx, call) {
+                return false;
+            }
+            cx.is_single_line(id)
+        })
+        .collect();
+    let src = cx.source();
+    out.sort_by_key(|&id| {
+        let range = cx.range(id);
+        (line_index_of_offset(src, range.start), range.start)
+    });
+    out
+}
+
+/// Maximal runs of `lets` on consecutive first-lines.
+///
+/// Mirrors upstream `AlignLetBrace#adjacent_let_chunks` (chunk by
+/// `last_line + 1 == line` over the document-ordered lets). A blank
+/// line, a comment line, or any other node on an in-between line all
+/// break the run, since only the lets' own first lines are compared.
+pub(crate) fn adjacent_let_chunks(cx: &Cx<'_>, lets: &[NodeId]) -> Vec<Vec<NodeId>> {
+    let src = cx.source();
+    let mut chunks: Vec<Vec<NodeId>> = Vec::new();
+    for &id in lets {
+        let line = line_index_of_offset(src, cx.range(id).start);
+        let extend = chunks.last().is_some_and(|last: &Vec<NodeId>| {
+            let prev_line =
+                line_index_of_offset(src, cx.range(*last.last().expect("non-empty chunk")).start);
+            prev_line + 1 == line
+        });
+        if extend {
+            chunks.last_mut().expect("checked above").push(id);
+        } else {
+            chunks.push(vec![id]);
+        }
+    }
+    chunks
+}
+
+/// 0-based line index containing byte `offset`.
+pub(crate) fn line_index_of_offset(src: &str, offset: u32) -> usize {
+    let offset = (offset as usize).min(src.len());
+    src.as_bytes()[..offset]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+}
+
+/// Display column (in characters, not bytes) of byte `offset` within
+/// its line.
+///
+/// Upstream compares `loc.column` (character columns); byte offsets
+/// would drift after multibyte text (e.g. a non-ASCII `let` body
+/// before the closing brace on the same line).
+pub(crate) fn char_column_of_offset(src: &str, offset: u32) -> usize {
+    let offset = (offset as usize).min(src.len());
+    let line_start = src.as_bytes()[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    src[line_start..offset].chars().count()
+}
+
+/// The block's opening token range: the `{` that opens the brace body,
+/// or the `do` keyword for single-line `do...end` lets.
+///
+/// The opener is the last `{` ending at or before the body start, so
+/// hash braces inside the args (`let(:a, {x: 1}) { b }`) or at the
+/// body start (`let(:a) { {x: 1} }`) never shadow it. With no body
+/// (`let(:a) {}`) every `{` in range qualifies and the last one — the
+/// opener — wins. Returns `None` when no brace precedes the body (a
+/// `do...end` block falls through to the `do` search; anything else
+/// is not a brace block).
+pub(crate) fn block_open_token(cx: &Cx<'_>, block: NodeId) -> Option<Range> {
+    let NodeKind::Block { body, .. } = *cx.kind(block) else {
+        return None;
+    };
+    let block_range = cx.range(block);
+    let body_start = body.get().map_or(block_range.end, |id| cx.range(id).start);
+    let toks = cx.tokens_in(block_range);
+    if let Some(tok) = toks
+        .iter()
+        .rev()
+        .find(|t| t.kind == SourceTokenKind::LeftBrace && t.range.end <= body_start)
+    {
+        return Some(tok.range);
+    }
+    // Single-line `do...end` fallback (`let(:a) do b end`): last bare
+    // `do` before the body start, mirroring upstream `loc.begin`.
+    toks.iter()
+        .rev()
+        .find(|t| {
+            t.kind == SourceTokenKind::Other
+                && t.range.end <= body_start
+                && cx.token_text(**t) == "do"
+        })
+        .map(|t| t.range)
+}
+
+/// The block's closing token range: the `}` (or `end` keyword) ending
+/// exactly at the block expression end.
+///
+/// Mirrors upstream `loc.end`. Returns `None` when no such token
+/// exists (never happens for well-formed blocks; the align cops skip
+/// the node then).
+pub(crate) fn block_close_token(cx: &Cx<'_>, block: NodeId) -> Option<Range> {
+    let NodeKind::Block { .. } = *cx.kind(block) else {
+        return None;
+    };
+    let block_range = cx.range(block);
+    cx.tokens_in(block_range)
+        .iter()
+        .rev()
+        .find(|t| {
+            t.range.end == block_range.end
+                && (t.kind == SourceTokenKind::RightBrace
+                    || (t.kind == SourceTokenKind::Other && cx.token_text(**t) == "end"))
+        })
+        .map(|t| t.range)
+}
