@@ -6,27 +6,25 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/AmbiguousOperator
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-t167
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   RuboCop drives this cop off the parser gem's `:ambiguous_prefix`
 //!   diagnostic, which Murphy does not surface (doing so would bypass the
 //!   single-surface ABI boundary, ADR 0004). Instead the ambiguity is
 //!   reconstructed from Prism's AST shape plus a whitespace check: Prism only
-//!   yields a `splat` / `kwsplat` / `block_pass` / unary `-@`/`+@` *first
-//!   argument* of an unparenthesized call when the source was the ambiguous
-//!   form (`foo *x`), never the disambiguated forms (`foo * x` is a binary
-//!   send, `foo(*x)` is parenthesized). The whitespace insurance (space before
-//!   the operator, no space after) mirrors what the parser uses to raise the
-//!   diagnostic.
-//!
-//!   Known gap (murphy-t167): Prism folds `foo -1` / `foo +1` into a signed
-//!   integer/float literal rather than a unary `-@`/`+@` send, so the
-//!   positive/negative-number ambiguity is only detected when the operand is a
-//!   non-literal (`foo -x`). RuboCop, working off the diagnostic, also flags
-//!   the literal form. Severity is fixed at the cop default because Murphy has
-//!   no `diagnostic.level` to forward.
+//!   yields a `splat` / `kwsplat` / `block_pass` / unary `-@`/`+@` / signed
+//!   `Int` / `Float` / `Rational` / `Complex` literal *first argument* of an
+//!   unparenthesized non-operator call when the source was the ambiguous form
+//!   (`foo *x`, `foo -1`), never the disambiguated forms (`foo * x` is a
+//!   binary send, `foo(*x)` / `foo(-1)` is parenthesized, `foo - -1` /
+//!   `foo * -1` is a binary operator call whose first argument belongs to the
+//!   operator). The whitespace insurance (space before the operator, no space
+//!   after) mirrors what the parser uses to raise the diagnostic. Operator
+//!   outer calls are skipped via `is_operator_method`, so `foo - -1`,
+//!   `foo + -1`, `foo * -1`, and `foo * -x` are never flagged. Severity is
+//!   fixed at the cop default because Murphy has no `diagnostic.level` to
+//!   forward.
 //! ```
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, NodeList, NoOptions, Range, cop};
@@ -72,6 +70,15 @@ impl AmbiguousOperator {
     fn check(&self, node: NodeId, args: NodeList, cx: &Cx<'_>) {
         // Parenthesized calls (`foo(*x)`) are never ambiguous.
         if cx.is_parenthesized(node) {
+            return;
+        }
+
+        // Binary-operator calls (`foo - -1`, `foo * -1`, `foo * -x`) are never
+        // the ambiguous command-call prefix: their first argument belongs to
+        // the operator (`-`, `*`), not to a parenthesis-less command. Without
+        // this guard a signed literal (or unary `-@`) argument to the operator
+        // would be mistaken for `foo -1`.
+        if cx.is_operator_method(node) {
             return;
         }
 
@@ -162,13 +169,41 @@ fn ambiguous_operator(first_arg: NodeId, cx: &Cx<'_>) -> Option<(u32, &'static s
                 None
             }
         }
-        // `foo -x` / `foo +x` — unary minus/plus on a non-literal operand
-        // (literals like `foo -1` fold into a signed literal; see gap note).
+        // `foo -x` / `foo +x` — unary minus/plus on a non-literal operand.
+        // `foo -2/3` / `foo -x/y` — first arg is a `/` (or other binary) send
+        // starting with `+`/`-` (`-2/3r` folds to `/` with a signed receiver,
+        // not a literal). Mirror RuboCop's `start_with?(prefix)`: any first
+        // arg whose source starts with the prefix is ambiguous.
         NodeKind::Send { .. } => match cx.method_name(first_arg) {
             Some("-@") => Some((arg_start, "-")),
             Some("+@") => Some((arg_start, "+")),
-            _ => None,
+            _ => {
+                let byte = *cx.source().as_bytes().get(arg_start as usize)?;
+                match byte {
+                    b'-' => Some((arg_start, "-")),
+                    b'+' => Some((arg_start, "+")),
+                    _ => None,
+                }
+            }
         },
+        // `foo -1` / `foo +1` (and `-1.5` / `+1.5` / `-1r` / `+1i`, …) — Prism
+        // folds the sign into the literal (`IntegerNode "-1"`, `FloatNode
+        // "-1.5"`, `RationalNode "-1r"`, `ImaginaryNode "-1i"`), so there is no
+        // unary `-@`/`+@` send. The sign is the first byte of the literal's
+        // range (`murphy ast --format sexp -` shows `(int -1)` for `foo -1`
+        // but `(int 1)` for the binary `foo - 1`). Unsigned literals
+        // (`foo 1`) have no leading `+`/`-` and are unambiguous.
+        NodeKind::Int(_)
+        | NodeKind::Float(_)
+        | NodeKind::Rational(_)
+        | NodeKind::Complex(_) => {
+            let byte = *cx.source().as_bytes().get(arg_start as usize)?;
+            match byte {
+                b'-' => Some((arg_start, "-")),
+                b'+' => Some((arg_start, "+")),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -329,5 +364,113 @@ mod tests {
     #[test]
     fn accepts_plain_argument() {
         test::<AmbiguousOperator>().expect_no_offenses("do_something some_array\n");
+    }
+
+    #[test]
+    fn flags_signed_int_minus() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            do_something -1
+                         ^ Ambiguous negative number operator. Parenthesize the method arguments if it's surely a negative number operator, or add a whitespace to the right of the `-` if it should be a subtraction.
+        "#});
+    }
+
+    #[test]
+    fn flags_signed_int_plus() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            do_something +1
+                         ^ Ambiguous positive number operator. Parenthesize the method arguments if it's surely a positive number operator, or add a whitespace to the right of the `+` if it should be an addition.
+        "#});
+    }
+
+    #[test]
+    fn corrects_signed_int_minus() {
+        test::<AmbiguousOperator>().expect_correction(
+            indoc! {r#"
+                do_something -1
+                             ^ Ambiguous negative number operator. Parenthesize the method arguments if it's surely a negative number operator, or add a whitespace to the right of the `-` if it should be a subtraction.
+            "#},
+            "do_something(-1)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_signed_int_plus() {
+        test::<AmbiguousOperator>().expect_correction(
+            indoc! {r#"
+                do_something +1
+                             ^ Ambiguous positive number operator. Parenthesize the method arguments if it's surely a positive number operator, or add a whitespace to the right of the `+` if it should be an addition.
+            "#},
+            "do_something(+1)\n",
+        );
+    }
+
+    #[test]
+    fn flags_signed_float_minus() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            do_something -1.5
+                         ^ Ambiguous negative number operator. Parenthesize the method arguments if it's surely a negative number operator, or add a whitespace to the right of the `-` if it should be a subtraction.
+        "#});
+    }
+
+    #[test]
+    fn flags_signed_float_plus() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            do_something +1.5
+                         ^ Ambiguous positive number operator. Parenthesize the method arguments if it's surely a positive number operator, or add a whitespace to the right of the `+` if it should be an addition.
+        "#});
+    }
+
+    #[test]
+    fn flags_signed_rational() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            do_something -1r
+                         ^ Ambiguous negative number operator. Parenthesize the method arguments if it's surely a negative number operator, or add a whitespace to the right of the `-` if it should be a subtraction.
+        "#});
+    }
+
+    #[test]
+    fn flags_signed_complex() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            do_something +1i
+                         ^ Ambiguous positive number operator. Parenthesize the method arguments if it's surely a positive number operator, or add a whitespace to the right of the `+` if it should be an addition.
+        "#});
+    }
+
+    #[test]
+    fn flags_dot_call_signed_int() {
+        test::<AmbiguousOperator>().expect_offense(indoc! {r#"
+            x.do_something -1
+                           ^ Ambiguous negative number operator. Parenthesize the method arguments if it's surely a negative number operator, or add a whitespace to the right of the `-` if it should be a subtraction.
+        "#});
+    }
+
+    #[test]
+    fn accepts_unsigned_int() {
+        test::<AmbiguousOperator>().expect_no_offenses("do_something 1\n");
+    }
+
+    #[test]
+    fn accepts_parenthesized_signed_int() {
+        test::<AmbiguousOperator>().expect_no_offenses("do_something(-1)\n");
+    }
+
+    #[test]
+    fn accepts_binary_minus_with_signed_literal() {
+        test::<AmbiguousOperator>().expect_no_offenses("do_something - -1\n");
+    }
+
+    #[test]
+    fn accepts_binary_plus_with_signed_literal() {
+        test::<AmbiguousOperator>().expect_no_offenses("do_something + -1\n");
+    }
+
+    #[test]
+    fn accepts_binary_multiplication_with_signed_literal() {
+        test::<AmbiguousOperator>().expect_no_offenses("do_something * -1\n");
+    }
+
+    #[test]
+    fn accepts_binary_multiplication_with_unary() {
+        test::<AmbiguousOperator>().expect_no_offenses("do_something * -x\n");
     }
 }
