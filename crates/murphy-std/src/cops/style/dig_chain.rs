@@ -9,8 +9,14 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the `dig` call head `(call _ :dig ...)` (murphy-s1yc.9):
+//!   `call` = `{send csend}` covers safe-navigation (`x&.dig`), mirroring
+//!   RuboCop's `alias on_csend on_send`; the `_` receiver binds an absent
+//!   (receiverless `dig(:k)`) or present receiver per murphy-if9y; trailing
+//!   `...` absorbs any argument list (the non-empty + `!{hash block_pass}` +
+//!   chain guards below apply separately, mirroring upstream DigHelp `dig?`:
+//!   `(call _ :dig !{hash block_pass}+)`).
 //!   Flags chained dig calls and suggests a single combined dig call.
-//!   Both `send` and `csend` (safe navigation) are checked.
 //!   The offense is reported at the outermost dig node in the chain.
 //!   Hash and block_pass args are excluded matching DigHelp's dig? matcher.
 //!   The comments_in_range preservation from RuboCop's autocorrect is omitted
@@ -36,7 +42,15 @@
 //! Replaces the range from the deepest inner dig's selector start to the
 //! outermost dig's expression end with `dig(joined_args)`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the `dig` call head (murphy-s1yc.9):
+// `(call _ :dig ...)` — `call` = `{send csend}` covers safe-navigation
+// (`x&.dig`); the `_` receiver binds an absent or present receiver;
+// trailing `...` absorbs any argument list, so the non-empty +
+// `!{hash block_pass}` + chain guards below apply separately (mirroring
+// upstream DigHelp `dig?`: `(call _ :dig !{hash block_pass}+)`).
+def_node_matcher!(dig_chain_call, "(call _ :dig ...)");
 
 #[derive(Default)]
 pub struct DigChain;
@@ -49,7 +63,7 @@ pub struct DigChain;
     options = NoOptions,
 )]
 impl DigChain {
-    #[on_node(kind = "send", methods = ["dig"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
@@ -136,12 +150,14 @@ fn has_invalid_forwarded_args(args: &[NodeId], cx: &Cx<'_>) -> bool {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // `check_csend` registers on every csend node (the cop macro does not support
-    // a `methods` filter on csend), so guard the method name here. Without this,
-    // a single `&.dig` followed by other csends — e.g.
+    // Verbatim `(call _ :dig ...)` head: filters to `dig` calls on either
+    // `send` or `csend` (safe-navigation), with any receiver (absent or
+    // present). Trailing `...` matches any arg list, so the non-empty +
+    // `!{hash block_pass}` + chain guards below apply separately. Without
+    // this, a single `&.dig` followed by other csends — e.g.
     // `foo[bar]&.dig('a','b','c')&.to_i&.positive?` — runs `check` on `&.to_i`,
     // whose receiver is the lone `&.dig`, and a one-element chain gets flagged.
-    if cx.method_name(node) != Some("dig") {
+    if !dig_chain_call(node, cx) {
         return;
     }
 
@@ -242,6 +258,46 @@ mod tests {
         // is only one dig in the chain, so there is nothing to collapse.
         test::<DigChain>()
             .expect_no_offenses("x = foo.get_settings[bar]&.dig('a', 'b', 'c')&.to_i&.positive?\n");
+    }
+
+    // --- Characterization (murphy-s1yc.9): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // `(call _ :dig ...)` port can be proven byte-identical. `call` =
+    // `{send csend}` covers safe-navigation (`x&.dig`), mirroring RuboCop's
+    // `alias on_csend on_send`; trailing `...` absorbs any arg list (the
+    // non-empty + !{hash block_pass} + chain guards below apply separately,
+    // mirroring upstream DigHelp `dig?`: `(call _ :dig !{hash block_pass}+)`).
+
+    #[test]
+    fn s1yc9_flags_pure_csend_chain_corrects() {
+        // Pure csend chain `x&.dig(:foo)&.dig(:bar)` matches: `call` covers `csend`.
+        test::<DigChain>().expect_correction(
+            indoc! {r#"
+                x&.dig(:foo)&.dig(:bar)
+                   ^^^^^^^^^^^^^^^^^^^^ Use `dig(:foo, :bar)` instead of chaining.
+            "#},
+            "x&.dig(:foo, :bar)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc9_accepts_no_arg_dig() {
+        // No-arg `x.dig`: matcher `...` matches zero args,
+        // the non-empty guard rejects.
+        test::<DigChain>().expect_no_offenses("x.dig\n");
+    }
+
+    #[test]
+    fn s1yc9_accepts_hash_arg_inner() {
+        // Inner `x.dig({})` has hash arg: matcher `...` matches any arg list,
+        // the !{hash block_pass} guard rejects, so the outer chain accepts.
+        test::<DigChain>().expect_no_offenses("x.dig({}).dig(:bar)\n");
+    }
+
+    #[test]
+    fn s1yc9_accepts_unrelated_method() {
+        // `x.foo(:bar)`: matcher rejects non-`dig` method.
+        test::<DigChain>().expect_no_offenses("x.foo(:bar)\n");
     }
 }
 murphy_plugin_api::submit_cop!(DigChain);
