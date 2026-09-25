@@ -89,7 +89,19 @@
 //!       names are vanishingly rare.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `class_or_struct_return_method?` =
+// `(send (const _ {:Class :Struct}) :new ...)` (any scope, send-only).
+// In Murphy `::Class` collapses to `Const{scope:None}`, so `_` covers bare +
+// `::` + namespaced (`Foo::Class` still suppresses — pinned by
+// `boundary_allows_namespaced_class_new`). `send` covers `Send` only (not
+// `Csend`), matching the `Send`-only check below (pinned by
+// `boundary_flags_csend_class_new`).
+def_node_matcher!(
+    class_or_struct_new,
+    "(send (const _ {:Class :Struct}) :new ...)"
+);
 
 const MSG: &str = "Use SCREAMING_SNAKE_CASE for constants.";
 
@@ -201,20 +213,9 @@ fn is_literal_receiver(receiver: NodeId, cx: &Cx<'_>) -> bool {
 
 /// `class_or_struct_return_method?` — `(send (const _ {:Class :Struct}) :new
 /// ...)`. The receiver const may carry any/no scope (`::Class`, `Foo::Class`).
+/// `send` covers `Send` only (not `Csend`).
 fn class_or_struct_return_method(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.method_name(node) != Some("new") {
-        return false;
-    }
-    let Some(recv) = receiver.get() else {
-        return false;
-    };
-    let NodeKind::Const { name, .. } = *cx.kind(recv) else {
-        return false;
-    };
-    matches!(cx.symbol_str(name), "Class" | "Struct")
+    class_or_struct_new(node, cx)
 }
 
 /// `allowed_conditional_expression_on_rhs?` — `node&.if_type? &&
@@ -481,6 +482,36 @@ mod tests {
     #[test]
     fn allows_cbase_class_new() {
         test::<ConstantName>().expect_no_offenses("MyClass = ::Class.new\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.5): pin the exact node set
+    // the hand-rolled `Class`/`Struct` guard matches, so the verbatim
+    // `(send (const _ {:Class :Struct}) :new ...)` refactor can be proven
+    // equivalent. `_` covers any scope (`::Class` collapses to scope-less
+    // `Const`, `Foo::Class` still suppresses). `send` covers `Send` only
+    // (not `Csend`), matching the `Send`-only check below (pinned by
+    // `boundary_flags_csend_class_new`).
+
+    #[test]
+    fn boundary_allows_namespaced_class_new() {
+        // Upstream `(const _ :Class)` matches any scope, so `Foo::Class`
+        // still suppresses (unlike `ENV`, where namespaced flags).
+        test::<ConstantName>().expect_no_offenses("MyClass = Foo::Class.new\n");
+    }
+
+    #[test]
+    fn boundary_allows_namespaced_struct_new() {
+        test::<ConstantName>().expect_no_offenses("MyStruct = Foo::Struct.new(:a)\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_class_new() {
+        // `&.` is a `csend` node; `send` covers `Send` only, so it stays
+        // flagged (not allowed).
+        test::<ConstantName>().expect_offense(indoc! {r#"
+            Bad = Class&.new
+            ^^^ Use SCREAMING_SNAKE_CASE for constants.
+        "#});
     }
 
     #[test]
