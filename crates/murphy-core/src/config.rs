@@ -1318,6 +1318,43 @@ impl MurphyConfig {
             == "space"
     }
 
+    /// RuboCop's `config.for_cop('Layout/SpaceInsideBlockBraces')`
+    /// `['EnforcedStyle']` resolved as a wire string for host-baking into
+    /// `Layout/SpaceAfterSemicolon`'s `options_json` (murphy-ilrx).
+    ///
+    /// Mirrors `for_cop` (not `for_enabled_cop`): user wins, else bundled
+    /// default, else `'space'` (RuboCop's `cfg['EnforcedStyle'] || 'space'`).
+    fn resolved_space_inside_block_braces_style(&self) -> String {
+        const COP: &str = "Layout/SpaceInsideBlockBraces";
+        let style = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("EnforcedStyle"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        style(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| style(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .unwrap_or_else(|| "space".to_string())
+    }
+
+    /// RuboCop's `config.for_cop('Layout/SpaceInsideHashLiteralBraces')`
+    /// `['EnforcedStyle']` resolved as a wire string for host-baking into
+    /// `Layout/SpaceAfterComma`'s `options_json` (murphy-ilrx).
+    ///
+    /// Mirrors `for_cop`: user wins, else bundled default, else `'space'`.
+    /// The `compact` style is preserved verbatim; the cop treats any
+    /// non-`no_space` style as requiring a space before `}`.
+    fn resolved_space_inside_hash_literal_braces_style(&self) -> String {
+        const COP: &str = "Layout/SpaceInsideHashLiteralBraces";
+        let style = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("EnforcedStyle"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        style(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| style(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .unwrap_or_else(|| "space".to_string())
+    }
+
     /// RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']` resolved
     /// for this config: the user's `Layout/IndentationWidth.Width` if set, else
     /// the bundled default, else [`AllCopsContext::DEFAULT_INDENTATION_WIDTH`].
@@ -1379,13 +1416,32 @@ impl MurphyConfig {
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
+        // murphy-ilrx (option 2, no ABI bump): host-bake the sibling
+        // `EnforcedStyle` the running cop needs but cannot read via `CxRaw`.
+        // The baked key is derived — the sibling's resolved style always wins
+        // over any same-named key the running cop's own table may carry.
+        let baked: Option<(String, serde_json::Value)> = match name {
+            "Layout/SpaceAfterSemicolon" => Some((
+                "SpaceInsideBlockBracesEnforcedStyle".to_string(),
+                serde_json::Value::String(self.resolved_space_inside_block_braces_style()),
+            )),
+            "Layout/SpaceAfterComma" => Some((
+                "SpaceInsideHashLiteralBracesEnforcedStyle".to_string(),
+                serde_json::Value::String(self.resolved_space_inside_hash_literal_braces_style()),
+            )),
+            _ => None,
+        };
         let default_rule = self.base_defaults.cop_rules.get(name);
         let user_rule = self.cops.rules.get(name);
         let default_opts = default_rule.map(|rule| &rule.options);
         let user_opts = user_rule.map(|rule| &rule.options);
 
         // Fast path: skip cloning and serializing when both are empty (common case).
-        if default_opts.is_none_or(|o| o.is_empty()) && user_opts.is_none_or(|o| o.is_empty()) {
+        // Baked-sibling cops always need their derived key, so they skip it.
+        if baked.is_none()
+            && default_opts.is_none_or(|o| o.is_empty())
+            && user_opts.is_none_or(|o| o.is_empty())
+        {
             return b"{}".to_vec();
         }
 
@@ -1402,6 +1458,9 @@ impl MurphyConfig {
         let mut merged = default_opts.cloned().unwrap_or_default();
         if let Some(rule) = user_rule {
             merge_option_maps(&mut merged, rule.options.clone(), &merge_keys);
+        }
+        if let Some((key, value)) = baked {
+            merged.insert(key, value);
         }
         serde_json::to_vec(&merged).unwrap_or_else(|_| b"{}".to_vec())
     }
@@ -2341,6 +2400,116 @@ Style/StringLiterals:
         let parsed: serde_json::Value = serde_json::from_slice(&json).expect("valid JSON");
         assert_eq!(parsed["EnforcedStyle"], "compact");
         assert_eq!(parsed["MaxLength"], 120);
+    }
+
+    #[test]
+    fn cop_options_json_bakes_block_braces_style_for_semicolon() {
+        // murphy-ilrx (option 2, no ABI bump): empty config bakes the
+        // `for_cop` fallback `"space"` so the default behavior is preserved.
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterSemicolon"))
+                .expect("valid JSON");
+        assert_eq!(parsed["SpaceInsideBlockBracesEnforcedStyle"], "space");
+
+        // User `no_space` sibling flows into the running cop's options.
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/SpaceInsideBlockBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterSemicolon"))
+                .expect("valid JSON");
+        assert_eq!(parsed["SpaceInsideBlockBracesEnforcedStyle"], "no_space");
+
+        // Bundled default is honoured when the user does not set the sibling.
+        let cfg = MurphyConfig::with_defaults(
+            "",
+            "Layout/SpaceInsideBlockBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterSemicolon"))
+                .expect("valid JSON");
+        assert_eq!(parsed["SpaceInsideBlockBracesEnforcedStyle"], "no_space");
+
+        // User wins over the bundled default.
+        let cfg = MurphyConfig::with_defaults(
+            "Layout/SpaceInsideBlockBraces:\n  EnforcedStyle: space\n",
+            "Layout/SpaceInsideBlockBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterSemicolon"))
+                .expect("valid JSON");
+        assert_eq!(parsed["SpaceInsideBlockBracesEnforcedStyle"], "space");
+
+        // The baked sibling wins over a same-named key on the running cop's
+        // own table (the baked key is derived, not user-configurable).
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/SpaceInsideBlockBraces:\n  EnforcedStyle: no_space\n\
+             Layout/SpaceAfterSemicolon:\n  SpaceInsideBlockBracesEnforcedStyle: space\n",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterSemicolon"))
+                .expect("valid JSON");
+        assert_eq!(parsed["SpaceInsideBlockBracesEnforcedStyle"], "no_space");
+    }
+
+    #[test]
+    fn cop_options_json_bakes_hash_braces_style_for_comma() {
+        // Empty config bakes `"space"` (RuboCop's `|| 'space'` fallback).
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterComma"))
+                .expect("valid JSON");
+        assert_eq!(parsed["SpaceInsideHashLiteralBracesEnforcedStyle"], "space");
+
+        // `no_space` flows through, including the `compact` third style.
+        for style in ["no_space", "compact", "space"] {
+            let cfg = MurphyConfig::from_yaml_str(&format!(
+                "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: {style}\n"
+            ))
+            .expect("config parses");
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterComma"))
+                    .expect("valid JSON");
+            assert_eq!(parsed["SpaceInsideHashLiteralBracesEnforcedStyle"], style);
+        }
+
+        // Bundled default + user override behave like the block-braces twin.
+        let cfg = MurphyConfig::with_defaults(
+            "",
+            "Layout/SpaceInsideHashLiteralBraces:\n  EnforcedStyle: no_space\n",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Layout/SpaceAfterComma"))
+                .expect("valid JSON");
+        assert_eq!(
+            parsed["SpaceInsideHashLiteralBracesEnforcedStyle"],
+            "no_space"
+        );
+    }
+
+    #[test]
+    fn cop_options_json_leaves_unrelated_cops_unbaked() {
+        // No baked keys leak into other cops; the empty fast path is intact.
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/Foo")).expect("valid JSON");
+        assert_eq!(parsed, serde_json::json!({}));
+        let parsed: serde_json::Value = serde_json::from_slice(
+            &cfg.cop_options_json("Layout/SpaceAroundEqualsInParameterDefault"),
+        )
+        .expect("valid JSON");
+        assert!(parsed.get("SpaceInsideBlockBracesEnforcedStyle").is_none());
+        assert!(
+            parsed
+                .get("SpaceInsideHashLiteralBracesEnforcedStyle")
+                .is_none()
+        );
     }
 
     #[test]

@@ -8,11 +8,9 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAroundEqualsInParameterDefault
-//! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-8zw3
-//!   - murphy-ilrx
+//! upstream_version_checked: 1.87.0
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Dispatches on `Optarg` (`def f(a = 1)`). `Kwoptarg` (`def f(k: 1)`) uses a
 //!   `:` not an `=`, so RuboCop's cop never matches it — Murphy follows suit and
@@ -21,20 +19,15 @@
 //!   spans from the end of the parameter name to the start of the default value,
 //!   matching RuboCop's `range_between(arg.end_pos, value.begin_pos)`.
 //!
-//!   murphy-8zw3 (no observable gap — architecturally non-portable): RuboCop's
-//!   `ConfigurableEnforcedStyle` `correct_style_detected` /
-//!   `opposite_style_detected` calls feed two RuboCop-only subsystems —
-//!   `--auto-gen-config` TODO-file generation and cross-run/cross-file style
-//!   ambiguity tracking — neither of which exists in Murphy. They do NOT change
-//!   the offenses or autocorrections RuboCop reports for any given file:
-//!   `incorrect_style_detected` always adds the offense, and the autocorrect
-//!   always runs. A mixed-style file (`def a(x=1, y = 2); end` under the default
-//!   `space` style) reports exactly one offense in both RuboCop and Murphy (the
-//!   `x=1`), so there is no input that distinguishes the two and thus no
-//!   TDD-drivable behavior to port. Wiring this would require a cross-cop /
-//!   cross-investigation style-tracking subsystem in murphy-core (an ABI-level
-//!   change), not a cop-body change; it is intentionally not attempted here and
-//!   would not alter parity on emitted offenses.
+//!   murphy-8zw3 / murphy-ilrx evaluated (no host change, no ABI bump):
+//!   RuboCop's `ConfigurableEnforcedStyle` `correct_style_detected` /
+//!   `opposite_style_detected` calls feed only `--auto-gen-config` TODO-file
+//!   generation and cross-file style ambiguity tracking — neither exists in
+//!   Murphy. They do NOT change emitted offenses or autocorrections:
+//!   `incorrect_style_detected` always adds the offense and the autocorrect
+//!   always runs. A mixed-style file (`def a(x=1, y = 2); end` under `space`)
+//!   reports exactly one offense in both (the `x=1`). No sibling config is
+//!   read, so no `options_json` baking is needed.
 //! ```
 //!
 //! ## Options
@@ -301,6 +294,20 @@ mod tests {
     fn leaves_clean_program_without_corrections() {
         test::<SpaceAroundEqualsInParameterDefault>()
             .expect_no_corrections("def f(x = 0, y = 1); end\n");
+    }
+
+    // ── murphy-8zw3 / murphy-ilrx: style-tracking has no observable effect ──
+
+    #[test]
+    fn mixed_style_file_reports_only_the_mismatched_optarg() {
+        // Under the default `space` style, `x=1` fires while `y = 2` does not
+        // — matching RuboCop. `correct_style_detected` /
+        // `opposite_style_detected` only feed `--auto-gen-config`, so there is
+        // no sibling config to bake and no ABI change.
+        test::<SpaceAroundEqualsInParameterDefault>().expect_offense(indoc! {r#"
+            def f(x=1, y = 2); end
+                   ^ Surrounding space missing in default value assignment.
+        "#});
     }
 }
 
