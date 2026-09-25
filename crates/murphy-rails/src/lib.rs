@@ -531,146 +531,16 @@ submit_cop!(BulkChangeTable);
 // `RedundantPresenceValidationOnBelongsTo` promoted to real cop in
 // `cops::rails::redundant_presence_validation_on_belongs_to`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedundantReceiverInWithOptions
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedundantReceiverInWithOptions;
-
-#[cop(
-    name = "Rails/RedundantReceiverInWithOptions",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedundantReceiverInWithOptions {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedundantReceiverInWithOptions);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RedundantTravelBack
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RedundantTravelBack;
-
-#[cop(
-    name = "Rails/RedundantTravelBack",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RedundantTravelBack {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RedundantTravelBack);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ReflectionClassName
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ReflectionClassName;
-
-#[cop(
-    name = "Rails/ReflectionClassName",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ReflectionClassName {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ReflectionClassName);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RelativeDateConstant
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RelativeDateConstant;
-
-#[cop(
-    name = "Rails/RelativeDateConstant",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RelativeDateConstant {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RelativeDateConstant);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RenderInline
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RenderInline;
-
-#[cop(
-    name = "Rails/RenderInline",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RenderInline {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RenderInline);
-
+// `RedundantReceiverInWithOptions` promoted to real cop in
+// `cops::rails::redundant_receiver_in_with_options`.
+// `RedundantTravelBack` promoted to real cop in
+// `cops::rails::redundant_travel_back`.
+// `ReflectionClassName` promoted to real cop in
+// `cops::rails::reflection_class_name`.
+// `RelativeDateConstant` promoted to real cop in
+// `cops::rails::relative_date_constant`.
+// `RenderInline` promoted to real cop in
+// `cops::rails::render_inline`.
 /// ## RuboCop parity
 ///
 /// ```murphy-parity
