@@ -1514,34 +1514,6 @@ submit_cop!(HttpPositionalArguments);
 ///
 /// ```murphy-parity
 /// upstream: rubocop-rails
-/// upstream_cop: Rails/HttpStatus
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct HttpStatus;
-
-#[cop(
-    name = "Rails/HttpStatus",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl HttpStatus {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(HttpStatus);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
 /// upstream_cop: Rails/HttpStatusNameConsistency
 /// upstream_version_checked: 2.35.0
 /// status: stub
