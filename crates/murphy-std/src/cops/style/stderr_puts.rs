@@ -37,7 +37,20 @@
 //! Replaces `$stderr.puts` (the receiver + dot + selector span) with `warn`,
 //! leaving the parenthesised arguments unchanged.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/StderrPuts` receiver guards are `STDERR` top-level
+// (`(const {nil? cbase} :STDERR)`) and `$stderr` gvar (`(gvar :$stderr)`),
+// method `:puts`.
+// In Murphy `::STDERR` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` for `STDERR` (namespaced `Foo::STDERR` still accepts — pinned by
+// `boundary_accepts_namespaced_stderr_puts`; `::STDERR` flags — pinned by
+// pre-existing `flags_stderr_qualified_const_puts`). `send` covers `Send`
+// only (not `Csend`), matching the `#[on_node(kind = "send")]` dispatch
+// (pinned by `boundary_accepts_csend_stderr_puts`). Argument-count guard
+// (`$_ ...`, ≥1 arg) stays hand-rolled below.
+def_node_matcher!(stderr_const, "(send (const nil? :STDERR) :puts ...)");
+def_node_matcher!(stderr_gvar, "(send (gvar :$stderr) :puts ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -67,20 +80,23 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // Must have a receiver.
-    let Some(recv_id) = receiver.get() else {
+    // `(send (const nil? :STDERR) :puts ...)` (`STDERR` / `::STDERR`,
+    // top-level only) or `(send (gvar :$stderr) :puts ...)` (`$stderr`).
+    // `send` covers `Send` only (not `Csend`).
+    if !stderr_const(node, cx) && !stderr_gvar(node, cx) {
         return;
-    };
+    }
 
     // Must be `puts` with at least one argument (RuboCop's `$_ ...`).
     if cx.list(args).is_empty() {
         return;
     }
 
-    // Receiver must be `$stderr` (gvar) or `STDERR` / `::STDERR` (const).
-    if !is_stderr_receiver(recv_id, cx) {
+    // Receiver for the offense range. Always present when a matcher above
+    // passes.
+    let Some(recv_id) = receiver.get() else {
         return;
-    }
+    };
 
     // Offense range: from start of receiver to end of selector (`puts`).
     let recv_range = cx.range(recv_id);
@@ -96,13 +112,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     cx.emit_offense(offense_range, &message, None);
     cx.emit_edit(offense_range, "warn");
-}
-
-fn is_stderr_receiver(recv_id: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.kind(recv_id) {
-        NodeKind::Gvar(sym) => cx.symbol_str(*sym) == "$stderr",
-        _ => cx.is_global_const(recv_id, "STDERR"),
-    }
 }
 
 #[cfg(test)]
@@ -195,6 +204,28 @@ mod tests {
     #[test]
     fn accepts_stderr_other_method() {
         test::<StderrPuts>().expect_no_offenses("$stderr.print('hello')\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.7): pin the exact node set
+    // the hand-rolled `STDERR` guard matches, so the verbatim
+    // `(send (const nil? :STDERR) :puts ...)` +
+    // `(send (gvar :$stderr) :puts ...)` refactor can be proven equivalent.
+    // `::STDERR` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (pinned by pre-existing `flags_stderr_qualified_const_puts`). `send`
+    // covers `Send` only (not `Csend`), matching the
+    // `#[on_node(kind = "send")]` dispatch.
+
+    #[test]
+    fn boundary_accepts_namespaced_stderr_puts() {
+        // `Foo::STDERR` is scoped: `is_global_const` rejects.
+        test::<StderrPuts>().expect_no_offenses("Foo::STDERR.puts('hello')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_stderr_puts() {
+        // `&.` is a `csend` node; `send` covers `Send` only.
+        test::<StderrPuts>().expect_no_offenses("STDERR&.puts('hello')\n");
+        test::<StderrPuts>().expect_no_offenses("$stderr&.puts('hello')\n");
     }
 }
 murphy_plugin_api::submit_cop!(StderrPuts);

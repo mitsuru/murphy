@@ -49,7 +49,20 @@
 //! `` The use of `Kernel#open` is a serious security risk. `` (implicit) or
 //! `` The use of `URI.open` is a serious security risk. `` (matches RuboCop).
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Security/Open` receiver guards are bare (`nil?`,
+// `Kernel#open`) and `URI` top-level (`(const {nil? cbase} :URI)`), method
+// `:open`.
+// In Murphy `::URI` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` for `URI` (namespaced `Foo::URI` still accepts — pinned by
+// `boundary_accepts_namespaced_uri_open`; `::URI` flags — pinned by
+// pre-existing `flags_cbase_uri_open`). `send` covers `Send` only (not
+// `Csend`), matching the `#[on_node(kind = "send")]` dispatch (pinned by
+// `boundary_accepts_csend_uri_open`). First-argument `safe?` guards stay
+// hand-rolled below.
+def_node_matcher!(open_bare, "(send nil? :open ...)");
+def_node_matcher!(open_uri, "(send (const nil? :URI) :open ...)");
 
 #[derive(Default)]
 pub struct Open;
@@ -64,18 +77,19 @@ pub struct Open;
 impl Open {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) != Some("open") {
+        // `(send nil? :open ...)` (bare, `Kernel#open`) or
+        // `(send (const nil? :URI) :open ...)` (`URI` / `::URI`, top-level
+        // only). `send` covers `Send` only (not `Csend`).
+        if !open_bare(node, cx) && !open_uri(node, cx) {
             return;
         }
-        // `${nil? (const {nil? cbase} :URI)}` — receiver must be implicit
-        // (`Kernel#open`) or the `URI` constant.
+        // `${nil? (const {nil? cbase} :URI)}` — receiver label for the message.
         let receiver = cx.call_receiver(node).get();
         let receiver_label = match receiver {
             None => "Kernel#".to_owned(),
-            Some(recv) if cx.is_global_const(recv, "URI") => {
+            Some(recv) => {
                 format!("{}.", cx.raw_source(cx.range(recv)))
             }
-            Some(_) => return,
         };
         // `$_` — the first positional argument is captured and checked.
         let args = cx.call_arguments(node);
@@ -240,5 +254,25 @@ mod tests {
     #[test]
     fn accepts_open_no_arguments() {
         test::<Open>().expect_no_offenses("open\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.7): pin the exact node set
+    // the hand-rolled `open` guard matches, so the verbatim
+    // `(send nil? :open ...)` + `(send (const nil? :URI) :open ...)` refactor
+    // can be proven equivalent. `::URI` collapses to `Const{scope:None}`:
+    // `nil?` covers bare + `::` (pinned by pre-existing
+    // `flags_cbase_uri_open`). `send` covers `Send` only (not `Csend`),
+    // matching the `#[on_node(kind = "send")]` dispatch.
+
+    #[test]
+    fn boundary_accepts_namespaced_uri_open() {
+        // `Foo::URI` is scoped: `is_global_const` rejects.
+        test::<Open>().expect_no_offenses("Foo::URI.open(foo)\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_uri_open() {
+        // `&.` is a `csend` node; `send` covers `Send` only.
+        test::<Open>().expect_no_offenses("URI&.open(foo)\n");
     }
 }
