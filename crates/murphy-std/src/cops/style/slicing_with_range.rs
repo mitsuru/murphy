@@ -20,8 +20,11 @@
 //!   This cop is marked Safe: false upstream because `x..-1` and `x..` are only
 //!   equivalent for Array/String; Murphy emits the autocorrect regardless, matching
 //!   the upstream behaviour under the default settings.
-//!   Safe-navigation `ary&.[](range)` (csend) is also checked, mirroring
-//!   RuboCop's `alias on_csend on_send`.
+//!   Verbatim port of the `[]` call head `(call _ :[] ...)` (murphy-s1yc.8):
+//!   `call` = `{send csend}` covers safe-navigation (`ary&.[](range)`),
+//!   mirroring RuboCop's `alias on_csend on_send`; the `_` receiver binds an
+//!   absent or present receiver per murphy-if9y; trailing `...` absorbs any
+//!   argument list (the exactly-one-RangeExpr guard below applies separately).
 //!   The offense range covers the bracket-and-argument portion (`[range]`),
 //!   matching the RuboCop offense range for the bracket-notation form.
 //! ```
@@ -31,7 +34,14 @@
 //! `Send` (or `Csend`) nodes with method `[]` and exactly one argument that is
 //! a `RangeExpr`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
+
+// Verbatim port of the `[]` call head (murphy-s1yc.8):
+// `(call _ :[] ...)` — `call` = `{send csend}` covers safe-navigation
+// (`ary&.[](range)`); the `_` receiver binds an absent or present receiver;
+// trailing `...` absorbs any argument list, so the exactly-one-RangeExpr
+// guard below applies separately.
+def_node_matcher!(slicing_with_range_call, "(call _ :[] ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -46,20 +56,25 @@ pub struct SlicingWithRange;
     options = NoOptions,
 )]
 impl SlicingWithRange {
-    #[on_node(kind = "send", methods = ["[]"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) == Some("[]") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ :[] ...)` head: filters to `[]` calls on either
+    // `send` or `csend` (safe-navigation), with any receiver (absent or
+    // present). Trailing `...` matches any arg list, so the
+    // exactly-one-RangeExpr guard below applies separately.
+    if !slicing_with_range_call(node, cx) {
+        return;
+    }
     // Extract receiver and args regardless of Send/Csend.
     let (receiver_id, args) = match cx.kind(node) {
         NodeKind::Send { receiver, args, .. } => (receiver.get(), *args),
@@ -274,6 +289,45 @@ mod tests {
             <SlicingWithRange as Cop>::MINIMUM_TARGET_RUBY_VERSION,
             Some(RubyVersion::new(2, 7)),
         );
+    }
+
+    // --- Characterization (murphy-s1yc.8): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // `(call _ :[] ...)` port can be proven byte-identical. `call` =
+    // `{send csend}` covers safe-navigation (`ary&.[](0..-1)`), mirroring
+    // RuboCop's `alias on_csend on_send`; trailing `...` absorbs any arg
+    // list (the exactly-one-RangeExpr guard below applies separately).
+
+    #[test]
+    fn s1yc8_flags_csend_bracket_corrects_to_receiver() {
+        // Csend `ary&.[](0..-1)` matches: `call` covers `csend`.
+        test::<SlicingWithRange>().expect_correction(
+            indoc! {r#"
+                ary&.[](0..-1)
+                   ^^^^^^^^^^^ Remove the useless `&.[](0..-1)`.
+            "#},
+            "ary\n",
+        );
+    }
+
+    #[test]
+    fn s1yc8_accepts_no_arg_bracket() {
+        // No-arg `ary[]`: matcher `...` matches zero args,
+        // the exactly-one-arg guard rejects.
+        test::<SlicingWithRange>().expect_no_offenses("ary[]\n");
+    }
+
+    #[test]
+    fn s1yc8_accepts_multi_arg_slice() {
+        // Two-arg `ary[0, 2]`: matcher `...` matches any arg list,
+        // the exactly-one-arg guard rejects.
+        test::<SlicingWithRange>().expect_no_offenses("ary[0, 2]\n");
+    }
+
+    #[test]
+    fn s1yc8_accepts_unrelated_method() {
+        // `ary.foo(0..-1)`: matcher rejects non-`[]` method.
+        test::<SlicingWithRange>().expect_no_offenses("ary.foo(0..-1)\n");
     }
 }
 
