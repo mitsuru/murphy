@@ -88,6 +88,7 @@ eliminate RuboCop's slowness with a native Rust core.
   Output-only filtering — the offense JSON shape is unchanged.
 - `murphy lint --format checkstyle|sarif|junit|github|gnu|tap` selects CI-friendly output (default `human`, frozen `json` per ADR 0006); see `docs/guides/output-formats.md`.
 - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` scaffolds a pre-commit hook; see `docs/guides/git-hooks.md`.
+- `murphy lint --since <ref>` lints only files changed since `<ref>` (staged, unstaged, plus untracked; merge-base semantics) for fast PR checks; the reusable workflow `.github/workflows/murphy.yml` uploads SARIF to Code Scanning — see `docs/guides/ci.md`.
 - `murphy lint --profile` emits JSON profiling data, with optional
   `--profile-format speedscope` output.
 - Exit codes 0/1/2/3. A malformed `.murphy.yml` exits 2.

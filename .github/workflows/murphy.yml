@@ -1,0 +1,132 @@
+name: murphy
+# Reusable CI workflow (Phase 9 B5): diff-driven `murphy lint --since`
+# with SARIF upload to GitHub Code Scanning.
+#
+# Call from a repository that uses murphy:
+#
+# ```yaml
+# permissions:
+#   contents: read
+#   security-events: write   # required for the SARIF upload
+# jobs:
+#   murphy:
+#     uses: mitsuru/murphy/.github/workflows/murphy.yml@main
+#     permissions:
+#       contents: read
+#       security-events: write
+# ```
+#
+# What it does:
+# 1. Checks out the caller with full history (`fetch-depth: 0`, so
+#    `--since` merge-base resolution works).
+# 2. Installs murphy from git (`murphy-ref`, default `main`).
+# 3. Runs `murphy lint --format sarif --since <since> <paths>` — only
+#    files changed since the ref are linted (B5 diff-driven runner).
+# 4. Uploads `murphy.sarif` to Code Scanning (skipped when
+#    `upload-sarif` is false or the SARIF file is missing, e.g. exit 2).
+# 5. Optionally re-runs with `--format github` so offenses also appear as
+#    PR annotations, then fails the job iff the SARIF run found offenses.
+#
+# Fork-PR note: `GITHUB_TOKEN` on `pull_request` from a fork cannot write
+# code-scanning results, so the upload step fails there. Either call this
+# workflow via `pull_request_target`, or set `upload-sarif: false` for
+# forks and keep the annotations (which work everywhere).
+
+on:
+  workflow_call:
+    inputs:
+      since:
+        description: "Git ref to diff against (merge-base with HEAD when available)."
+        type: string
+        default: "origin/main"
+        required: false
+      paths:
+        description: "Space-separated paths to lint (intersected with the --since diff)."
+        type: string
+        default: "."
+        required: false
+      murphy-ref:
+        description: "Murphy version to install (git ref of mitsuru/murphy)."
+        type: string
+        default: "main"
+        required: false
+      upload-sarif:
+        description: "Upload murphy.sarif to GitHub Code Scanning."
+        type: boolean
+        default: true
+        required: false
+      annotations:
+        description: "Re-run with --format github so offenses appear as PR annotations."
+        type: boolean
+        default: true
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  murphy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # mruby build needs rake on PATH (see mise.toml: ruby 3.3.5).
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3.5"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Install murphy
+        run: cargo install --git https://github.com/mitsuru/murphy.git --rev ${{ inputs.murphy-ref }} --locked murphy-cli
+
+      - name: Lint changed files (SARIF)
+        id: lint
+        run: |
+          set -uo pipefail
+          LINT_EXIT=0
+          # shellcheck disable=SC2086
+          murphy lint --format sarif --since "${{ inputs.since }}" ${{ inputs.paths }} > murphy.sarif || LINT_EXIT=$?
+          echo "lint_exit=$LINT_EXIT" >> "$GITHUB_OUTPUT"
+          # Exit 0 here so the SARIF upload still runs; the gate step
+          # below re-raises the lint result at the end.
+          exit 0
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && inputs.upload-sarif && hashFiles('murphy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: murphy.sarif
+          category: murphy
+
+      - name: Lint changed files (PR annotations)
+        if: always() && inputs.annotations
+        run: |
+          # Annotations flow through stdout workflow commands; a dirty
+          # diff exits 1, which must not pre-empt the gate step.
+          # shellcheck disable=SC2086
+          murphy lint --format github --since "${{ inputs.since }}" ${{ inputs.paths }} || true
+
+      - name: Gate on lint result
+        if: always()
+        run: |
+          LINT_EXIT='${{ steps.lint.outputs.lint_exit }}'
+          case "$LINT_EXIT" in
+            0|1)
+              exit "$LINT_EXIT" ;;
+            2)
+              echo "::error::murphy setup error (bad ref, missing baseline, or bad config); see above."
+              exit 2 ;;
+            *)
+              echo "::error::murphy SARIF run did not complete (exit '${LINT_EXIT:-unset}'); see above."
+              exit 1 ;;
+          esac

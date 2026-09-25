@@ -55,7 +55,8 @@ murphy`). `rules` are deduped cop IDs; each result carries `ruleId`,
 `artifactLocation.uri`. Located offenses add `region` with 1-based
 `startLine`/`startColumn`/`endLine`/`endColumn` (byte-based columns);
 filepath-only offenses omit `region`. Upload with
-`github/codeql-action/upload-sarif`.
+`github/codeql-action/upload-sarif` — see `docs/guides/ci.md` for the
+reusable workflow (`--since` + SARIF + Code Scanning wiring).
 
 ### `junit`
 
