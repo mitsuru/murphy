@@ -69,8 +69,8 @@ per-platform binaries under `lib/<platform>/` (`linux-x86_64`,
 accepted as aliases). The template's CI cross-builds all four slots
 (`build` matrix + `pack` assembler, mirroring `release-gem.yml`'s runners)
 and the host loader auto-selects the exact slot, then the platform
-extension, then sorted-first (ADR 0054). Remote discovery is a static index
-+ git/HTTPS fetch (marketplace, uk7.2; guide:
+extension, then sorted-first (ADR 0054). Remote discovery is a static
+index plus git/HTTPS fetch (marketplace, uk7.2; guide:
 `docs/guides/plugin-marketplace.md`) — no hosted service.
 
 Install a pack to the user-local dir (`~/.local/share/murphy/plugins/`,
