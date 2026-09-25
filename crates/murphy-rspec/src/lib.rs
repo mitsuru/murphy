@@ -22,6 +22,11 @@
 //! - `RSpec/MatchArray` — prefer `contain_exactly` for array literals (murphy-4gd.3.4).
 //! - `RSpec/NotToNot` — consistent `not_to` / `to_not` spelling (murphy-4gd.3.4).
 //! - `RSpec/IdenticalEqualityAssertion` — flag identical equality sides (murphy-4gd.3.4).
+//! - `RSpec/DescribeMethod` — second `describe` arg should name a method (murphy-4gd.3.6).
+//! - `RSpec/ExpectInHook` — no `expect` in hooks (murphy-4gd.3.6).
+//! - `RSpec/ExpectInLet` — no `expect` in `let` (murphy-4gd.3.6).
+//! - `RSpec/HookArgument` — consistent hook scope style (murphy-4gd.3.6).
+//! - `RSpec/VoidExpect` — flag `expect()` without `.to` / `.not_to` (murphy-4gd.3.6).
 //! - `RSpec/AnyInstance` — avoid stubbing any instance globally (murphy-4gd.3.5).
 //! - `RSpec/ItBehavesLike` — consistent shared-example inclusion style (murphy-4gd.3.5).
 //! - `RSpec/VerifiedDoubles` — prefer verifying doubles (murphy-4gd.3.5).
