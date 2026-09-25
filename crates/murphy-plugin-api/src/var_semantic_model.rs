@@ -1205,6 +1205,60 @@ impl VarSemanticModel {
                     }
                 }
 
+                // ── Bare `binding` captures all accessible locals ─────────────
+                // RuboCop parity (murphy-0vbj): `VariableForce#process_send`
+                // references every accessible variable when it sees a bare
+                // `binding` call (method `binding`, no args). Mirror that by
+                // recording a reference at the call site for each variable
+                // declared so far in the accessible scopes, so `x = 1; binding`
+                // does not flag `x` as useless.
+                NodeKind::Send { method, args, .. } if args.len == 0 => {
+                    let is_binding =
+                        ast.interner().resolve(method.0) == "binding";
+                    if is_binding {
+                        let pos = ast.range(node).start;
+                        // Accessible scopes: current scope plus ancestors while
+                        // the current scope is block-like (Block/Numblock/Itblock),
+                        // mirroring `VariableTable#accessible_variables`.
+                        let mut accessible: Vec<NodeId> = vec![scope];
+                        let mut cur = scope;
+                        loop {
+                            let is_block = matches!(
+                                *ast.kind(cur),
+                                NodeKind::Block { .. }
+                                    | NodeKind::Numblock { .. }
+                                    | NodeKind::Itblock { .. }
+                            );
+                            if !is_block {
+                                break;
+                            }
+                            let parent = scopes
+                                .get(&cur)
+                                .and_then(|s| s.parent_scope);
+                            match parent {
+                                Some(p) => {
+                                    accessible.push(p);
+                                    cur = p;
+                                }
+                                None => break,
+                            }
+                        }
+                        for scope_id in accessible {
+                            if let Some(scope_info) = scopes.get_mut(&scope_id) {
+                                for var in scope_info.variables.iter_mut() {
+                                    var.references.push(Reference {
+                                        node_id: node,
+                                        pos,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    for child in ast.children(node).rev() {
+                        stack.push(WorkItem { node: child, scope });
+                    }
+                }
+
                 // ── All other nodes: classify children under the same scope ──
                 _ => {
                     for child in ast.children(node).rev() {
