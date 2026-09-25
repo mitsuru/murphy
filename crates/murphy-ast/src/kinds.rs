@@ -279,7 +279,6 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     ("find_pattern", &[NodeKindTag(101)]),
     ("match_alt", &[NodeKindTag(102)]),
     // murphy-j1j2 PM-B/C/D/E pattern-matching extensions
-    // Note: unless_guard excluded — `unless` nodes normalise to `if` in Murphy.
     ("match_rest", &[NodeKindTag(103)]),
     ("match_nil_pattern", &[NodeKindTag(104)]),
     ("array_pattern_with_tail", &[NodeKindTag(105)]),
@@ -289,6 +288,7 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     ("const_pattern", &[NodeKindTag(109)]),
     ("pin", &[NodeKindTag(110)]),
     ("if_guard", &[NodeKindTag(111)]),
+    ("unless_guard", &[NodeKindTag(112)]),
     ("match_with_lvasgn", &[NodeKindTag(113)]),
     ("flip_flop", &[NodeKindTag(114)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
@@ -309,6 +309,86 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
         "any_str",
         &[NodeKindTag(7), NodeKindTag(63), NodeKindTag(65)],
     ),
+];
+
+/// Exact compatibility metadata for RuboCop derived hook aliases
+/// (murphy-6ln).
+///
+/// RuboCop's `on_<type>` traversal covers 131 node types, but seven hooks
+/// need Murphy-side folding notes because Prism collapses the parser-gem
+/// spelling or because the closest structural node is shared:
+///
+/// - `while_post` / `until_post` fold into `While` / `Until` with
+///   `post: true`;
+/// - `empty_else` (only ever a `case_match` child in parser-gem) folds into
+///   `CaseMatch.else_body == NONE` (indistinguishable from absent `else`
+///   without the `else`-keyword token scan);
+/// - `defs` folds all singleton defs (`def self.foo`, `def obj.foo`,
+///   `def Foo.bar`) into `Def` with a receiver (the explicit `Defs`
+///   variant is parser-only and never produced from real source);
+/// - `csend`, `if_guard`, `unless_guard` already have distinct Murphy
+///   variants, so their rows document the precise `kind = "..."` mapping
+///   plus the hook-named filter helper for shared-method cops.
+///
+/// Each row names the structural `#[on_node(kind = "...")]` subscription(s)
+/// and the `Cx` helper that recovers exact RuboCop semantics without
+/// reimplementing the check.
+pub struct DerivedHookCompat {
+    /// RuboCop hook name (e.g. `"on_while_post"`).
+    pub hook: &'static str,
+    /// Structural kind(s) to subscribe to (e.g. `&["while"]`).
+    pub structural_kinds: &'static [&'static str],
+    /// `Cx` filtering helper (e.g. `"Cx::is_while_post"`).
+    pub helper: &'static str,
+    /// One-line folding note.
+    pub notes: &'static str,
+}
+
+/// Compatibility rows for the seven derived hooks in murphy-6ln scope.
+/// Order matches the issue listing.
+pub const DERIVED_HOOK_COMPATIBILITY: &[DerivedHookCompat] = &[
+    DerivedHookCompat {
+        hook: "on_if_guard",
+        structural_kinds: &["if_guard"],
+        helper: "Cx::is_if_guard",
+        notes: "distinct IfGuard variant for `in <pat> if <cond>`; precise via kind.",
+    },
+    DerivedHookCompat {
+        hook: "on_unless_guard",
+        structural_kinds: &["unless_guard"],
+        helper: "Cx::is_unless_guard",
+        notes: "distinct UnlessGuard variant for `in <pat> unless <cond>`; precise via kind.",
+    },
+    DerivedHookCompat {
+        hook: "on_while_post",
+        structural_kinds: &["while"],
+        helper: "Cx::is_while_post",
+        notes: "folds into While with post:true (`begin...end while`); filter.",
+    },
+    DerivedHookCompat {
+        hook: "on_until_post",
+        structural_kinds: &["until"],
+        helper: "Cx::is_until_post",
+        notes: "folds into Until with post:true (`begin...end until`); filter.",
+    },
+    DerivedHookCompat {
+        hook: "on_empty_else",
+        structural_kinds: &["case_match"],
+        helper: "Cx::has_empty_else",
+        notes: "parser-gem empty_else only for case_match empty else; token scan distinguishes absent else.",
+    },
+    DerivedHookCompat {
+        hook: "on_csend",
+        structural_kinds: &["csend"],
+        helper: "Cx::is_csend",
+        notes: "distinct Csend variant for `&.`; precise via kind (alias of is_safe_navigation).",
+    },
+    DerivedHookCompat {
+        hook: "on_defs",
+        structural_kinds: &["def", "defs"],
+        helper: "Cx::is_defs",
+        notes: "all singleton defs fold into Def with receiver; Defs variant is parser-only.",
+    },
 ];
 
 /// Resolve a pattern node-type name to its tag. `None` for unknown names.
@@ -805,6 +885,65 @@ mod tests {
         assert_eq!(pattern_name(NodeKindTag(17)), Some("send"));
         assert_eq!(tag_from_pattern_name("sned"), None);
         assert_eq!(tag_from_pattern_name("error"), None);
+    }
+
+    #[test]
+    fn derived_hook_compatibility_covers_seven_hooks() {
+        // murphy-6ln: exact metadata for derived RuboCop hook aliases.
+        use super::DERIVED_HOOK_COMPATIBILITY;
+        assert_eq!(DERIVED_HOOK_COMPATIBILITY.len(), 7);
+        let hooks: Vec<&str> = DERIVED_HOOK_COMPATIBILITY
+            .iter()
+            .map(|row| row.hook)
+            .collect();
+        assert_eq!(
+            hooks,
+            vec![
+                "on_if_guard",
+                "on_unless_guard",
+                "on_while_post",
+                "on_until_post",
+                "on_empty_else",
+                "on_csend",
+                "on_defs",
+            ]
+        );
+        // Every structural kind must resolve to a real tag.
+        for row in DERIVED_HOOK_COMPATIBILITY {
+            assert!(!row.structural_kinds.is_empty(), "{}", row.hook);
+            assert!(!row.helper.is_empty(), "{}", row.hook);
+            assert!(!row.notes.is_empty(), "{}", row.hook);
+            for kind in row.structural_kinds {
+                assert!(
+                    super::tag_from_pattern_name(kind).is_some(),
+                    "{} structural kind {kind} must resolve",
+                    row.hook
+                );
+            }
+        }
+        // Spot-check helpers.
+        let by_hook = |hook: &str| {
+            DERIVED_HOOK_COMPATIBILITY
+                .iter()
+                .find(|row| row.hook == hook)
+                .expect(hook)
+        };
+        assert_eq!(by_hook("on_while_post").helper, "Cx::is_while_post");
+        assert_eq!(by_hook("on_empty_else").helper, "Cx::has_empty_else");
+        assert_eq!(by_hook("on_defs").helper, "Cx::is_defs");
+    }
+
+    #[test]
+    fn unless_guard_resolves_for_patterns_and_groups() {
+        // murphy-6ln: UnlessGuard is a distinct variant (not normalised to If).
+        assert_eq!(
+            super::tag_from_pattern_name("unless_guard"),
+            Some(NodeKindTag(112))
+        );
+        assert_eq!(
+            super::tags_for_type_name("unless_guard"),
+            &[NodeKindTag(112)]
+        );
     }
 
     #[test]

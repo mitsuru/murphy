@@ -19,9 +19,10 @@ RuboCop traversal hooks such as `on_class`, `on_def`, `on_hash`, `on_str`, and
 
 - `on_class` -> `class`
 - `on_module` -> `module`
-- `on_def` -> `def`
-- `on_defs` -> `singleton_class` plus `def`/method metadata as needed
-- `on_send` -> existing call dispatch for method-name-restricted cops, or node kind `call` for unrestricted call-node cops
+- `on_def` -> `def` (filter with `Cx::is_plain_def` to exclude singleton defs)
+- `on_defs` -> `def` + `defs`, filtered with `Cx::is_defs` (all singleton defs fold into `Def` with a receiver; see derived table below)
+- `on_send` -> `send` (use `methods = [...]` for `restrict_on_send`; pattern group `call` = `send` + `csend`)
+- `on_csend` -> `csend` (precise; filter helper `Cx::is_csend` is an alias of `is_safe_navigation`)
 - `on_block` -> `block`
 - `on_hash` -> `hash`
 - `on_pair` -> `assoc`
@@ -42,13 +43,39 @@ converting CamelCase to snake_case. Examples include `constant_read`,
 `while`, `until`, and `yield`.
 
 RuboCop hook names are accepted as aliases. For example, `on_str` maps to
-`string`, `on_sym` maps to `symbol`, `on_send` and `on_csend` map to `call`,
-and assignment hooks such as `on_and_asgn`/`on_or_asgn` expand to the matching
-Prism `*_and_write` / `*_or_write` node kinds. Derived hooks whose exact parser
-semantics depend on AST attributes, such as `on_if_guard`, `on_until_post`, and
-`on_empty_else`, currently dispatch on their closest Prism structural node kind;
-cop implementations should inspect the node details if they need to distinguish
-the derived case.
+`string`, `on_sym` maps to `symbol`, and the pattern group `call` expands to
+`send` + `csend` (native `#[on_node]` dispatch keeps `send` / `csend`
+separate for precision).
+
+## Derived hook exact semantics (murphy-6ln)
+
+Seven RuboCop traversal hooks need folding notes because Prism collapses the
+parser-gem spelling or shares one structural node. The canonical metadata is
+`murphy_ast::DERIVED_HOOK_COMPATIBILITY`; each row names the structural
+`#[on_node(kind = "...")]` subscription(s) and the `Cx` helper that recovers
+exact semantics without reimplementing the check:
+
+| RuboCop hook | Subscribe to | Filter with | Notes |
+|---|---|---|---|
+| `on_if_guard` | `kind = "if_guard"` | `Cx::is_if_guard` | distinct `IfGuard` for `in <pat> if <cond>`; precise via kind |
+| `on_unless_guard` | `kind = "unless_guard"` | `Cx::is_unless_guard` | distinct `UnlessGuard` for `in <pat> unless <cond>`; precise via kind |
+| `on_while_post` | `kind = "while"` | `Cx::is_while_post` | folds into `While` with `post: true` (`begin...end while`) |
+| `on_until_post` | `kind = "until"` | `Cx::is_until_post` | folds into `Until` with `post: true` (`begin...end until`) |
+| `on_empty_else` | `kind = "case_match"` | `Cx::has_empty_else` | parser-gem `empty_else` only for `case/in` empty else; token scan distinguishes absent `else` from empty `else` (`else nil` has a body, not empty) |
+| `on_csend` | `kind = "csend"` | `Cx::is_csend` | distinct `Csend` for `&.`; precise via kind |
+| `on_defs` | `kind = "def"` + `kind = "defs"` | `Cx::is_defs` | all singleton defs (`def self.foo`, `def obj.foo`, `def Foo.bar`) fold into `Def` with a receiver; `Defs` is parser-only |
+
+Example (post-condition loop port):
+
+```rust
+#[on_node(kind = "while")]
+fn check_while(&self, node: NodeId, cx: &Cx<'_>) {
+    if !cx.is_while_post(node) {
+        return; // RuboCop `on_while_post` fires only here
+    }
+    // ... derived-case logic
+}
+```
 
 ## Plugin ABI
 
