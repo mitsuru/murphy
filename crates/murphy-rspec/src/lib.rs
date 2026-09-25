@@ -57,6 +57,11 @@
 //! - `RSpec/ImplicitBlockExpectation` — no implicit block expectations (murphy-4gd.3.11).
 //! - `RSpec/ImplicitExpect` — consistent `is_expected` / `should` style (murphy-4gd.3.11).
 //! - `RSpec/ImplicitSubject` — explicit vs implicit subject style (murphy-4gd.3.11).
+//! - `RSpec/IncludeExamples` — prefer `it_behaves_like` over `include_examples` (murphy-4gd.3.12).
+//! - `RSpec/IndexedLet` — no indexed `let` names like `item_1` (murphy-4gd.3.12).
+//! - `RSpec/InstanceSpy` — use `instance_spy` with `have_received` (murphy-4gd.3.12).
+//! - `RSpec/InstanceVariable` — avoid instance variables in specs (murphy-4gd.3.12).
+//! - `RSpec/IsExpectedSpecify` — use `it` for one-line `is_expected` (murphy-4gd.3.12).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
