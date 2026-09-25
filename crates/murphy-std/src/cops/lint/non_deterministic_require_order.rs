@@ -55,7 +55,21 @@
 //! - `Dir.glob(pattern, &method(:require))` — glob with block-pass
 //! - `Dir[pattern].each(&method(:require_relative))` — block-pass with require_relative
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RubyVersion, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RubyVersion, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/NonDeterministicRequireOrder` matchers are
+// `unsorted_dir_block?` = `(send (const {nil? cbase} :Dir) :glob ...)` and the
+// `Dir` head of `unsorted_dir_each?` / `unsorted_dir_each_pass?` /
+// `unsorted_dir_glob_pass?` = `(send (const {nil? cbase} :Dir) {:[] :glob} ...)`.
+// In Murphy `::Dir` collapses to `Const{scope:None}`, so a single `nil?` scope
+// covers bare and `::`-prefixed forms \u2014 equivalent to the prior
+// `is_global_const(r, "Dir")` check. All upstream matchers are `send`-only;
+// the explicit `Send` guards plus `#[on_node(kind = "send")]` never dispatch
+// on `csend` (pinned by `boundary_ignores_csend_dir_glob_each`). Argument
+// guards (non-empty, `sort: false`, block-pass, loop variable) stay
+// hand-rolled below.
+def_node_matcher!(dir_glob, "(send (const nil? :Dir) :glob ...)");
+def_node_matcher!(dir_index_or_glob, "(send (const nil? :Dir) {:glob :[]} ...)");
 
 #[derive(Default)]
 pub struct NonDeterministicRequireOrder;
@@ -194,7 +208,8 @@ impl NonDeterministicRequireOrder {
             cx.emit_edit(cx.selector(node), "sort.each");
         } else {
             // `unsorted_dir_glob_pass?`: `Dir.glob(..., &method(:require))`.
-            if !is_dir_const_receiver(node, cx) {
+            // `(send (const nil? :Dir) :glob ...)` \u2014 top-level `Dir.glob`.
+            if !dir_glob(node, cx) {
                 return;
             }
             if !unsorted_dir_self(node, cx) {
@@ -230,7 +245,8 @@ fn identify_dir_call(call: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> {
     }
     match cx.method_name(call)? {
         "each" => Some((cx.call_receiver(call).get()?, true)),
-        "glob" if is_dir_const_receiver(call, cx) => Some((call, false)),
+        // `(send (const nil? :Dir) :glob ...)` \u2014 top-level `Dir.glob`.
+        "glob" if dir_glob(call, cx) => Some((call, false)),
         _ => None,
     }
 }
@@ -239,10 +255,8 @@ fn identify_dir_call(call: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> {
 /// methods called on the `Dir` constant), suitable for `.each` chaining.
 /// Mirrors `unsorted_dir_each?` plus the documented `sort: false` intent.
 fn unsorted_dir_glob(node: &NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { .. } = *cx.kind(*node) else {
-        return false;
-    };
-    if !is_dir_const_receiver(*node, cx) {
+    // `(send (const nil? :Dir) {:glob :[]} ...)` \u2014 top-level `Dir[]`/`Dir.glob`.
+    if !dir_index_or_glob(*node, cx) {
         return false;
     }
     let args = cx.call_arguments(*node);
@@ -256,7 +270,7 @@ fn unsorted_dir_glob(node: &NodeId, cx: &Cx<'_>) -> bool {
     {
         return false;
     }
-    matches!(cx.method_name(*node), Some("[]") | Some("glob"))
+    true
 }
 
 /// Check if `node` itself is an unsorted `Dir.glob(...)` call: at least one
@@ -279,10 +293,8 @@ fn unsorted_dir_self(node: NodeId, cx: &Cx<'_>) -> bool {
 /// Check if `node` is a direct `Dir.glob(...)` call used with a literal
 /// block (`Dir.glob(...) { |f| ... }`). Mirrors `unsorted_dir_block?`.
 fn unsorted_dir_block(node: &NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { .. } = *cx.kind(*node) else {
-        return false;
-    };
-    if !is_dir_const_receiver(*node, cx) {
+    // `(send (const nil? :Dir) :glob ...)` \u2014 top-level `Dir.glob`.
+    if !dir_glob(*node, cx) {
         return false;
     }
     let args = cx.call_arguments(*node);
@@ -297,14 +309,7 @@ fn unsorted_dir_block(node: &NodeId, cx: &Cx<'_>) -> bool {
     {
         return false;
     }
-    cx.method_name(*node) == Some("glob")
-}
-
-/// Check if `node` is a receiver that is the `Dir` global constant or `::Dir`.
-fn is_dir_const_receiver(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.call_receiver(node)
-        .get()
-        .is_some_and(|r| cx.is_global_const(r, "Dir"))
+    true
 }
 
 /// Upstream `loop_variable`: `(args (arg $_))` — the block takes exactly
@@ -847,6 +852,48 @@ mod tests {
             .expect_offense(indoc! {r#"
             Dir["./lib/**/*.rb"].each do |file|
             ^^^^^^^^^^^^^^^^^^^^^^^^^ Sort files before requiring them.
+              require file
+            end
+        "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.4): pin the exact node set
+    // the hand-rolled `is_dir_const_receiver` (`is_global_const(r, "Dir")`)
+    // predicate matches, so the verbatim
+    // `(send (const nil? :Dir) {:glob :[]} ...)` refactor can be proven
+    // equivalent. `::Dir` collapses to `Const{scope:None}` in Murphy, so a
+    // single `nil?` scope covers bare + `::`-prefixed forms (cbase pinned by
+    // `flags_top_level_dir_*`). `&.` is a `csend` node, not `send`; RuboCop\'s
+    // `(send ...)` matchers do not match it, and the explicit `Send` guards
+    // (`identify_dir_call`, `unsorted_dir_glob`, `unsorted_dir_block`) plus
+    // `#[on_node(kind = "send")]` never dispatch on it.
+
+    #[test]
+    fn boundary_ignores_namespaced_dir_each() {
+        // `Foo::Dir` has a non-nil const scope, so it is not flagged.
+        test::<NonDeterministicRequireOrder>().expect_no_offenses(indoc! {r#"
+            Foo::Dir["./lib/**/*.rb"].each do |file|
+              require file
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_dir_glob_block() {
+        // `Foo::Dir.glob` has a non-nil const scope, so it is not flagged.
+        test::<NonDeterministicRequireOrder>().expect_no_offenses(indoc! {r#"
+            Foo::Dir.glob("./lib/**/*.rb") do |file|
+              require file
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_dir_glob_each() {
+        // `&.` is a `csend` node, not `send`; RuboCop\'s `(send ...)` matchers
+        // do not match it, and `#[on_node(kind = "send")]` never dispatches.
+        test::<NonDeterministicRequireOrder>().expect_no_offenses(indoc! {r#"
+            Dir&.glob("./lib/**/*.rb").each do |file|
               require file
             end
         "#});

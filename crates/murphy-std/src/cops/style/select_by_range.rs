@@ -58,7 +58,21 @@
 //! array.grep(1..10).first
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Style/SelectByRange` receiver guards are
+// `env_const?` = `(const {nil? cbase} :ENV)` and the `Hash` head of
+// `creates_hash?` = `(call (const _ :Hash) {:new :[]} ...)` (plus the `to_h`/
+// `to_hash` arms and the `(block (call (const _ :Hash) :new ...) ...)` arm).
+// In Murphy `::ENV` / `::Hash` collapse to `Const{scope:None}`: `nil?` covers
+// bare + `::` for `ENV` (namespaced `Foo::ENV` still flags \u2014 pinned by
+// `flags_namespaced_env_constant`), while `_` covers any scope for `Hash`
+// (namespaced `Foo::Hash` still suppresses \u2014 pinned by
+// `boundary_accepts_namespaced_hash_new`). `call` covers both `send` and
+// `csend`, matching the `Send`/`Csend` arms below (pinned by
+// `boundary_accepts_csend_hash_new`); the `Block` arm stays hand-rolled.
+def_node_matcher!(env_const, "(const nil? :ENV)");
+def_node_matcher!(hash_new_or_index, "(call (const _ :Hash) {:new :[]} ...)");
 
 const MSG: &str = "Prefer `%<replacement>s` to `%<original_method>s` with a range check.";
 
@@ -198,18 +212,22 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
     let Some(receiver) = cx.call_receiver(call).get() else {
         return false;
     };
-    if cx.is_global_const(receiver, "ENV") {
-        // Upstream `env_const?` is `(const {nil? cbase} :ENV)` — only top-level
-        // `ENV` / `::ENV`, not a namespaced `Foo::ENV`.
+    // `(const nil? :ENV)` \u2014 top-level `ENV` / `::ENV` only, per upstream
+    // `env_const?` (namespaced `Foo::ENV` still flags).
+    if env_const(receiver, cx) {
+        return true;
+    }
+    // `(call (const _ :Hash) {:new :[]} ...)` \u2014 `Hash.new` / `Hash[]`
+    // (any scope); `call` covers `send` + `csend`.
+    if hash_new_or_index(receiver, cx) {
         return true;
     }
     match *cx.kind(receiver) {
         NodeKind::Hash(_) => true,
-        NodeKind::Send { receiver: inner, method, .. } => {
-            is_hash_chain(cx.symbol_str(method), inner.get(), cx)
-        }
-        NodeKind::Csend { receiver: inner, method, .. } => {
-            is_hash_chain(cx.symbol_str(method), Some(inner), cx)
+        // `to_h` / `to_hash` (any receiver) stay hand-rolled; `Hash.new` /
+        // `Hash[]` is covered by `hash_new_or_index` above.
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+            matches!(cx.method_name(receiver), Some("to_h" | "to_hash"))
         }
         // `Hash.new { ... }.select { ... }` — the receiver is a block whose
         // call is `Hash.new` (upstream `creates_hash?` block arm).
@@ -219,15 +237,6 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
         }
         _ => false,
     }
-}
-
-/// Whether a send/csend with `method` and `inner` receiver is a hash-producing
-/// chain: `to_h`/`to_hash` (any receiver) or `Hash.new`/`Hash[]`.
-fn is_hash_chain(method: &str, inner: Option<NodeId>, cx: &Cx<'_>) -> bool {
-    if matches!(method, "to_h" | "to_hash") {
-        return true;
-    }
-    matches!(method, "new" | "[]") && inner.is_some_and(|r| is_const_named(r, "Hash", cx))
 }
 
 fn is_const_named(node: NodeId, name: &str, cx: &Cx<'_>) -> bool {
@@ -665,6 +674,41 @@ mod tests {
             "#},
             "array&.grep(1..10)\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.4): pin the exact node set
+    // the hand-rolled `ENV` / `Hash` guards match, so the verbatim
+    // `(const nil? :ENV)` / `(call (const _ :Hash) {:new :[]} ...)` refactor
+    // can be proven equivalent. `::ENV` / `::Hash` collapse to
+    // `Const{scope:None}` in Murphy: `nil?` covers bare + `::` for `ENV`
+    // (namespaced `Foo::ENV` still flags, pinned by
+    // `flags_namespaced_env_constant`), while `_` covers any scope for `Hash`
+    // (namespaced `Foo::Hash` still suppresses, unlike `ENV`). `call` covers
+    // both `send` and `csend`, matching the `Send`/`Csend` arms of
+    // `is_hash_like_receiver`/`is_hash_chain` (the `Block` arm stays
+    // hand-rolled below).
+
+    #[test]
+    fn boundary_accepts_cbase_hash_new() {
+        // `::Hash` collapses to scope-less `Const`, so wildcard `_` matches.
+        test::<SelectByRange>()
+            .expect_no_offenses("::Hash.new.select { |x| x.between?(1, 10) }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_hash_new() {
+        // Upstream `(const _ :Hash)` matches any scope, so `Foo::Hash` still
+        // suppresses (unlike `ENV`, where namespaced flags).
+        test::<SelectByRange>()
+            .expect_no_offenses("Foo::Hash.new.select { |x| x.between?(1, 10) }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_hash_new() {
+        // `&.` is a `csend` node; `call` covers both dispatch kinds and both
+        // `Send`/`Csend` arms suppress, so it stays suppressed.
+        test::<SelectByRange>()
+            .expect_no_offenses("Hash&.new.select { |x| x.between?(1, 10) }\n");
     }
 }
 
