@@ -18,6 +18,13 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the fetch call head (call _ :fetch ...) (murphy-s1yc.10):
+//!   call covers safe-navigation (h&.fetch), mirroring RuboCop alias on_csend
+//!   on_send plus RESTRICT_ON_SEND fetch; the wildcard receiver binds an absent
+//!   or present receiver per murphy-if9y; trailing ... absorbs any argument list
+//!   (the receiver-present plus key-default plus chain guards below apply
+//!   separately, mirroring upstream diggable with key arg and nil, empty-hash,
+//!   or Hash.new default).
 //!   Both Send and Csend (safe-navigation) variants are handled.
 //!   Known v1 limitation: no per-cop file-pattern gating — the cop fires
 //!   on all `.rb` files, not only those that use hash patterns.
@@ -52,7 +59,16 @@
 //! a `Hash` or that `fetch` or `dig` have the expected standard
 //! implementation.
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// Verbatim port of the `fetch` call head (murphy-s1yc.10):
+// `(call _ :fetch ...)` — `call` = `{send csend}` covers safe-navigation
+// (`h&.fetch`), mirroring RuboCop alias on_csend on_send plus RESTRICT_ON_SEND.
+// The `_` receiver binds an absent or present receiver per murphy-if9y;
+// trailing `...` absorbs any argument list, so the receiver-present plus
+// key-default plus chain guards below apply separately (mirroring upstream
+// diggable head with key arg and nil-hash-Hash.new default).
+def_node_matcher!(fetch_chain_call, "(call _ :fetch ...)");
 
 #[derive(Default)]
 pub struct HashFetchChain;
@@ -65,16 +81,13 @@ pub struct HashFetchChain;
     options = NoOptions,
 )]
 impl HashFetchChain {
-    #[on_node(kind = "send", methods = ["fetch"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) != Some("fetch") {
-            return;
-        }
         check(node, cx);
     }
 }
@@ -171,6 +184,17 @@ fn collect_chain(node: NodeId, cx: &Cx<'_>) -> Option<(u32, Vec<NodeId>)> {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim (call _ :fetch ...) head: filters to fetch calls on either
+    // send or csend (safe-navigation), with any receiver (absent or present).
+    // Trailing ... matches any arg list, so the receiver-present plus key-default
+    // plus chain guards below apply separately. Without this, a trailing non-fetch
+    // call over a diggable chain would run check on the outer call, whose receiver
+    // is the lone diggable fetch, and a one-key chain gets flagged with a bogus
+    // dig replacement.
+    if !fetch_chain_call(node, cx) {
+        return;
+    }
+
     if is_inner_chain_fetch(node, cx) {
         return;
     }
@@ -293,6 +317,42 @@ mod tests {
     #[test]
     fn accepts_non_fetch_method() {
         test::<HashFetchChain>().expect_no_offenses("h.fetch('foo', nil).bar('baz')\n");
+    }
+
+    // --- Characterization (murphy-s1yc.10): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // (call _ :fetch ...) port can be proven byte-identical. (call _ :fetch ...)
+    // covers safe-navigation; trailing ... absorbs any arg list with the
+    // receiver-present plus key-default plus chain guards separate.
+
+    #[test]
+    fn s1yc10_flags_pure_csend_chain_corrects() {
+        // Pure csend chain: call covers csend.
+        test::<HashFetchChain>().expect_correction(
+            indoc! {r#"
+                h&.fetch('foo', nil)&.fetch('bar', nil)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `dig('foo', 'bar')` instead.
+            "#},
+            "h&.dig('foo', 'bar')\n",
+        );
+    }
+
+    #[test]
+    fn s1yc10_accepts_no_arg_fetch() {
+        // No-arg h.fetch: ... matches zero args, the key-default guard rejects.
+        test::<HashFetchChain>().expect_no_offenses("h.fetch\n");
+    }
+
+    #[test]
+    fn s1yc10_accepts_bare_fetch_chain() {
+        // Bare chain: inner bare fetch has no receiver so the chain guard rejects.
+        test::<HashFetchChain>().expect_no_offenses("fetch('foo', nil).fetch('bar', nil)\n");
+    }
+
+    #[test]
+    fn s1yc10_accepts_unrelated_method() {
+        // h.foo: matcher rejects non-fetch method.
+        test::<HashFetchChain>().expect_no_offenses("h.foo('bar', nil)\n");
     }
 }
 murphy_plugin_api::submit_cop!(HashFetchChain);
