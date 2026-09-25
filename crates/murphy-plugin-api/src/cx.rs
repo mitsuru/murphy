@@ -2968,7 +2968,7 @@ impl<'a> Cx<'a> {
 
             let is_all = group.iter().any(|d| d.cop.is_none());
             match d0.kind {
-                CommentDirectiveKind::Disable => {
+                CommentDirectiveKind::Disable | CommentDirectiveKind::Todo => {
                     if is_all {
                         disable_all_depth += 1;
                     } else {
@@ -3028,7 +3028,6 @@ impl<'a> Cx<'a> {
                         }
                     }
                 }
-                CommentDirectiveKind::Todo => {}
             }
         }
         out
@@ -3161,7 +3160,7 @@ impl<'a> Cx<'a> {
 
             let is_all = group.iter().any(|d| d.cop.is_none());
             match d0.kind {
-                CommentDirectiveKind::Disable => {
+                CommentDirectiveKind::Disable | CommentDirectiveKind::Todo => {
                     if is_all {
                         for name in &all_expansion {
                             *count.entry(name.clone()).or_insert(0) += 1;
@@ -3288,7 +3287,6 @@ impl<'a> Cx<'a> {
                         }
                     }
                 }
-                CommentDirectiveKind::Todo => {}
             }
         }
         out
