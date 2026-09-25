@@ -1,10 +1,12 @@
 mod checkstyle;
 mod github;
 mod gnu;
+mod html;
 mod human;
 mod json;
 mod junit;
 mod locations;
+mod markdown;
 mod progress;
 mod sarif;
 mod tap;
@@ -12,12 +14,14 @@ mod xml;
 
 use murphy_core::Offense;
 
-/// Machine/CI output formats for `murphy lint --format`.
+/// Output formats for `murphy lint --format`.
 ///
 /// `Human` (default), `Json` (ADR 0006 frozen contract), and `Progress` are
 /// pre-existing. The six B7 additions are `Checkstyle`, `Sarif`, `Junit`,
-/// `Github`, `Gnu`, and `Tap`. Adding variants never changes the `Json`
-/// byte shape (`json::format` is untouched).
+/// `Github`, `Gnu`, and `Tap` (machine/CI-readable). The two B9 additions
+/// are `Html` and `Markdown` (human/PR-review reports, rubycritic-equivalent).
+/// Adding variants never changes the `Json` byte shape (`json::format` is
+/// untouched).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Human,
@@ -29,6 +33,8 @@ pub enum OutputFormat {
     Github,
     Gnu,
     Tap,
+    Html,
+    Markdown,
 }
 
 pub fn format_lint_output(
@@ -46,5 +52,7 @@ pub fn format_lint_output(
         OutputFormat::Github => github::format(offenses, files),
         OutputFormat::Gnu => gnu::format(offenses, files),
         OutputFormat::Tap => tap::format(offenses, files),
+        OutputFormat::Html => html::format(offenses, files),
+        OutputFormat::Markdown => markdown::format(offenses, files),
     }
 }

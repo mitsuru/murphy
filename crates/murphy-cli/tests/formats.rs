@@ -92,6 +92,33 @@ fn cli_format_tap_is_tap() {
 }
 
 #[test]
+fn cli_format_html_is_report() {
+    let dir = setup_dirty();
+    let (stdout, _, code) = lint_with_format(dir.path(), "html");
+    assert_eq!(code, 1);
+    let s = String::from_utf8_lossy(&stdout);
+    assert!(s.contains("<!DOCTYPE html>"), "got: {s}");
+    assert!(s.contains("Murphy report"), "got: {s}");
+    assert!(s.contains("Lint/Debugger"), "got: {s}");
+    // B4-enriched lint output links the cop to its docs URL.
+    assert!(
+        s.contains("https://murphy.dev/docs/cops/Lint/Debugger"),
+        "got: {s}"
+    );
+}
+
+#[test]
+fn cli_format_markdown_is_report() {
+    let dir = setup_dirty();
+    let (stdout, _, code) = lint_with_format(dir.path(), "markdown");
+    assert_eq!(code, 1);
+    let s = String::from_utf8_lossy(&stdout);
+    assert!(s.contains("# Murphy report"), "got: {s}");
+    assert!(s.contains("Lint/Debugger"), "got: {s}");
+    assert!(s.contains("| dirty.rb |"), "got: {s}");
+}
+
+#[test]
 fn cli_format_json_stays_frozen() {
     let dir = setup_dirty();
     let (stdout, _, code) = lint_with_format(dir.path(), "json");
@@ -102,11 +129,23 @@ fn cli_format_json_stays_frozen() {
     assert_eq!(o["cop_name"], "Lint/Debugger");
     assert!(o.get("range").is_some());
     assert_eq!(o["severity"], "warning");
-    // Frozen ADR 0006 shape: exactly these keys when no autocorrect.
+    // Frozen ADR 0006 core shape + B4 extend-only enrichment
+    // (murphy-fmw.2.4): real lint output carries `documentation_url` /
+    // `rationale` / `fix_example`; the five core keys keep their values.
+    // Exactly these keys when no autocorrect.
     let mut keys: Vec<&str> = o.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort();
     assert_eq!(
         keys,
-        vec!["cop_name", "file", "message", "range", "severity"]
+        vec![
+            "cop_name",
+            "documentation_url",
+            "file",
+            "fix_example",
+            "message",
+            "range",
+            "rationale",
+            "severity"
+        ]
     );
 }
