@@ -183,10 +183,11 @@ pub fn resolve_plugin_name(
     if let Some(gem_cdylib) = find_gem_pack(name) {
         return Ok(gem_cdylib);
     }
-    // Layer 3: user-local.
+    // Layer 3: user-local (`$MURPHY_USER_PLUGINS_DIR` override else
+    // `dirs::data_dir()/murphy/plugins/`; see `plugin_install`).
     let mut late_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(data) = dirs::data_dir() {
-        late_dirs.push(data.join("murphy/plugins"));
+    if let Some(dir) = crate::plugin_install::user_plugins_dir() {
+        late_dirs.push(dir);
     }
     if let Ok(hit) = resolve_plugin_name_with_search_dirs(name, &empty, &late_dirs) {
         return Ok(hit);
