@@ -9,12 +9,16 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the outer call head (call _ {:lstrip :rstrip} ...) (murphy-s1yc.11):
+//!   call covers safe-navigation (x&.lstrip), mirroring RuboCop alias on_csend
+//!   on_send plus RESTRICT_ON_SEND lstrip/rstrip; the wildcard receiver binds an
+//!   absent or present receiver per murphy-if9y; trailing ... absorbs any argument
+//!   list (the complementary plus no-args plus mixed-csend plus block guards below
+//!   apply separately, mirroring upstream lstrip_rstrip with no-arg inner/outer).
 //!   Matches `lstrip.rstrip` and `rstrip.lstrip` chains in both send and csend
 //!   variants. Offense range covers from the inner method name to the end of the
 //!   outer call, matching RuboCop's range_between(first_send.loc.selector,
 //!   node.source_range.end). Autocorrect replaces the range with `strip`.
-//!   csend: methods filter is not supported for csend nodes by the macro;
-//!   the csend handler dispatches manually based on method name.
 //!   Mixed csend/send combinations: `x&.lstrip.rstrip` (inner csend, outer
 //!   send) is skipped entirely. When x is nil, x&.lstrip returns nil and
 //!   nil.rstrip raises NoMethodError, but autocorrecting to x&.strip would
@@ -47,7 +51,16 @@
 //! Replace the `<inner>.<outer>` range with `strip`.
 //! The receiver is preserved byte-for-byte.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, cop, def_node_matcher};
+
+// Verbatim port of the outer `lstrip`/`rstrip` call head (murphy-s1yc.11):
+// `(call _ {:lstrip :rstrip} ...)` — `call` = `{send csend}` covers safe-navigation
+// (`x&.lstrip`), mirroring RuboCop alias on_csend on_send plus RESTRICT_ON_SEND.
+// The `_` receiver binds an absent or present receiver per murphy-if9y;
+// trailing `...` absorbs any argument list, so the complementary plus no-args
+// plus mixed-csend plus block guards below apply separately (mirroring upstream
+// lstrip_rstrip with no-arg inner/outer).
+def_node_matcher!(strip_outer_call, "(call _ {:lstrip :rstrip} ...)");
 
 const MSG: &str = "Use `strip` instead of `%s`.";
 
@@ -63,23 +76,29 @@ pub struct Strip;
     options = NoOptions,
 )]
 impl Strip {
-    #[on_node(kind = "send", methods = ["lstrip", "rstrip"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
-    /// csend: `methods = [...]` is not supported for `kind = "csend"` by the
-    /// macro, so we dispatch manually here.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let method = cx.method_name(node).unwrap_or_default();
-        if method == "lstrip" || method == "rstrip" {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(outer: NodeId, cx: &Cx<'_>) {
+    // Verbatim (call _ {:lstrip :rstrip} ...) head: filters to lstrip/rstrip calls
+    // on either send or csend (safe-navigation), with any receiver (absent or
+    // present). Trailing ... matches any arg list, so the complementary plus
+    // no-args plus mixed-csend plus block guards below apply separately. Without
+    // this, an unrelated outer call over a lstrip/rstrip receiver (e.g.
+    // x.lstrip.foo) would run check on the outer call and could flag a bogus
+    // strip replacement.
+    if !strip_outer_call(outer, cx) {
+        return;
+    }
+
     let outer_method = cx.method_name(outer).unwrap_or_default();
 
     // The outer call must have a receiver that is itself a lstrip/rstrip call.
@@ -241,6 +260,55 @@ mod tests {
     #[test]
     fn accepts_csend_rstrip_send_lstrip() {
         test::<Strip>().expect_no_offenses("x&.rstrip.lstrip\n");
+    }
+
+    // --- Characterization (murphy-s1yc.11): pin the exact node set the
+    // hand-rolled send-methods plus manual csend dispatch matches, so the
+    // verbatim (call _ {:lstrip :rstrip} ...) port can be proven
+    // byte-identical. (call _ ...) covers safe-navigation; trailing ...
+    // absorbs any arg list with the complementary plus no-args plus
+    // mixed-csend plus block guards separate.
+
+    #[test]
+    fn s1yc11_flags_pure_csend_chain_corrects() {
+        // Pure csend chain: call covers csend.
+        test::<Strip>().expect_correction(
+            indoc! {r#"
+                x&.lstrip&.rstrip
+                   ^^^^^^^^^^^^^^ Use `strip` instead of `lstrip&.rstrip`.
+            "#},
+            "x&.strip\n",
+        );
+    }
+
+    #[test]
+    fn s1yc11_flags_inner_send_outer_csend_corrects() {
+        // Inner send, outer csend: x.lstrip always returns String so &. is redundant.
+        test::<Strip>().expect_correction(
+            indoc! {r#"
+                x.lstrip&.rstrip
+                  ^^^^^^^^^^^^^^ Use `strip` instead of `lstrip&.rstrip`.
+            "#},
+            "x.strip\n",
+        );
+    }
+
+    #[test]
+    fn s1yc11_flags_bare_chain_corrects() {
+        // Bare chain: _ binds absent receiver per murphy-if9y.
+        test::<Strip>().expect_correction(
+            indoc! {r#"
+                lstrip.rstrip
+                ^^^^^^^^^^^^^ Use `strip` instead of `lstrip.rstrip`.
+            "#},
+            "strip\n",
+        );
+    }
+
+    #[test]
+    fn s1yc11_accepts_unrelated_method() {
+        // x.lstrip.foo: outer method not in {lstrip rstrip}, matcher rejects.
+        test::<Strip>().expect_no_offenses("x.lstrip.foo\n");
     }
 }
 murphy_plugin_api::submit_cop!(Strip);
