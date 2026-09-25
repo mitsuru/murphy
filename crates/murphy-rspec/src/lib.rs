@@ -13,6 +13,10 @@
 //! - `RSpec/BeforeAfterAll` — avoid `before(:all)` / `after(:context)` (murphy-4gd.3.2).
 //! - `RSpec/Be` — flag bare `be` without argument (murphy-4gd.3.2).
 //! - `RSpec/BeEql` — prefer `be` over `eql` for identity literals (murphy-4gd.3.2).
+//! - `RSpec/BeEmpty` — prefer `be_empty` for empty-array checks (murphy-4gd.3.3).
+//! - `RSpec/BeEq` — prefer `be` over `eq` for booleans/nil (murphy-4gd.3.3).
+//! - `RSpec/BeNil` — consistent `nil` matching style (murphy-4gd.3.3).
+//! - `RSpec/Eq` — use `eq` instead of `be ==` (murphy-4gd.3.3).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
