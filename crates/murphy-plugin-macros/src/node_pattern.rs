@@ -537,6 +537,15 @@ enum SlotTy {
     ///
     /// [`OptNode`]: SlotTy::OptNode
     RecvOptNode,
+    /// Nil-filled `OptNodeId` slot (murphy-av7j). Same semantics as
+    /// [`RecvOptNode`] — bare `_` (and `nil?`) matches an absent slot, `$_`
+    /// still requires a present node — for the remaining RuboCop nil-filled
+    /// slots: `Const` scope, `If` branches, `Case` subject. Plain [`OptNode`]
+    /// stays for omitted slots (`return`/`break`/`next` value, `Block` body).
+    ///
+    /// [`RecvOptNode`]: SlotTy::RecvOptNode
+    /// [`OptNode`]: SlotTy::OptNode
+    NilFilledOptNode,
     /// `Symbol` field — accepts `_`, a single `:sym` literal, or a
     /// `{:a :b ...}` union of `:sym` literals (murphy-rs7).
     Sym,
@@ -652,7 +661,7 @@ static BLOCK_SLOTS: &[Slot] = &[
 static CONST_SLOTS: &[Slot] = &[
     Slot {
         field: FieldRef::Named("scope"),
-        ty: SlotTy::OptNode,
+        ty: SlotTy::NilFilledOptNode,
     },
     Slot {
         field: FieldRef::Named("name"),
@@ -682,34 +691,46 @@ static IF_SLOTS: &[Slot] = &[
     },
     Slot {
         field: FieldRef::Named("then_"),
-        ty: SlotTy::OptNode,
+        ty: SlotTy::NilFilledOptNode,
     },
     Slot {
         field: FieldRef::Named("else_"),
-        ty: SlotTy::OptNode,
+        ty: SlotTy::NilFilledOptNode,
     },
 ];
 // `Case { subject, whens: NodeList, else_: OptNodeId }`: `else_` follows the
-// `NodeList`, but the v1 slot convention allows at most one trailing `List`.
-// `else_` is therefore omitted from the schema (covers_all_fields = false)
-// and cannot be referenced from a pattern.
+// `NodeList`. v1 omitted it to keep one trailing `List`
+// (`covers_all_fields = false`); murphy-av7j exposes it as a trailing
+// `NilFilledOptNode` after the `List` (List-middle), since RuboCop renders a
+// missing `else` as nil. Old `(case _ ...)` patterns keep matching by ignoring
+// the trailing slot (see `lower_exact_node`).
 static CASE_SLOTS: &[Slot] = &[
     Slot {
         field: FieldRef::Named("subject"),
-        ty: SlotTy::OptNode,
+        ty: SlotTy::NilFilledOptNode,
     },
     Slot {
         field: FieldRef::Named("whens"),
         ty: SlotTy::List,
     },
+    Slot {
+        field: FieldRef::Named("else_"),
+        ty: SlotTy::NilFilledOptNode,
+    },
 ];
-// `When { conds: NodeList, body: OptNodeId }`: `body` follows the `NodeList`,
-// so it is omitted (covers_all_fields = false) for the same reason as
-// `Case::else_`.
-static WHEN_SLOTS: &[Slot] = &[Slot {
-    field: FieldRef::Named("conds"),
-    ty: SlotTy::List,
-}];
+// `When { conds: NodeList, body: OptNodeId }`: `body` follows the `NodeList`.
+// Same List-middle exposure as `Case::else_` above (murphy-av7j). Old
+// `(when ...)` patterns keep matching by ignoring `body`.
+static WHEN_SLOTS: &[Slot] = &[
+    Slot {
+        field: FieldRef::Named("conds"),
+        ty: SlotTy::List,
+    },
+    Slot {
+        field: FieldRef::Named("body"),
+        ty: SlotTy::NilFilledOptNode,
+    },
+];
 // `Return(OptNodeId)`: single tuple field, arity 1, index 0.
 static RETURN_SLOTS: &[Slot] = &[Slot {
     field: FieldRef::Pos(1, 0),
@@ -958,22 +979,23 @@ static SCHEMA_TABLE: &[(u8, KindSchema)] = &[
         },
     ),
     (
-        // `Case` omits `else_`: it follows the `whens` NodeList, and v1
-        // allows at most one trailing `List` slot.
+        // `Case` exposes `else_` as a trailing `NilFilledOptNode` after the
+        // `whens` `List` (List-middle, murphy-av7j). All fields covered.
         26,
         KindSchema {
             variant: "Case",
             slots: CASE_SLOTS,
-            covers_all_fields: false,
+            covers_all_fields: true,
         },
     ),
     (
-        // `When` omits `body`: it follows the `conds` NodeList.
+        // `When` exposes `body` as a trailing `NilFilledOptNode` after the
+        // `conds` `List` (List-middle, murphy-av7j). All fields covered.
         27,
         KindSchema {
             variant: "When",
             slots: WHEN_SLOTS,
-            covers_all_fields: false,
+            covers_all_fields: true,
         },
     ),
     (
@@ -1642,15 +1664,21 @@ fn exact_node_accepts_children(
     let Some(schema) = schema_for(tag.0) else {
         return false;
     };
-    let has_list = schema
-        .slots
-        .last()
-        .is_some_and(|s| matches!(s.ty, SlotTy::List));
-    let fixed_count = schema.slots.len() - usize::from(has_list);
-    if children.len() < fixed_count {
-        return false;
+    // `List` may be trailing (most kinds) or middle (`Case`/`When` expose a
+    // trailing `NilFilledOptNode` after the `List`, murphy-av7j).
+    let has_list = schema.slots.iter().any(|s| matches!(s.ty, SlotTy::List));
+    if !has_list {
+        return children.len() == schema.slots.len();
     }
-    has_list || children.len() == fixed_count
+    // With a `List`, any count `>= fixed_before` is structurally acceptable;
+    // `lower_exact_node` decides old (trailing ignored) vs new (trailing
+    // explicit) by the `fixed_before + 1` heuristic (see below).
+    let list_idx = schema
+        .slots
+        .iter()
+        .position(|s| matches!(s.ty, SlotTy::List))
+        .expect("has_list");
+    children.len() >= list_idx
 }
 
 /// Whether the structural schema for `tag` can accept `children` in a
@@ -1816,12 +1844,23 @@ fn lower_exact_node(
     // 1. Look up the per-NodeKind structural schema.
     let schema = schema_for(tag.0).ok_or_else(|| unsupported_node_match_error(tag))?;
 
-    // Split the schema into fixed slots and an optional trailing `List`.
-    let has_list = schema
+    // Split the schema into fixed prefix + optional `List` (trailing or middle
+    // for `Case`/`When`, murphy-av7j) + fixed suffix.
+    let list_idx = schema
         .slots
-        .last()
-        .is_some_and(|s| matches!(s.ty, SlotTy::List));
-    let fixed_count = schema.slots.len() - usize::from(has_list);
+        .iter()
+        .position(|s| matches!(s.ty, SlotTy::List));
+    let (fixed_before, fixed_after, has_list) = match list_idx {
+        None => (schema.slots.len(), 0, false),
+        Some(li) => (li, schema.slots.len() - li - 1, true),
+    };
+
+    // Old patterns without an explicit trailing slot (e.g. `(case _ ...)` or
+    // `(when ...)`) keep matching by ignoring the trailing `NilFilledOptNode`
+    // (backwards compat). New patterns with `> fixed_before + 1` children name
+    // the trailing slot(s) explicitly. For List-last schemas (`fixed_after == 0`)
+    // both routes coincide. Mirrors the C interpreter's heuristic.
+    let use_trailing = has_list && fixed_after > 0 && children.len() > fixed_before + 1;
 
     // 2. Child-count checks. A rest-like element among the `List`-slot
     //    children stands for zero-or-more nodes, so when a `List` slot is
@@ -1830,42 +1869,139 @@ fn lower_exact_node(
     //    are not special-cased here: they flow into `lower_fixed_slot`, which
     //    rejects them. `...` reaching a `List`-less node also reaches a fixed
     //    slot and is rejected the same way.
-    if children.len() < fixed_count {
+    if !has_list {
+        if children.len() != schema.slots.len() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "def_node_matcher!: wrong number of children",
+            ));
+        }
+        let bindings: Vec<Ident> = schema.slots.iter().map(|_| gensym(ctx, "__b")).collect();
+        let mut guards: Vec<TokenStream> = vec![build_destructure(schema, &bindings, subject, ctx)];
+        for (slot, (bind, child)) in schema.slots.iter().zip(bindings.iter().zip(children)) {
+            guards.push(lower_fixed_slot(slot.ty, bind, child, ctx)?);
+        }
+        return Ok(quote!({ #(#guards)* }));
+    }
+    if children.len() < fixed_before {
         return Err(syn::Error::new(
             Span::call_site(),
             "def_node_matcher!: too few children",
         ));
     }
-    if !has_list && children.len() != fixed_count {
+    if use_trailing && children.len() < fixed_before + fixed_after {
         return Err(syn::Error::new(
             Span::call_site(),
-            "def_node_matcher!: wrong number of children",
+            "def_node_matcher!: too few children",
         ));
     }
 
-    // 3. Allocate a fresh binding ident per slot and build the destructuring.
+    // 3. Allocate bindings and build the destructuring. Old List-middle patterns
+    // (trailing ignored) bind the trailing field(s) as `_` to avoid unused
+    // bindings; new patterns and List-last bind all.
     let bindings: Vec<Ident> = schema.slots.iter().map(|_| gensym(ctx, "__b")).collect();
-    let mut guards: Vec<TokenStream> = vec![build_destructure(schema, &bindings, subject, ctx)];
+    let mut guards: Vec<TokenStream> = if !use_trailing && fixed_after > 0 {
+        vec![build_destructure_ignoring_trailing(
+            schema,
+            &bindings,
+            fixed_before,
+            subject,
+            ctx,
+        )]
+    } else {
+        vec![build_destructure(schema, &bindings, subject, ctx)]
+    };
 
-    // 4. Match each fixed slot against its pattern child.
+    // 4. Prefix fixed slots.
     for (slot, (bind, child)) in schema
         .slots
         .iter()
-        .take(fixed_count)
+        .take(fixed_before)
         .zip(bindings.iter().zip(children))
     {
         guards.push(lower_fixed_slot(slot.ty, bind, child, ctx)?);
     }
 
-    // 5. A trailing `List` slot consumes the remaining children, including a
-    //    `...` / `$...` rest-like element among them.
-    if has_list {
-        let list_bind = &bindings[bindings.len() - 1];
-        let list_children = &children[fixed_count..];
+    // 5. `List` slot consumes its slice, including `...` / `$...`.
+    let li = list_idx.expect("has_list");
+    let list_bind = &bindings[li];
+    if use_trailing {
+        let list_end = children.len() - fixed_after;
+        let list_children = &children[fixed_before..list_end];
+        guards.push(lower_trailing_list(list_bind, list_children, ctx)?);
+        // 6. Trailing fixed slots.
+        let trailing_slots = &schema.slots[li + 1..];
+        let trailing_binds = &bindings[li + 1..];
+        let trailing_children = &children[list_end..];
+        debug_assert_eq!(trailing_slots.len(), trailing_children.len());
+        for (slot, (bind, child)) in trailing_slots
+            .iter()
+            .zip(trailing_binds.iter().zip(trailing_children))
+        {
+            guards.push(lower_fixed_slot(slot.ty, bind, child, ctx)?);
+        }
+    } else {
+        let list_children = &children[fixed_before..];
         guards.push(lower_trailing_list(list_bind, list_children, ctx)?);
     }
 
     Ok(quote!({ #(#guards)* }))
+}
+
+/// Build a destructuring that binds prefix + `List` but ignores trailing
+/// fixed field(s) as `_` (for old List-middle patterns like `(case _ ...)`
+/// that predate the trailing `else_`/`body` exposure, murphy-av7j). Avoids
+/// unused-binding warnings for the ignored trailing slot(s).
+fn build_destructure_ignoring_trailing(
+    schema: &KindSchema,
+    bindings: &[Ident],
+    fixed_before: usize,
+    subject: &TokenStream,
+    ctx: &Lower,
+) -> TokenStream {
+    use proc_macro2::Span as PmSpan;
+    let variant = Ident::new(schema.variant, PmSpan::call_site());
+    let fail = fail_stmt(ctx);
+    let list_idx = schema
+        .slots
+        .iter()
+        .position(|s| matches!(s.ty, SlotTy::List))
+        .expect("ignoring trailing requires a List slot");
+    let field_pats: Vec<TokenStream> = schema
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            // Prefix + List bind normally; trailing fixed bind as `_`.
+            let bind: TokenStream = if i <= list_idx {
+                let b = &bindings[i];
+                // `fixed_before` prefix slots + List slot itself (at `list_idx`).
+                // `i <= list_idx` covers both (since `list_idx == fixed_before`).
+                let _ = fixed_before;
+                quote!(#b)
+            } else {
+                quote!(_)
+            };
+            match slot.field {
+                FieldRef::Named(name) => {
+                    let f = Ident::new(name, PmSpan::call_site());
+                    quote!(#f: #bind)
+                }
+                FieldRef::Pos(arity, index) => {
+                    let holes =
+                        (0..arity).map(|j| if j == index { bind.clone() } else { quote!(_) });
+                    quote!(#(#holes),*)
+                }
+            }
+        })
+        .collect();
+    // `Case`/`When` now cover all fields, so no `..` needed even when ignoring
+    // trailing (we bind it as `_` explicitly).
+    quote! {
+        let ::murphy_plugin_api::NodeKind::#variant { #(#field_pats),* } = *cx.kind(#subject) else {
+            #fail
+        };
+    }
 }
 
 /// Build the `let NodeKind::Variant { .. } = *cx.kind(subject) else { fail };`
@@ -1933,14 +2069,17 @@ fn lower_fixed_slot(
     let fail = fail_stmt(ctx);
     match ty {
         SlotTy::Node => lower_pat(child, &quote!(#bind), ctx),
-        SlotTy::OptNode | SlotTy::RecvOptNode => {
-            // `Send`'s receiver (`RecvOptNode`) is a nil-filled slot in RuboCop
-            // (`(send nil :m)`), so a bare `_` wildcard matches an absent
-            // (receiverless) receiver — emit no guard. `$_` is a
-            // `PatKind::Capture`, not `Wildcard`, so it falls through and still
-            // requires a present receiver. Plain `OptNode` slots (e.g. a
-            // `return` value, which RuboCop omits) keep `_` require-present.
-            if matches!(ty, SlotTy::RecvOptNode) && matches!(child.kind, PatKind::Wildcard) {
+        SlotTy::OptNode | SlotTy::RecvOptNode | SlotTy::NilFilledOptNode => {
+            // `RecvOptNode` (`Send` receiver, murphy-if9y) and `NilFilledOptNode`
+            // (const scope / if branches / case subject, murphy-av7j) are
+            // nil-filled slots in RuboCop, so a bare `_` wildcard matches an
+            // absent slot — emit no guard. `$_` is a `PatKind::Capture`, not
+            // `Wildcard`, so it falls through and still requires a present
+            // slot. Plain `OptNode` slots (e.g. a `return` value, which RuboCop
+            // omits) keep `_` require-present.
+            if matches!(ty, SlotTy::RecvOptNode | SlotTy::NilFilledOptNode)
+                && matches!(child.kind, PatKind::Wildcard)
+            {
                 return Ok(quote!());
             }
             if matches!(child.kind, PatKind::NilTest) {
@@ -2921,11 +3060,31 @@ fn lower_bool_anyorder_probe_exact_node(
 ) -> syn::Result<TokenStream> {
     let schema = schema_for(tag.0).ok_or_else(|| unsupported_node_match_error(tag))?;
 
-    let has_list = schema
+    // `List` may be trailing or middle (`Case`/`When` expose trailing
+    // `NilFilledOptNode` after the `List`, murphy-av7j). Same old/new heuristic
+    // as `lower_exact_node`/C interpreter: old List-middle patterns (trailing
+    // ignored) have `<= fixed_before + 1` children; new (trailing explicit)
+    // have more. In bool context (`{}`/`!`/backtick) variable-length `List`
+    // is unsupported, and new List-middle always carries a non-empty `List`,
+    // so new patterns error here (preserving the pre-av7j `variable-length`
+    // error for `List` patterns in bool).
+    let list_idx = schema
         .slots
-        .last()
-        .is_some_and(|s| matches!(s.ty, SlotTy::List));
-    let fixed_count = schema.slots.len() - usize::from(has_list);
+        .iter()
+        .position(|s| matches!(s.ty, SlotTy::List));
+    let (fixed_before, fixed_after, has_list) = match list_idx {
+        None => (schema.slots.len(), 0, false),
+        Some(li) => (li, schema.slots.len() - li - 1, true),
+    };
+    let use_trailing = has_list && fixed_after > 0 && children.len() > fixed_before + 1;
+    if use_trailing {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "def_node_matcher!: a node pattern with a variable-length child \
+             list is not supported inside `{}` / `!` / `` ` `` in v1",
+        ));
+    }
+    let fixed_count = fixed_before;
 
     if children.len() < fixed_count {
         return Err(syn::Error::new(
@@ -3032,11 +3191,13 @@ fn lower_bool_anyorder_probe_fixed_slot(
     use murphy_pattern::PatKind;
     match ty {
         SlotTy::Node => lower_bool_anyorder_probe(child, &quote!(#bind), ctx),
-        SlotTy::OptNode | SlotTy::RecvOptNode => {
-            // `RecvOptNode` (`Send` receiver) treats a bare `_` as matching an
-            // absent receiver (murphy-if9y); `$_` is a `Capture`, not a
-            // `Wildcard`, so it still requires a present slot.
-            if matches!(ty, SlotTy::RecvOptNode) && matches!(child.kind, PatKind::Wildcard) {
+        SlotTy::OptNode | SlotTy::RecvOptNode | SlotTy::NilFilledOptNode => {
+            // `RecvOptNode` (murphy-if9y) and `NilFilledOptNode` (murphy-av7j)
+            // treat a bare `_` as matching an absent slot; `$_` is a `Capture`,
+            // not a `Wildcard`, so it still requires a present slot.
+            if matches!(ty, SlotTy::RecvOptNode | SlotTy::NilFilledOptNode)
+                && matches!(child.kind, PatKind::Wildcard)
+            {
                 return Ok(quote!(true));
             }
             if matches!(child.kind, PatKind::NilTest) {
@@ -3605,11 +3766,31 @@ fn lower_bool_exact_node(
 ) -> syn::Result<TokenStream> {
     let schema = schema_for(tag.0).ok_or_else(|| unsupported_node_match_error(tag))?;
 
-    let has_list = schema
+    // `List` may be trailing or middle (`Case`/`When` expose trailing
+    // `NilFilledOptNode` after the `List`, murphy-av7j). Same old/new heuristic
+    // as `lower_exact_node`/C interpreter: old List-middle patterns (trailing
+    // ignored) have `<= fixed_before + 1` children; new (trailing explicit)
+    // have more. In bool context (`{}`/`!`/backtick) variable-length `List`
+    // is unsupported, and new List-middle always carries a non-empty `List`,
+    // so new patterns error here (preserving the pre-av7j `variable-length`
+    // error for `List` patterns in bool).
+    let list_idx = schema
         .slots
-        .last()
-        .is_some_and(|s| matches!(s.ty, SlotTy::List));
-    let fixed_count = schema.slots.len() - usize::from(has_list);
+        .iter()
+        .position(|s| matches!(s.ty, SlotTy::List));
+    let (fixed_before, fixed_after, has_list) = match list_idx {
+        None => (schema.slots.len(), 0, false),
+        Some(li) => (li, schema.slots.len() - li - 1, true),
+    };
+    let use_trailing = has_list && fixed_after > 0 && children.len() > fixed_before + 1;
+    if use_trailing {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "def_node_matcher!: a node pattern with a variable-length child \
+             list is not supported inside `{}` / `!` / `` ` `` in v1",
+        ));
+    }
+    let fixed_count = fixed_before;
 
     if children.len() < fixed_count {
         return Err(syn::Error::new(
@@ -3717,11 +3898,13 @@ fn lower_bool_fixed_slot(
     use murphy_pattern::PatKind;
     match ty {
         SlotTy::Node => lower_bool(child, &quote!(#bind), ctx),
-        SlotTy::OptNode | SlotTy::RecvOptNode => {
-            // `RecvOptNode` (`Send` receiver) treats a bare `_` as matching an
-            // absent receiver (murphy-if9y); `$_` is a `Capture`, not a
-            // `Wildcard`, so it still requires a present slot.
-            if matches!(ty, SlotTy::RecvOptNode) && matches!(child.kind, PatKind::Wildcard) {
+        SlotTy::OptNode | SlotTy::RecvOptNode | SlotTy::NilFilledOptNode => {
+            // `RecvOptNode` (murphy-if9y) and `NilFilledOptNode` (murphy-av7j)
+            // treat a bare `_` as matching an absent slot; `$_` is a `Capture`,
+            // not a `Wildcard`, so it still requires a present slot.
+            if matches!(ty, SlotTy::RecvOptNode | SlotTy::NilFilledOptNode)
+                && matches!(child.kind, PatKind::Wildcard)
+            {
                 return Ok(quote!(true));
             }
             if matches!(child.kind, PatKind::NilTest) {
