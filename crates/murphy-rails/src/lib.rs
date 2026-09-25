@@ -597,145 +597,20 @@ submit_cop!(BulkChangeTable);
 // `TableNameAssignment` promoted to real cop in
 // `cops::rails::table_name_assignment`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ThreeStateBooleanColumn
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ThreeStateBooleanColumn;
+// `ThreeStateBooleanColumn` promoted to real cop in
+// `cops::rails::three_state_boolean_column`.
 
-#[cop(
-    name = "Rails/ThreeStateBooleanColumn",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ThreeStateBooleanColumn {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ThreeStateBooleanColumn);
+// `TimeZone` promoted to real cop in
+// `cops::rails::time_zone`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/TimeZone
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct TimeZone;
+// `TimeZoneAssignment` promoted to real cop in
+// `cops::rails::time_zone_assignment`.
 
-#[cop(
-    name = "Rails/TimeZone",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl TimeZone {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(TimeZone);
+// `ToFormattedS` promoted to real cop in
+// `cops::rails::to_formatted_s`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/TimeZoneAssignment
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct TimeZoneAssignment;
-
-#[cop(
-    name = "Rails/TimeZoneAssignment",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl TimeZoneAssignment {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(TimeZoneAssignment);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ToFormattedS
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ToFormattedS;
-
-#[cop(
-    name = "Rails/ToFormattedS",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ToFormattedS {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ToFormattedS);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ToSWithArgument
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ToSWithArgument;
-
-#[cop(
-    name = "Rails/ToSWithArgument",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ToSWithArgument {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ToSWithArgument);
+// `ToSWithArgument` promoted to real cop in
+// `cops::rails::to_s_with_argument`.
 
 /// ## RuboCop parity
 ///
