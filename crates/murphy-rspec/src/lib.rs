@@ -77,6 +77,11 @@
 //! - `RSpec/MissingExpectationTargetMethod` — expectations need `.to` / `.not_to` (murphy-4gd.3.15).
 //! - `RSpec/MultipleMemoizedHelpers` — cap `let` / `subject` helpers per group (murphy-4gd.3.15).
 //! - `RSpec/MultipleSubjects` — one `subject` per example group (murphy-4gd.3.15).
+//! - `RSpec/NamedSubject` — name the subject when referencing it explicitly (murphy-4gd.3.16).
+//! - `RSpec/NestedGroups` — cap example-group nesting depth (murphy-4gd.3.16).
+//! - `RSpec/NoExpectationExample` — examples must contain an expectation (murphy-4gd.3.16).
+//! - `RSpec/OverwritingSetup` — no duplicate `let` / `subject` definitions (murphy-4gd.3.16).
+//! - `RSpec/Pending` — no pending or skipped examples (murphy-4gd.3.16).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
