@@ -38,9 +38,8 @@ murphy cache stat              # root, entry counts, total bytes
 murphy cache clean             # wipe the whole cache tree
 ```
 
-## Watch/daemon (B1) note
+## Watch/daemon (B1)
 
-The result cache is the cross-run skip primitive B1 builds on: a file
-watcher can re-lint only changed files and get cached results for the
-rest. No additional contract is needed — `lint_files_memoized` already
-takes `Option<&ResultCache>`.
+`murphy watch` (murphy-fmw.2.1) is the resident consumer of this cache:
+the initial pass warms `results/*.json`, then each poll tick re-lints
+only added + modified files. See `docs/guides/watch.md`.

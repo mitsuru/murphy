@@ -94,6 +94,9 @@ eliminate RuboCop's slowness with a native Rust core.
 - `murphy lint --since <ref>` lints only files changed since `<ref>` (staged, unstaged, plus untracked; merge-base semantics) for fast PR checks; the reusable workflow `.github/workflows/murphy.yml` uploads SARIF to Code Scanning — see `docs/guides/ci.md`.
 - `murphy lint --profile` emits JSON profiling data, with optional
   `--profile-format speedscope` output.
+- `murphy watch [paths...]` stays resident and re-lints only changed files
+  on every save (initial pass warms the result cache above);
+  see `docs/guides/watch.md`.
 - Exit codes 0/1/2/3. A malformed `.murphy.yml` exits 2.
 
 Not yet production-ready. Murphy is described as a "linter/formatter", but
