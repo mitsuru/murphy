@@ -209,6 +209,13 @@ struct LintArgs {
     /// all offenses; the file records them for the next run.
     #[arg(long, value_name = "PATH")]
     generate_baseline: Option<PathBuf>,
+    /// Builtin config preset (`minimal`, `recommended`, `shopify`,
+    /// `rails-strict`, optionally as `murphy:<name>`). Layers below
+    /// `.murphy.yml` user config; `--preset` wins over file `extends:`
+    /// (explicit flag beats file), user `Enabled:`/options always win.
+    /// Unknown names fail with exit 2 (C3; ADR 0050).
+    #[arg(long, value_name = "PRESET")]
+    preset: Option<String>,
     /// Files or directories to lint. With no paths, Murphy discovers from cwd.
     #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
     paths: Vec<String>,
@@ -318,6 +325,10 @@ struct CopsListArgs {
     /// Output format.
     #[arg(long, value_enum, default_value = "table")]
     format: CopsFormatArg,
+    /// Builtin config preset applied before status evaluation
+    /// (same semantics as `murphy lint --preset`; C3).
+    #[arg(long, value_name = "PRESET")]
+    preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -464,6 +475,9 @@ struct WatchArgs {
     /// Lint once and exit (uses the watch pipeline; for CI/tests).
     #[arg(long)]
     once: bool,
+    /// Builtin config preset (same semantics as `murphy lint --preset`; C3).
+    #[arg(long, value_name = "PRESET")]
+    preset: Option<String>,
     /// Files or directories to watch. With no paths, Murphy discovers from cwd.
     #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
     paths: Vec<String>,
@@ -1623,7 +1637,9 @@ fn run_migrate(args: &MigrateArgs) -> Result<u8, AppError> {
 
 fn run_cops(args: &CopsArgs) -> Result<u8, AppError> {
     match &args.command {
-        CopsCommand::List(list_args) => cops::list_with_format(list_args.format.into()),
+        CopsCommand::List(list_args) => {
+            cops::list_with_format_and_preset(list_args.format.into(), list_args.preset.as_deref())
+        }
     }
 }
 
@@ -1707,10 +1723,13 @@ struct WatchSession {
 /// Load config + registry + caches for `murphy watch` (mirrors the
 /// `run_lint` setup minus `--fix`/`--profile`/`--since`: watch never
 /// fixes, never profiles, and computes its own diff by polling).
-fn load_watch_session(no_cache: bool) -> Result<WatchSession, AppError> {
-    let mut config =
-        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
-            .map_err(|e| AppError::setup(e.to_string()))?;
+fn load_watch_session(no_cache: bool, preset: Option<&str>) -> Result<WatchSession, AppError> {
+    let mut config = MurphyConfig::load_with_defaults_and_preset(
+        Path::new("."),
+        murphy_std::BUNDLED_DEFAULTS_YAML,
+        preset,
+    )
+    .map_err(|e| AppError::setup(e.to_string()))?;
     for stale in murphy_core::plugin_sync::check_project_with_config(Path::new("."), &config, &[]) {
         eprintln!("{}", stale.warning());
     }
@@ -1753,6 +1772,7 @@ fn discover_watch_paths(
     path_args: &[&str],
     config: &MurphyConfig,
     registry: &CopRegistry,
+    preset: Option<&str>,
 ) -> Result<Vec<String>, AppError> {
     let mut explicit_files: Vec<String> = Vec::new();
     let mut discover_roots: Vec<PathBuf> = Vec::new();
@@ -1773,9 +1793,12 @@ fn discover_watch_paths(
         let discovered = if root == Path::new(".") {
             discover_with_config(root, config).map_err(|e| AppError::setup(e.to_string()))?
         } else {
-            let mut local_config =
-                MurphyConfig::load_with_defaults(root, murphy_std::BUNDLED_DEFAULTS_YAML)
-                    .map_err(|e| AppError::setup(e.to_string()))?;
+            let mut local_config = MurphyConfig::load_with_defaults_and_preset(
+                root,
+                murphy_std::BUNDLED_DEFAULTS_YAML,
+                preset,
+            )
+            .map_err(|e| AppError::setup(e.to_string()))?;
             local_config.apply_pack_default_layers(&registry.pack_default_configs());
             discover_with_config(root, &local_config).map_err(|e| AppError::setup(e.to_string()))?
         };
@@ -1881,8 +1904,13 @@ fn run_watch(args: &WatchArgs) -> Result<u8, AppError> {
         .map(|n| n.get())
         .unwrap_or(1);
 
-    let mut session = load_watch_session(args.no_cache)?;
-    let mut prev_files = discover_watch_paths(&path_args, &session.config, &session.registry)?;
+    let mut session = load_watch_session(args.no_cache, args.preset.as_deref())?;
+    let mut prev_files = discover_watch_paths(
+        &path_args,
+        &session.config,
+        &session.registry,
+        args.preset.as_deref(),
+    )?;
     let mut prev_snap = watch::snapshot_files(&prev_files);
     let mut config_sig = watch::file_sig(".murphy.yml");
     let mut baseline_sig = args
@@ -1931,10 +1959,15 @@ fn run_watch(args: &WatchArgs) -> Result<u8, AppError> {
             eprintln!(
                 "murphy watch: config changed (.murphy.yml) — reloading and re-linting all files"
             );
-            session = load_watch_session(args.no_cache)?;
+            session = load_watch_session(args.no_cache, args.preset.as_deref())?;
             config_sig = cur_config_sig;
             baseline_sig = cur_baseline_sig;
-            match discover_watch_paths(&path_args, &session.config, &session.registry) {
+            match discover_watch_paths(
+                &path_args,
+                &session.config,
+                &session.registry,
+                args.preset.as_deref(),
+            ) {
                 Ok(files) => {
                     prev_files = files;
                     prev_snap = watch::snapshot_files(&prev_files);
@@ -1999,8 +2032,12 @@ fn run_watch(args: &WatchArgs) -> Result<u8, AppError> {
         }
 
         // Normal tick: re-discover (catches new files) + snapshot diff.
-        let curr_files = match discover_watch_paths(&path_args, &session.config, &session.registry)
-        {
+        let curr_files = match discover_watch_paths(
+            &path_args,
+            &session.config,
+            &session.registry,
+            args.preset.as_deref(),
+        ) {
             Ok(files) => files,
             Err(e) => {
                 eprintln!("murphy watch: discovery failed, retrying: {}", e.message);
@@ -2097,9 +2134,12 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     if debug {
         eprintln!("murphy: debug: config load start elapsed_ms=0");
     }
-    let mut config =
-        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
-            .map_err(|e| AppError::setup(e.to_string()))?;
+    let mut config = MurphyConfig::load_with_defaults_and_preset(
+        Path::new("."),
+        murphy_std::BUNDLED_DEFAULTS_YAML,
+        args.preset.as_deref(),
+    )
+    .map_err(|e| AppError::setup(e.to_string()))?;
     if debug {
         eprintln!(
             "murphy: debug: config load done elapsed_ms={}",
@@ -2176,9 +2216,12 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             discover_with_config(root, &config).map_err(|e| AppError::setup(e.to_string()))?
         } else {
             // For non-cwd roots, load the root-local .murphy.yml.
-            let mut local_config =
-                MurphyConfig::load_with_defaults(root, murphy_std::BUNDLED_DEFAULTS_YAML)
-                    .map_err(|e| AppError::setup(e.to_string()))?;
+            let mut local_config = MurphyConfig::load_with_defaults_and_preset(
+                root,
+                murphy_std::BUNDLED_DEFAULTS_YAML,
+                args.preset.as_deref(),
+            )
+            .map_err(|e| AppError::setup(e.to_string()))?;
             // Layer the loaded packs' bundled `AllCops` defaults (notably
             // `AllCops.Exclude`, e.g. rails' `db/*schema.rb`) into the root-local
             // config so discovery under a non-cwd root honours pack excludes too.

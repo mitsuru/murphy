@@ -38,6 +38,7 @@ pub mod plugin_loader;
 pub mod plugin_manifest;
 pub mod plugin_resolver;
 pub mod plugin_sync;
+pub mod presets;
 mod registry;
 // var_semantic_model has been moved to murphy-plugin-api
 

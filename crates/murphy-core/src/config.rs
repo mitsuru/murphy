@@ -805,6 +805,10 @@ struct ParsedYaml {
     plugins: Vec<PluginConfig>,
     /// Paths from `inherit_from:` — consumed by `load_resolving_inherit`.
     inherit_from: Vec<String>,
+    /// Preset refs from `extends:` (e.g. `murphy:rails-strict`). Builtin
+    /// presets only; resolved after `inherit_from` merging, lowest layer.
+    /// See `crate::presets` (C3; ADR 0050).
+    extends: Vec<String>,
     /// Globally merged cop-option keys from top-level `inherit_mode.merge`.
     inherit_mode_merge: BTreeSet<String>,
     /// True when `inherit_mode: merge: [Exclude]` is set. Governs whether the
@@ -856,6 +860,19 @@ impl ParsedYaml {
                 all
             },
             inherit_from: vec![],
+            extends: {
+                // Accumulate preset refs base-first (deduped): presets from
+                // inherited files form the lowest layer, the current file's
+                // `extends` wins within the preset layer. The combined list
+                // is resolved after inherit merging (see `resolve_preset_layer`).
+                let mut all = base.extends;
+                for r in self.extends {
+                    if !all.contains(&r) {
+                        all.push(r);
+                    }
+                }
+                all
+            },
             inherit_mode_merge,
             // OR semantics: if any file in the inherit chain enables Exclude
             // merge, the merge applies. The root (`self`) is highest priority,
@@ -1001,8 +1018,11 @@ impl MurphyConfig {
     /// Internal: parse user YAML and return `(config, saw_include, saw_exclude)`.
     /// `saw_include`/`saw_exclude` tell `with_defaults` whether to apply bundled
     /// AllCops defaults. Does NOT resolve `inherit_from` — use `load` for that.
+    /// Resolves `extends:` presets (C3) as the lowest layer; user YAML wins.
     fn from_yaml_str_raw(text: &str) -> Result<(Self, bool, bool), ConfigError> {
-        Ok(parse_yaml_str(text)?.into_murphy_config())
+        let parsed = parse_yaml_str(text)?;
+        let parsed = resolve_presets_for_parsed(parsed, None)?;
+        Ok(parsed.into_murphy_config())
     }
 
     /// Parse user YAML and merge bundled `defaults_yaml` as a base layer.
@@ -1010,8 +1030,23 @@ impl MurphyConfig {
     ///
     /// The host (murphy-cli) calls this with `murphy_std::BUNDLED_DEFAULTS_YAML`
     /// so cop defaults are data-driven rather than hardcoded.
+    /// `extends:` presets resolve between defaults and user (defaults <
+    /// presets < user).
     pub fn with_defaults(user_yaml: &str, defaults_yaml: &str) -> Result<Self, ConfigError> {
-        let (mut cfg, saw_include, _saw_exclude) = Self::from_yaml_str_raw(user_yaml)?;
+        Self::with_defaults_and_preset(user_yaml, defaults_yaml, None)
+    }
+
+    /// Like [`Self::with_defaults`] with an additional CLI `--preset` layer.
+    /// Precedence (lowest first): bundled defaults < file `extends:` presets
+    /// < `--preset` < user YAML. Unknown preset names fail with `BadYaml`.
+    pub fn with_defaults_and_preset(
+        user_yaml: &str,
+        defaults_yaml: &str,
+        cli_preset: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let parsed = parse_yaml_str(user_yaml)?;
+        let parsed = resolve_presets_for_parsed(parsed, cli_preset)?;
+        let (mut cfg, saw_include, _saw_exclude) = parsed.into_murphy_config();
         let defaults = DefaultCopsData::from_yaml(defaults_yaml);
 
         if !saw_include && !defaults.allcops_include.is_empty() {
@@ -1025,8 +1060,23 @@ impl MurphyConfig {
     }
 
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
+        Self::load_with_preset(root, None)
+    }
+
+    /// Like [`Self::load`] with an additional CLI `--preset` layer.
+    /// Precedence: file `extends:` presets < `--preset` < user config.
+    pub fn load_with_preset(root: &Path, cli_preset: Option<&str>) -> Result<Self, ConfigError> {
         let config_path = root.join(".murphy.yml");
         if !config_path.exists() {
+            if cli_preset.is_some() {
+                let parsed = resolve_presets_for_parsed(ParsedYaml::default(), cli_preset)?;
+                let explicit = parsed.target_ruby_version.is_some();
+                let (mut cfg, _, _) = parsed.into_murphy_config();
+                if !explicit && let Some(detected) = detect_target_ruby_version(root) {
+                    cfg.target_ruby_version = detected;
+                }
+                return Ok(cfg);
+            }
             let mut cfg = Self::default();
             // No explicit config: fall back to RuboCop-style detection
             // (.ruby-version / gemspec / .tool-versions / mise.toml / lockfile).
@@ -1036,6 +1086,9 @@ impl MurphyConfig {
             return Ok(cfg);
         }
         let parsed = load_resolving_inherit(&config_path, &std::collections::HashSet::new())?;
+        let parsed = resolve_presets_for_parsed(parsed, cli_preset)?;
+        // After preset merging, a version from user OR preset counts as
+        // explicit so detection does not override a preset pin.
         let explicit = parsed.target_ruby_version.is_some();
         let (mut cfg, _, _) = parsed.into_murphy_config();
         if !explicit && let Some(detected) = detect_target_ruby_version(root) {
@@ -1047,13 +1100,26 @@ impl MurphyConfig {
     /// Like [`Self::load`] but merges bundled `defaults_yaml` as a base layer.
     /// The host (murphy-cli) calls this with `murphy_std::BUNDLED_DEFAULTS_YAML`.
     pub fn load_with_defaults(root: &Path, defaults_yaml: &str) -> Result<Self, ConfigError> {
+        Self::load_with_defaults_and_preset(root, defaults_yaml, None)
+    }
+
+    /// Like [`Self::load_with_defaults`] with an additional CLI `--preset` layer.
+    /// Precedence (lowest first): bundled defaults < file `extends:` presets
+    /// < `--preset` < user config.
+    pub fn load_with_defaults_and_preset(
+        root: &Path,
+        defaults_yaml: &str,
+        cli_preset: Option<&str>,
+    ) -> Result<Self, ConfigError> {
         let config_path = root.join(".murphy.yml");
         let parsed = if config_path.exists() {
             load_resolving_inherit(&config_path, &std::collections::HashSet::new())?
         } else {
             ParsedYaml::default()
         };
-        let explicit = parsed.target_ruby_version.is_some();
+        let had_explicit_version = parsed.target_ruby_version.is_some();
+        let parsed = resolve_presets_for_parsed(parsed, cli_preset)?;
+        let explicit = had_explicit_version || parsed.target_ruby_version.is_some();
         let (mut cfg, saw_include, _saw_exclude) = parsed.into_murphy_config();
         if !explicit && let Some(detected) = detect_target_ruby_version(root) {
             cfg.target_ruby_version = detected;
@@ -1525,6 +1591,24 @@ fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
                     _ => vec![],
                 };
             }
+            "extends" => {
+                // C3 presets (`extends: murphy:rails-strict` or a list).
+                // Stored verbatim; validated + resolved after inherit merging.
+                parsed.extends = match value {
+                    Yaml::String(s) => vec![s],
+                    Yaml::Array(arr) => arr
+                        .into_iter()
+                        .filter_map(|v| {
+                            if let Yaml::String(s) = v {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+            }
             "AllCops" => {
                 if let Yaml::Hash(all_cops) = value {
                     if let Some(inc) = all_cops.get(&Yaml::String("Include".to_string())) {
@@ -1632,6 +1716,62 @@ fn load_resolving_inherit(
 
     // Current file is highest priority.
     Ok(parsed.merge_over(inherited))
+}
+
+/// Resolve `extends:` preset refs plus an optional CLI `--preset` into a
+/// merged base layer, then merge `user` over it (user wins per-field).
+///
+/// Precedence (lowest first): file `extends:` in order < `--preset` < user.
+/// Unknown preset names fail with `BadYaml` listing available presets.
+/// Preset YAMLs are terminal (their own `extends`, if any, is ignored).
+fn resolve_presets_for_parsed(
+    mut user: ParsedYaml,
+    cli_preset: Option<&str>,
+) -> Result<ParsedYaml, ConfigError> {
+    let mut refs = std::mem::take(&mut user.extends);
+    if let Some(cli) = cli_preset {
+        let cli = cli.trim();
+        if cli.is_empty() {
+            return Err(ConfigError::BadYaml(
+                "empty --preset name (available: minimal, recommended, shopify, rails-strict)"
+                    .to_string(),
+            ));
+        }
+        refs.push(cli.to_string());
+    }
+    if refs.is_empty() {
+        return Ok(user);
+    }
+    let base = resolve_preset_layer(&refs)?;
+    Ok(user.merge_over(base))
+}
+
+/// Merge the named preset refs (in order, later wins) into one [`ParsedYaml`].
+fn resolve_preset_layer(refs: &[String]) -> Result<ParsedYaml, ConfigError> {
+    let mut merged = ParsedYaml::default();
+    for raw in refs {
+        let canonical = crate::presets::normalize_preset_ref(raw).ok_or_else(|| {
+            ConfigError::BadYaml(format!(
+                "unknown preset `{raw}` (available: {}) — use `extends: murphy:<name>` with one of: {}",
+                crate::presets::PRESET_NAMES.join(", "),
+                crate::presets::PRESET_NAMES.join(", "),
+            ))
+        })?;
+        let yaml = crate::presets::preset_yaml(canonical).ok_or_else(|| {
+            ConfigError::BadYaml(format!("unknown preset `{raw}` (internal: missing yaml)"))
+        })?;
+        let mut parsed = parse_yaml_str(yaml).map_err(|e| {
+            ConfigError::BadYaml(format!("preset `murphy:{canonical}` is invalid: {e}"))
+        })?;
+        // Presets are terminal layers; ignore nested `extends` if ever added.
+        parsed.extends.clear();
+        parsed.inherit_from.clear();
+        // Later refs win: current preset over accumulated.
+        merged = parsed.merge_over(merged);
+    }
+    // The merged preset layer itself carries no pending `extends`.
+    merged.extends.clear();
+    Ok(merged)
 }
 
 /// Parse a `plugins:` value (sequence or scalar string).
@@ -3962,5 +4102,203 @@ Style/StringLiterals:
         let cfg =
             MurphyConfig::load_with_defaults(dir.path(), "AllCops:\n  Exclude: []\n").unwrap();
         assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 4));
+    }
+
+    // --- C3 preset tests (murphy-fmw.3.3) ---
+
+    #[test]
+    fn preset_minimal_disables_metrics_but_keeps_lint() {
+        let cfg =
+            MurphyConfig::from_yaml_str("extends: murphy:minimal\n").expect("preset resolves");
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Metrics/MethodLength")
+                .and_then(|r| r.enabled),
+            Some(false),
+            "minimal disables Metrics"
+        );
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Naming/MethodName")
+                .and_then(|r| r.enabled),
+            Some(false),
+            "minimal disables Naming"
+        );
+        // Lint cops untouched by the preset (no explicit Enabled).
+        assert!(
+            !cfg.cops.rules.contains_key("Lint/Debugger")
+                || cfg
+                    .cops
+                    .rules
+                    .get("Lint/Debugger")
+                    .and_then(|r| r.enabled)
+                    .is_none(),
+            "minimal leaves Lint alone"
+        );
+    }
+
+    #[test]
+    fn preset_bare_name_and_prefixed_are_equivalent() {
+        let a = MurphyConfig::from_yaml_str("extends: minimal\n").expect("bare");
+        let b = MurphyConfig::from_yaml_str("extends: murphy:minimal\n").expect("prefixed");
+        assert_eq!(a.cops.rules, b.cops.rules);
+    }
+
+    #[test]
+    fn preset_recommended_is_noop() {
+        let cfg =
+            MurphyConfig::from_yaml_str("extends: murphy:recommended\n").expect("preset resolves");
+        assert!(
+            cfg.cops.rules.is_empty(),
+            "recommended carries no overrides: {:?}",
+            cfg.cops.rules.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn preset_user_wins_over_preset() {
+        let cfg = MurphyConfig::from_yaml_str(
+            "extends: murphy:minimal\nMetrics/MethodLength:\n  Enabled: true\n",
+        )
+        .expect("preset resolves");
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Metrics/MethodLength")
+                .and_then(|r| r.enabled),
+            Some(true),
+            "user Enabled:true beats preset false"
+        );
+        // Sibling preset entry still applies.
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Metrics/AbcSize")
+                .and_then(|r| r.enabled),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn preset_shopify_sets_single_quotes_and_relaxes_metrics() {
+        let cfg =
+            MurphyConfig::from_yaml_str("extends: murphy:shopify\n").expect("preset resolves");
+        let opts: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/StringLiterals")).unwrap();
+        assert_eq!(opts["EnforcedStyle"], serde_json::json!("single_quotes"));
+        let opts: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Metrics/MethodLength")).unwrap();
+        assert_eq!(opts["Max"], serde_json::json!(20));
+    }
+
+    #[test]
+    fn preset_rails_strict_enables_curated_rails_cops_and_ase() {
+        let cfg =
+            MurphyConfig::from_yaml_str("extends: murphy:rails-strict\n").expect("preset resolves");
+        assert!(
+            cfg.active_support_extensions_enabled,
+            "rails-strict turns on ASE"
+        );
+        for cop in [
+            "Rails/Blank",
+            "Rails/FindBy",
+            "Rails/SaveBang",
+            "Rails/WhereNot",
+        ] {
+            assert_eq!(
+                cfg.cops.rules.get(cop).and_then(|r| r.enabled),
+                Some(true),
+                "{cop} enabled by rails-strict"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_unknown_name_errors_with_available_list() {
+        let err = MurphyConfig::from_yaml_str("extends: murphy:nope\n").expect_err("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown preset"), "got: {msg}");
+        assert!(msg.contains("minimal"), "lists presets: {msg}");
+    }
+
+    #[test]
+    fn preset_list_form_later_wins() {
+        let cfg = MurphyConfig::from_yaml_str("extends:\n  - murphy:minimal\n  - murphy:shopify\n")
+            .expect("presets resolve");
+        // shopify (later) sets Metrics/MethodLength Max: 20; minimal only
+        // disables it. Both layers merge: Enabled:false from minimal stays,
+        // Max:20 from shopify joins.
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Metrics/MethodLength")
+                .and_then(|r| r.enabled),
+            Some(false)
+        );
+        let opts: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Metrics/MethodLength")).unwrap();
+        assert_eq!(opts["Max"], serde_json::json!(20));
+    }
+
+    #[test]
+    fn preset_cli_wins_over_file_extends() {
+        let cfg = MurphyConfig::with_defaults_and_preset(
+            "extends: murphy:minimal\n",
+            "",
+            Some("murphy:shopify"),
+        )
+        .expect("presets resolve");
+        // CLI shopify Max:20 lands on top of file minimal.
+        let opts: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Metrics/MethodLength")).unwrap();
+        assert_eq!(opts["Max"], serde_json::json!(20));
+    }
+
+    #[test]
+    fn preset_load_from_file_with_inherit_chain() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "extends: murphy:minimal\nMetrics/AbcSize:\n  Enabled: true\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nStyle/Documentation:\n  Enabled: true\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        // Base file opts back into AbcSize; preset still disables MethodLength.
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Metrics/AbcSize")
+                .and_then(|r| r.enabled),
+            Some(true)
+        );
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Metrics/MethodLength")
+                .and_then(|r| r.enabled),
+            Some(false)
+        );
+        // Top file opts back into Documentation (preset minimal disables it).
+        assert_eq!(
+            cfg.cops
+                .rules
+                .get("Style/Documentation")
+                .and_then(|r| r.enabled),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn preset_unknown_cli_errors() {
+        let err = MurphyConfig::with_defaults_and_preset("", "", Some("murphy:nope"))
+            .expect_err("must fail");
+        assert!(err.to_string().contains("unknown preset"));
     }
 }
