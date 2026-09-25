@@ -102,6 +102,12 @@
 //! - `RSpec/SharedExamples` — consistent shared-example name style (murphy-4gd.3.20).
 //! - `RSpec/SingleArgumentMessageChain` — no single-argument message chains (murphy-4gd.3.20).
 //! - `RSpec/SkipBlockInsideExample` — no `skip` block inside examples (murphy-4gd.3.20).
+//! - `RSpec/SortMetadata` — sort RSpec metadata alphabetically (murphy-4gd.3.21).
+//! - `RSpec/SpecFilePathFormat` — spec file paths match the described class (murphy-4gd.3.21).
+//! - `RSpec/SpecFilePathSuffix` — spec files end with `_spec.rb` (murphy-4gd.3.21).
+//! - `RSpec/StubbedMock` — message expectations must not configure a response (murphy-4gd.3.21).
+//! - `RSpec/SubjectStub` — do not stub methods of the object under test (murphy-4gd.3.21).
+//! - `RSpec/UndescriptiveLiteralsDescription` — descriptions must be descriptive (murphy-4gd.3.21).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
