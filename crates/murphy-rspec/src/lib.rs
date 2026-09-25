@@ -72,6 +72,11 @@
 //! - `RSpec/MessageChain` — no `receive_message_chain` / `stub_chain` (murphy-4gd.3.14).
 //! - `RSpec/MessageExpectation` — consistent `allow` / `expect` style (murphy-4gd.3.14).
 //! - `RSpec/MessageSpies` — set message expectations with spies (murphy-4gd.3.14).
+//! - `RSpec/MetadataStyle` — consistent metadata style (murphy-4gd.3.15).
+//! - `RSpec/MissingExampleGroupArgument` — example groups need an argument (murphy-4gd.3.15).
+//! - `RSpec/MissingExpectationTargetMethod` — expectations need `.to` / `.not_to` (murphy-4gd.3.15).
+//! - `RSpec/MultipleMemoizedHelpers` — cap `let` / `subject` helpers per group (murphy-4gd.3.15).
+//! - `RSpec/MultipleSubjects` — one `subject` per example group (murphy-4gd.3.15).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.

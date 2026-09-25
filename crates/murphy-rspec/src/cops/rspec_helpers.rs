@@ -407,3 +407,151 @@ pub(crate) fn block_close_token(cx: &Cx<'_>, block: NodeId) -> Option<Range> {
         })
         .map(|t| t.range)
 }
+
+/// Example selectors (`Examples.all` in rubocop-rspec's default config):
+/// regular (`it`, `specify`, `example`, `scenario`, `its`), focused
+/// (`fit`, `fspecify`, `fexample`, `fscenario`, `focus`), skipped
+/// (`xit`, `xspecify`, `xexample`, `xscenario`, `skip`) and pending
+/// (`pending`).
+pub(crate) fn is_example_name(name: &str) -> bool {
+    matches!(
+        name,
+        "it" | "specify"
+            | "example"
+            | "scenario"
+            | "its"
+            | "fit"
+            | "fspecify"
+            | "fexample"
+            | "fscenario"
+            | "focus"
+            | "xit"
+            | "xspecify"
+            | "xexample"
+            | "xscenario"
+            | "skip"
+            | "pending"
+    )
+}
+
+/// Shared-group selectors (`SharedGroups.all`).
+pub(crate) fn is_shared_group_name(name: &str) -> bool {
+    matches!(
+        name,
+        "shared_examples" | "shared_examples_for" | "shared_context"
+    )
+}
+
+/// Include selectors (`Includes.all`): example includes plus
+/// `include_context`.
+pub(crate) fn is_include_name(name: &str) -> bool {
+    matches!(
+        name,
+        "it_behaves_like" | "it_should_behave_like" | "include_examples" | "include_context"
+    )
+}
+
+/// `true` when `call` is a spec-group entrypoint (example groups or
+/// shared groups) with a bare or `RSpec` receiver.
+///
+/// Mirrors upstream `spec_group?` (`{(shared, example) groups}` with
+/// `#rspec?` = explicit-`RSpec` or bare).
+pub(crate) fn is_spec_group_call(cx: &Cx<'_>, call: NodeId) -> bool {
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(call)
+    else {
+        return false;
+    };
+    if !is_rspec_or_bare_receiver(cx, receiver) {
+        return false;
+    }
+    let name = cx.symbol_str(method);
+    is_example_group_name(name) || is_shared_group_name(name)
+}
+
+/// `true` when `id` is a `Block` that changes helper scope: a nested
+/// example/shared group (bare or `RSpec` receiver) or a bare include.
+///
+/// Mirrors `ExampleGroup#scope_change?` (`(block { (send #rspec?
+/// {#SharedGroups.all #ExampleGroups.all} ...) (send nil?
+/// #Includes.all ...) } ...)`).
+pub(crate) fn is_scope_change_block(cx: &Cx<'_>, id: NodeId) -> bool {
+    let NodeKind::Block { call, .. } = *cx.kind(id) else {
+        return false;
+    };
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(call)
+    else {
+        return false;
+    };
+    let name = cx.symbol_str(method);
+    if is_include_name(name) {
+        return receiver == OptNodeId::NONE;
+    }
+    is_rspec_or_bare_receiver(cx, receiver)
+        && (is_example_group_name(name) || is_shared_group_name(name))
+}
+
+/// `true` when `id` is a bare-example `Block`.
+///
+/// Mirrors `Language#example?` (`(block (send nil? #Examples.all ...)
+/// ...)`).
+pub(crate) fn is_bare_example_block(cx: &Cx<'_>, id: NodeId) -> bool {
+    let NodeKind::Block { call, .. } = *cx.kind(id) else {
+        return false;
+    };
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(call)
+    else {
+        return false;
+    };
+    receiver == OptNodeId::NONE && is_example_name(cx.symbol_str(method))
+}
+
+/// `true` when `id` is a `let?` node: a bare `let` / `let!` block, or
+/// the bare-send form with exactly one value argument plus a
+/// `BlockPass` (`let(:foo, &blk)`).
+///
+/// Mirrors `Language#let?` (`{(block (send nil? #Helpers.all ...) ...)
+/// (send nil? #Helpers.all _ block_pass)}`).
+pub(crate) fn is_let_node(cx: &Cx<'_>, id: NodeId) -> bool {
+    match *cx.kind(id) {
+        NodeKind::Block { call, .. } => is_bare_let_call(cx, call),
+        NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } => {
+            if receiver != OptNodeId::NONE {
+                return false;
+            }
+            if !matches!(cx.symbol_str(method), "let" | "let!") {
+                return false;
+            }
+            let args = cx.list(args);
+            args.len() == 2 && matches!(*cx.kind(args[1]), NodeKind::BlockPass(_))
+        }
+        _ => false,
+    }
+}
+
+/// `true` when `id` is a `subject?` node: a bare `subject` /
+/// `subject!` block.
+///
+/// Mirrors `Language#subject?` (`(block (send nil? #Subjects.all ...)
+/// ...)`).
+pub(crate) fn is_subject_block(cx: &Cx<'_>, id: NodeId) -> bool {
+    let NodeKind::Block { call, .. } = *cx.kind(id) else {
+        return false;
+    };
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(call)
+    else {
+        return false;
+    };
+    receiver == OptNodeId::NONE && matches!(cx.symbol_str(method), "subject" | "subject!")
+}
