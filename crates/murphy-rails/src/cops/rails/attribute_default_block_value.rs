@@ -16,7 +16,10 @@
 //!   shape (bare receiver, trailing options hash with a `:default` pair),
 //!   the `send`/`array`/`hash` offender types, value-only offense range,
 //!   and `-> { <source> }` autocorrect. Non-offender literals (sym, str,
-//!   int, float, boolean, nil, const) pass through untouched.
+//!   int, float, boolean, nil, const) pass through untouched. File scope
+//!   (`Include: ['**/app/models/**/*']`) is enforced via the murphy-rails
+//!   pack default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

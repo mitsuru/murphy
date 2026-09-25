@@ -775,7 +775,19 @@ fn scoped_native_cops<'a>(
 ) -> Vec<&'a PluginCopV1> {
     cops.iter()
         .copied()
-        .filter(|cop| config.cop_applies_to_file(plugin_cop_name(cop), Path::new(file)))
+        .filter(|cop| {
+            let name = plugin_cop_name(cop);
+            // Re-check enablement post-layer: the registry's dispatch view is
+            // filtered at discovery time, BEFORE `apply_pack_default_layers`
+            // folds pack-bundled `Enabled: false` opt-outs (e.g. the rails
+            // pack's `Rails/DefaultScope`) into the config. Without this,
+            // pack-default opt-outs never take effect in real runs
+            // (murphy-bjrg.3, murphy-4gd.1.15 audit). Layer 3 falls back to
+            // the cop's own ABI default, mirroring discovery-time filtering.
+            let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
+            config.cop_enabled_with_cop_default(name, cop_default)
+                && config.cop_applies_to_file(name, Path::new(file))
+        })
         .collect()
 }
 

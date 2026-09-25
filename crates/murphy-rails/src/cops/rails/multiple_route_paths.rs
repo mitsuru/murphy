@@ -17,7 +17,10 @@
 //!   counting that rejects Array/Hash args (Kwsplat-wrapped options arrive
 //!   as Hash so `**options` is preserved as `rest`), whole-send offense,
 //!   and the split-into-multiple-routes autocorrect with column-based
-//!   indentation. Upstream Include (config/routes.rb) absent.
+//!   indentation. Upstream Include (`**/config/routes.rb`,
+//!   `**/config/routes/**/*.rb`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Checks for mapping a route with multiple paths, which is deprecated

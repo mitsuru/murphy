@@ -21,8 +21,9 @@
 //!   `payload_too_large` → `content_too_large`) flag; offense is the Sym node
 //!   with symbol replacement. `requires_gem rack >= 3.1.0` is not gated:
 //!   Murphy always enforces the new names. Upstream Include
-//!   (`**/app/controllers/**/*.rb`) has no file-path infrastructure yet, so
-//!   the cop fires in all files (audit tracked by murphy-4gd.1.15).
+//!   (`**/app/controllers/**/*.rb`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Enforces consistency by using the current HTTP status names.

@@ -18,7 +18,10 @@
 //!   `\d+_` timestamp) plus Ruby-capitalize camelize with case-insensitive
 //!   (casecmp) comparison are mirrored. Offense is the short class name
 //!   (trailing slice for `::` prefix); autocorrect replaces it. Upstream
-//!   Include (db/**/*.rb) and MigratedSchemaVersion skipping absent.
+//!   Include (`db/**/*.rb`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15);
+//!   MigratedSchemaVersion skipping remains absent.
 //! ```
 //!
 //! Makes sure that each migration file defines a migration class whose

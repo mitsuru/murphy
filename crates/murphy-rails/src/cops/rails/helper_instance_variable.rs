@@ -15,8 +15,9 @@
 //!   `class` ancestor, and `on_ivasgn` flags the name range unless the parent
 //!   is an `or_asgn` (memoization `@x ||=`). Any `class` ancestor suppresses
 //!   (modules alone do not). No autocorrect. Upstream Include
-//!   (`**/app/helpers/**/*.rb`) has no file-path infrastructure in Murphy yet,
-//!   so the cop fires in all files (audit tracked by murphy-4gd.1.15).
+//!   (`**/app/helpers/**/*.rb`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Checks for use of the helper methods which reference instance variables.

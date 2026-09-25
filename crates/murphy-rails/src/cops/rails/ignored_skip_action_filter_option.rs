@@ -16,8 +16,10 @@
 //!   skip_action_callback], last-arg hash with sym keys, `if`+`only` flags
 //!   the `if:` pair, `if`+`except` flags the `except:` pair, autocorrect
 //!   removes the ignored pair (with surrounding comma/space). Offense range
-//!   is the ignored pair node. Upstream Include (controllers/mailers) has
-//!   no file-path infrastructure in Murphy (audit murphy-4gd.1.15).
+//!   is the ignored pair node. Upstream Include (controllers/mailers) is
+//!   enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Checks that `if` and `only` (or `except`) are not used together as

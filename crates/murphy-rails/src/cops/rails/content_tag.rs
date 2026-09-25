@@ -20,7 +20,10 @@
 //!   inner one; upstream tracks actually-corrected ancestors). Not gated:
 //!   `minimum_target_rails_version 5.1`. `underscore` is a local
 //!   reimplementation of ActiveSupport underscore (namespace, camel-case,
-//!   dash handling).
+//!   dash handling). File scope (`Exclude: ['**/app/models/**/*.rb',
+//!   '**/config/**/*.rb']`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

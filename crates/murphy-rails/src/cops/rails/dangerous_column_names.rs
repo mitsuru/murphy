@@ -18,7 +18,9 @@
 //!   DANGEROUS_COLUMN_NAMES set (369 entries from ActiveRecord 7.1.3), and
 //!   column-node-only offense range. No receiver gate (flags `t.string
 //!   :save` inside blocks). Non Sym/Str column nodes pass through. No
-//!   autocorrect.
+//!   autocorrect. File scope (`Include: ['db/**/*.rb']`) is enforced via
+//!   the murphy-rails pack default.yml (engine `cop_applies_to_file`
+//!   gate, verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

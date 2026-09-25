@@ -9,8 +9,9 @@
 //! gap_issues:
 //!   - murphy-juee
 //! notes: >
-//!   Test-file gating (only flag in test/spec paths) is not implemented;
-//!   Murphy flags in all files. Known limitation, not a blocker.
+//!   Test-file gating (`Include: ['**/test/**/*']` upstream) is enforced via
+//!   the murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! `assert` with a single negated argument) and recommend the

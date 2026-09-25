@@ -18,7 +18,9 @@
 //!   (missing → get, sym/str single, single-element array; variables and
 //!   multi-element arrays suppress), HTTP_METHODS gating, whole-send
 //!   offense, and via-stripping replacement. Upstream Include
-//!   (config/routes.rb) absent.
+//!   (`**/config/routes.rb`, `**/config/routes/**/*.rb`) is enforced via
+//!   the murphy-rails pack default.yml (engine `cop_applies_to_file`
+//!   gate, verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Identifies places where defining routes with `match` can be replaced

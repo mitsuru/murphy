@@ -16,6 +16,9 @@
 //!   superclass-only offense range, `ActionDispatch::IntegrationTest`
 //!   replacement, and TargetRailsVersion >= 5.0 gating (unset means newest).
 //!   No Class.new handling upstream (custom on_class only, no EnforceSuperclass).
+//!   File scope (`Include: ['**/test/**/*.rb']`) is enforced via the
+//!   murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes (Class node)

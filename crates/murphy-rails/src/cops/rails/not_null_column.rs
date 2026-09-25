@@ -20,7 +20,10 @@
 //!   (hash-bearing) branches, plus `null: false` (False_) offense on the
 //!   pair and `default: non-nil` exemption (`default: nil` still flags).
 //!   Database option (mysql skips text) is honored; yaml/env auto-detection
-//!   and MigratedSchemaVersion skipping plus Include (db/**/*.rb) absent.
+//!   and MigratedSchemaVersion skipping remain absent; Include
+//!   (`db/**/*.rb`) is enforced via the murphy-rails pack default.yml
+//!   (engine `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Checks for add_column calls with a NOT NULL constraint without a

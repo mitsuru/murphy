@@ -18,7 +18,9 @@
 //!   `multiple_enum_definitions?` (2+ non-option keys, offense without
 //!   autocorrect), plus new-syntax `(send nil? :enum $_ ${array hash} $_)`
 //!   `_`-option (`_prefix` etc.) key rewrite. Include path gating
-//!   (`app/models`, `lib`) is not implemented.
+//!   (`**/app/models/**/*.rb`, `**/lib/**/*.rb`) is enforced via the
+//!   murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

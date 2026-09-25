@@ -12,11 +12,11 @@
 //!   AllowReads/AllowWrites options, ::ENV handling (cbase-qualified form),
 //!   read/write-specific messages matching upstream exactly, ENV const offense
 //!   range, and store-as-read classification all implemented (murphy-33p7).
-//!   Remaining gap: Rails include/exclude path gating (no file-path
-//!   infrastructure yet). RuboCop default.yml restricts this cop to
-//!   app/**/*.rb, config/initializers/**/*.rb, lib/**/*.rb (excluding
-//!   lib/**/*.rake); Murphy fires in all files. Users can disable
-//!   per-directory via .murphy.yml.
+//!   File scope (`Include: app/config-initializer/lib`, `Exclude: rake`)
+//!   is enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15). Users can further scope per-directory
+//!   via .murphy.yml.
 //! ```
 //!
 //! environment variables through the top-level `ENV` constant

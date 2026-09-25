@@ -13,9 +13,10 @@
 //!   (receiver None), selector-only offense range, and selector
 //!   replacement autocorrect all mirror upstream. The 14-entry
 //!   CORRECTIONS table (including refute_match to assert_no_match)
-//!   is complete. Remaining gap: Include test/**/* path gating is
-//!   not implemented; Murphy flags in all files (same limitation
-//!   as Rails/AssertNot, tracked in murphy-juee).
+//!   is complete. Upstream Include (`**/test/**/*`) is enforced via the
+//!   murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15;
+//!   same coverage as Rails/AssertNot, tracked in murphy-juee).
 //! ```
 //!
 //! Minitest ships two spellings for every negative assertion:

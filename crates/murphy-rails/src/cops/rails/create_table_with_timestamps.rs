@@ -19,7 +19,10 @@
 //!   :created_at/:updated_at` time-column search. Whole-block (block form)
 //!   or whole-send (bare form) offense range. `ActiveRecordMigrationsHelper`
 //!   `create_table_with_block?` is approximated via `cx.block_node`. No
-//!   autocorrect.
+//!   autocorrect. File scope (`Include: ['db/**/*.rb']`, `Exclude:`
+//!   active-storage migration globs) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

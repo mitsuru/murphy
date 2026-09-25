@@ -16,7 +16,9 @@
 //!   in_where? suppression (first ancestor call is where/rewhere with a
 //!   different receiver, or `not` over where/rewhere). Offense is
 //!   selector-start to call-end; autocorrect replaces it with `ids`.
-//!   Upstream Include gating absent.
+//!   Upstream carries no per-file `Include`/`Exclude` for this cop
+//!   (verified vs rubocop-rails 2.38.0 default.yml); Murphy runs in all
+//!   files, matching upstream.
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};

@@ -13,9 +13,10 @@
 //! notes: >
 //!   Mirrors rubocop-rails 2.35.0: RESTRICT_ON_SEND [:has_and_belongs_to_many]
 //!   gating with `command?` (bare call, no receiver) and selector-only offense
-//!   range. No autocorrect. Upstream Include (`**/app/models/**/*.rb`) has no
-//!   file-path infrastructure in Murphy yet, so the cop fires in all files
-//!   (audit tracked by murphy-4gd.1.15).
+//!   range. No autocorrect. Upstream Include (`**/app/models/**/*.rb`) is
+//!   enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Checks for the use of the `has_and_belongs_to_many` macro.

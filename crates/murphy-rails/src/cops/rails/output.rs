@@ -12,8 +12,11 @@
 //!   guards are complete. Cbase forms (::STDOUT/::STDERR) fold to scope=None
 //!   in Murphy's AST, so they are matched identically to bare STDOUT/STDERR.
 //!   Autocorrect (logger rewrite) is intentionally absent — the safe logger
-//!   receiver cannot be synthesised by the cop (ADR 0006). RuboCop Rails/Output
-//!   is global (no Include globs); Murphy matches that behaviour.
+//!   receiver cannot be synthesised by the cop (ADR 0006). Upstream Include
+//!   (`**/app/**/*.rb`, `**/config/**/*.rb`, `db/**/*.rb`, `**/lib/**/*.rb`)
+//!   is enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! (`puts`/`p`/`pp`/`print`/`pretty_print`/`ap` — bare only) and
