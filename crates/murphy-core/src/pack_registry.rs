@@ -32,6 +32,12 @@ pub fn bundled_toml() -> &'static str {
 
 /// One catalogue entry: a pack name resolvable to a RubyGem plus the
 /// Murphy-specific compat floor.
+///
+/// Remote discovery (uk7.2, ADR 0053) adds an optional static download
+/// source: `source-url` points at a git repo, an `http(s)` tarball, or a
+/// `file://` dir/tarball. No hosted service — the index stays a static
+/// TOML file; `plugin_marketplace` fetches the source with `git`/`curl`/
+/// `tar` (file copy for `file://` dirs).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackEntry {
@@ -52,10 +58,57 @@ pub struct PackEntry {
     /// Minimum Murphy core version that can host this pack (`"0.1.0"`).
     #[serde(rename = "min-murphy-version", default = "default_min_murphy_version")]
     pub min_murphy_version: String,
+    /// Remote download source (uk7.2): git URL, `http(s)` tarball URL, or
+    /// `file://` dir/tarball path. `None`/empty means "no remote source"
+    /// (local gems / `--from` only, the uk7.1 behaviour).
+    #[serde(rename = "source-url", default)]
+    pub source_url: Option<String>,
+    /// Git rev (tag/branch/SHA) for git sources. Ignored otherwise.
+    #[serde(rename = "source-rev", default)]
+    pub source_rev: Option<String>,
+    /// Subdir inside the checkout/extract holding the pack root
+    /// (`murphy-plugin.toml`). Empty means the root itself.
+    #[serde(rename = "source-subdir", default)]
+    pub source_subdir: Option<String>,
+    /// Expected hex SHA-256 of the tarball bytes (tarball sources only).
+    /// Empty means "no checksum".
+    #[serde(rename = "source-sha256", default)]
+    pub source_sha256: Option<String>,
 }
 
 fn default_min_murphy_version() -> String {
     "0.1.0".to_string()
+}
+
+impl PackEntry {
+    fn opt_text(v: &Option<String>) -> Option<&str> {
+        v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// Remote download source URL, if configured (`source-url`).
+    pub fn remote_url(&self) -> Option<&str> {
+        Self::opt_text(&self.source_url)
+    }
+
+    /// Git rev for git sources (`source-rev`), if configured.
+    pub fn remote_rev(&self) -> Option<&str> {
+        Self::opt_text(&self.source_rev)
+    }
+
+    /// Subdir inside the checkout/extract holding the pack root.
+    pub fn remote_subdir(&self) -> Option<&str> {
+        Self::opt_text(&self.source_subdir)
+    }
+
+    /// Expected hex SHA-256 for tarball sources.
+    pub fn remote_sha256(&self) -> Option<&str> {
+        Self::opt_text(&self.source_sha256)
+    }
+
+    /// True when a remote download source is configured.
+    pub fn has_remote_source(&self) -> bool {
+        self.remote_url().is_some()
+    }
 }
 
 /// Parsed `registry/index.toml`.
@@ -431,6 +484,10 @@ min-murphy-version = "99.0.0"
             homepage: String::new(),
             murphy_api_version: murphy_plugin_api::MURPHY_PLUGIN_ABI_VERSION,
             min_murphy_version: "99.0.0".to_string(),
+            source_url: None,
+            source_rev: None,
+            source_subdir: None,
+            source_sha256: None,
         };
         match check_compat(
             &entry,

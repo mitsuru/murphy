@@ -6,17 +6,18 @@ non-Bundler users: it copies an already-local pack into the user-local
 dir (`~/.local/share/murphy/plugins/`, search-path layer 5 of ADR 0042)
 and verifies the installed copy.
 
-Design: murphy-uk7.1. No network, no `bundle`/`gem` subprocess, no ABI
-bump. Remote download (marketplace) and multi-arch auto-selection are
-follow-ups.
+Design: murphy-uk7.1 (local sources) + murphy-uk7.2 (remote fallback;
+ADR 0053). No `bundle`/`gem` subprocess, no ABI bump. Multi-arch
+auto-selection remains a follow-up (uk7.3).
 
 ## Usage
 
 ```sh
 murphy plugins install murphy-rails --from ./dist   # local pack dir (or parent of <name>/)
-murphy plugins install murphy-rails                 # from installed gems (C2 discovery)
-murphy plugins install murphy-rails --dry-run       # resolve + compat only, no copy
+murphy plugins install murphy-rails                 # installed gems, then registry remote (uk7.2)
+murphy plugins install murphy-rails --dry-run       # resolve + compat only, no copy/fetch
 murphy plugins install murphy-rails --force         # overwrite an existing install
+murphy plugins install murphy-rails --no-remote     # local gems / --from only (uk7.1)
 murphy plugin install murphy-rails --from ./dist    # singular alias
 ```
 
@@ -30,7 +31,10 @@ What it does:
    verification so third-party / local packs stay installable.
 3. Finds the source: `--from <dir>` (the dir itself, `<dir>/<name>/`, or
    legacy `<dir>/lib<sanitized>.so`) or installed gems (pack-root walk-up
-   for pack-dir gems, direct file for legacy gems).
+   for pack-dir gems, direct file for legacy gems) — and, when those miss
+   and the registry entry carries a `source-url` (uk7.2 marketplace), by
+   fetching the remote into the fetch cache (`--no-remote` disables this;
+   `--cache-dir` / `$MURPHY_PLUGIN_CACHE_DIR` overrides the cache).
 4. Copies to `<user-dir>/<name>/` (pack dir, recursive) or
    `<user-dir>/lib<sanitized>.so` (legacy). Refuses to clobber without
    `--force`.
@@ -43,7 +47,11 @@ Useful overrides:
 ```sh
 murphy plugins install murphy-foo --registry ./mirror.toml   # custom index
 MURPHY_USER_PLUGINS_DIR=/tmp/packs murphy plugins install murphy-foo --from ./dist
+MURPHY_PLUGIN_CACHE_DIR=/tmp/pcache murphy plugins install murphy-foo   # fetch cache override
 ```
+
+Remote sources live in the index (`source-url`); full guide:
+`docs/guides/plugin-marketplace.md`.
 
 ## Troubleshooting
 
@@ -62,6 +70,8 @@ MURPHY_USER_PLUGINS_DIR=/tmp/packs murphy plugins install murphy-foo --from ./di
 
 - ADR 0046 (`docs/decisions/0046-plugin-pack-format.md`): pack layout.
 - ADR 0049 (`docs/decisions/0049-thin-pack-registry.md`): registry gate.
+- ADR 0053 (`docs/decisions/0053-plugin-marketplace-static-index.md`): remote fetch.
 - ADR 0048 (`docs/decisions/0048-gem-distribution-bundler.md`): gem layer.
 - `murphy-core/src/plugin_install.rs`: resolve + copy + verify.
+- `murphy-core/src/plugin_marketplace.rs`: search + fetch + publish.
 - `murphy-cli/src/plugins.rs`: `plugins install` implementation.

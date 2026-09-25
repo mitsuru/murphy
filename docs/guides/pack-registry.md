@@ -50,6 +50,26 @@ murphy first).
 The index is the catalogue, not the manifest: per-pack cop lists live in
 each pack's `murphy-plugin.toml` (`[cops].provided`, ADR 0046).
 
+## Remote sources (uk7.2 marketplace)
+
+Entries may carry an optional static download source for
+`murphy plugins fetch/install` (ADR 0053; full guide:
+`plugin-marketplace.md`):
+
+```toml
+[[packs]]
+name = "murphy-foo"
+# ... (gem, version, compat as above)
+source-url = "https://example.invalid/packs/murphy-foo-0.1.0.tar.gz"
+# source-rev = "v0.1.0"      # git only
+# source-subdir = "pack"     # pack root inside checkout/extract
+# source-sha256 = "<hex>"    # tarball only
+```
+
+`murphy add` ignores these keys (config half); `plugins search` lists the
+index, `plugins fetch` materializes a source, and `plugins install`
+falls back to it when local gems / `--from` miss.
+
 ## Search order reminder
 
 `plugins = ["murphy-rails"]` resolves (ADR 0042, ADR 0048):
@@ -75,6 +95,7 @@ each pack's `murphy-plugin.toml` (`[cops].provided`, ADR 0046).
 ## Reference
 
 - ADR 0049 (`docs/decisions/0049-thin-pack-registry.md`): decision.
+- ADR 0053 (`docs/decisions/0053-plugin-marketplace-static-index.md`): remote sources.
 - ADR 0048 (`docs/decisions/0048-gem-distribution-bundler.md`): gem layer.
 - `registry/index.toml`: official index (edit + test to register a pack).
 - `murphy-core/src/pack_registry.rs`: index parser + compat + config edit.
