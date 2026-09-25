@@ -22,6 +22,11 @@
 //! - `RSpec/MatchArray` — prefer `contain_exactly` for array literals (murphy-4gd.3.4).
 //! - `RSpec/NotToNot` — consistent `not_to` / `to_not` spelling (murphy-4gd.3.4).
 //! - `RSpec/IdenticalEqualityAssertion` — flag identical equality sides (murphy-4gd.3.4).
+//! - `RSpec/AnyInstance` — avoid stubbing any instance globally (murphy-4gd.3.5).
+//! - `RSpec/ItBehavesLike` — consistent shared-example inclusion style (murphy-4gd.3.5).
+//! - `RSpec/VerifiedDoubles` — prefer verifying doubles (murphy-4gd.3.5).
+//! - `RSpec/ReceiveNever` — prefer `not_to receive` over `never` (murphy-4gd.3.5).
+//! - `RSpec/SubjectDeclaration` — define subject with the subject helper (murphy-4gd.3.5).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
