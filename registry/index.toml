@@ -1,0 +1,41 @@
+# Official Murphy cop-pack registry index (C1; ADR 0049).
+#
+# Thin static catalogue over RubyGems distribution (C2; ADR 0048).
+# RubyGems/Bundler own download + versioning + install; this file only
+# overlays Murphy-specific metadata (compat + discovery hints) so
+# `murphy add <pack>` can resolve a pack name to a gem + check
+# compatibility before touching `.murphy.yml`.
+#
+# No hosted service: edit this file + `murphy-core/src/pack_registry.rs`
+# tests to register a new official pack. Mirrors/forks override via
+# `--registry <path>` / `MURPHY_REGISTRY_PATH`.
+
+[registry]
+version = 1
+
+[[packs]]
+name = "murphy-rails"
+gem = "murphy-rails"
+version = "0.1.0"
+description = "Rails cops for Murphy (RuboCop-rails port, arena AST)"
+homepage = "https://github.com/mitsuru/murphy"
+murphy-api-version = 4
+min-murphy-version = "0.1.0"
+
+[[packs]]
+name = "murphy-rspec"
+gem = "murphy-rspec"
+version = "0.1.0"
+description = "RSpec cops for Murphy (single-surface plugin ABI)"
+homepage = "https://github.com/mitsuru/murphy"
+murphy-api-version = 4
+min-murphy-version = "0.1.0"
+
+[[packs]]
+name = "murphy-example-pack"
+gem = "murphy-example-pack"
+version = "0.1.0"
+description = "Demo plugin pack (Example/NoEval, Example/TodoFormat) — smoke target, not a starting point"
+homepage = "https://github.com/mitsuru/murphy"
+murphy-api-version = 4
+min-murphy-version = "0.1.0"

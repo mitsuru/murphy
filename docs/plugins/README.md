@@ -77,6 +77,10 @@ version wins). The `murphy` binary itself installs via
 `gem install murphy --platform <tag>`. Full guide:
 `docs/guides/gem-distribution.md`.
 
+Official packs are catalogued in the thin registry (C1; ADR 0049) and
+installed into `.murphy.yml` with `murphy add murphy-rails` (guide:
+`docs/guides/pack-registry.md`).
+
 ## Future: `murphy plugin new`
 
 A `murphy plugin new murphy-foo` subcommand — a thin wrapper over

@@ -17,6 +17,7 @@
 //!   `murphy_ast::ast_to_sexp` (re-exported via `murphy_core`).
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
 //! - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` — scaffold git-hook configs (see `install.rs`).
+//! - `murphy add <pack> [--registry PATH] [--dry-run]` — add a registry pack to `.murphy.yml` (see `add.rs`).
 //!
 //! `murphy lint --profile [--profile-format summary|speedscope]` emits the
 //! Phase 9 B6 profile (per-cop wall time + p95 + cop x file matrix + hot
@@ -25,6 +26,7 @@
 //! (`murphy_core::dispatch::run_cops_with_options_context_and_diagnostics_timed`),
 //! re-introduced on the new dispatcher after the .22 perf-gate follow-up.
 
+mod add;
 mod cops;
 mod explain;
 mod install;
@@ -149,6 +151,8 @@ enum CliCommand {
     TestCop(TestCopArgs),
     /// Maintain staged plugin packs in `.murphy/plugins/`.
     Plugins(PluginsArgs),
+    /// Add a cop pack from the official registry to `.murphy.yml` (C1).
+    Add(AddArgs),
     /// Scaffold git-hook configs (lefthook / pre-commit / overcommit).
     Install(InstallArgs),
     /// Inspect or maintain the on-disk lint cache (A5).
@@ -378,6 +382,20 @@ struct PluginsSyncArgs {
     /// Dry run for CI: warn on stale without copying (exit 2 when stale).
     #[arg(long)]
     check: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct AddArgs {
+    /// Pack name from the official registry (e.g. `murphy-rails`).
+    #[arg(value_name = "PACK")]
+    pack: String,
+    /// Custom registry index file (overrides the bundled official index;
+    /// `$MURPHY_REGISTRY_PATH` does the same without a flag).
+    #[arg(long, value_name = "PATH")]
+    registry: Option<PathBuf>,
+    /// Show what would change without writing `.murphy.yml`.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1581,6 +1599,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         CliCommand::NewCop(new_cop_args) => new_cop_command(&new_cop_args.cop),
         CliCommand::TestCop(test_cop_args) => test_cop_command(&test_cop_args.spec_files),
         CliCommand::Plugins(plugins_args) => run_plugins(&plugins_args),
+        CliCommand::Add(add_args) => run_add(&add_args),
         CliCommand::Install(install_args) => run_install(&install_args),
         CliCommand::Cache(cache_args) => run_cache(&cache_args),
         CliCommand::Watch(watch_args) => run_watch(&watch_args),
@@ -1615,6 +1634,14 @@ fn run_plugins(args: &PluginsArgs) -> Result<u8, AppError> {
             check: sync_args.check,
         }),
     }
+}
+
+fn run_add(args: &AddArgs) -> Result<u8, AppError> {
+    add::run_add(&add::AddOptions {
+        pack: args.pack.clone(),
+        registry: args.registry.clone(),
+        dry_run: args.dry_run,
+    })
 }
 
 fn run_install(args: &InstallArgs) -> Result<u8, AppError> {
