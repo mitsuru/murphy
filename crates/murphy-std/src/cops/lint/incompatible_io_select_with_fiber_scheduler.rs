@@ -15,7 +15,14 @@
 //!   upstream shapes currently expressible through the v1 AST surface.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Lint/IncompatibleIoSelectWithFiberScheduler` matcher
+// `io_select` is `(send (const {nil? cbase} :IO) :select ...)`. In Murphy
+// `::IO` collapses to `Const{scope:None}`, so a single `nil?` scope covers
+// bare and `::`-prefixed forms — equivalent to the prior `is_global_const`
+// check. The argument capture (`$...`) stays hand-rolled below.
+def_node_matcher!(io_select, "(send (const nil? :IO) :select ...)");
 
 const MSG_PREFIX: &str = "Use";
 
@@ -63,10 +70,8 @@ impl IncompatibleIoSelectWithFiberScheduler {
 }
 
 fn is_io_select(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(recv) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    cx.is_global_const(recv, "IO")
+    // `(send (const nil? :IO) :select ...)` — top-level `IO.select`.
+    io_select(node, cx)
 }
 
 fn single_io_array(node: Option<NodeId>, cx: &Cx<'_>) -> Option<NodeId> {
@@ -128,6 +133,33 @@ mod tests {
                         ^^^^^^^^^^^^^^^^^^^ Use `rp.wait_readable` instead of `IO.select([rp], [])`.
             "#})
             .expect_no_corrections("rs, _ = IO.select([rp], [])\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.1): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :IO) :select ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_flags_cbase_io_select() {
+        // `::IO` collapses to `Const{scope:None}` in Murphy, so a single
+        // `nil?` scope covers bare and `::`-prefixed forms.
+        test::<IncompatibleIoSelectWithFiberScheduler>().expect_correction(
+            indoc! {r#"
+                ::IO.select([io], [], [])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Use `io.wait_readable` instead of `::IO.select([io], [], [])`.
+            "#},
+            "io.wait_readable\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<IncompatibleIoSelectWithFiberScheduler>()
+            .expect_no_offenses("IO&.select([io], [], [])\n");
     }
 
     #[test]

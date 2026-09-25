@@ -37,7 +37,15 @@
 //! File.dirname(path, 2)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/NestedFileDirname` matcher `file_dirname?` is
+// `(send (const {cbase nil?} :File) :dirname ...)`. In Murphy `::File`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+// The exactly-one-argument narrowing stays hand-rolled below (Murphy
+// intentionally excludes the `File.dirname(path, n)` level form).
+def_node_matcher!(file_dirname, "(send (const nil? :File) :dirname ...)");
 
 const MSG: &str = "Use `dirname(%<path>s, %<level>s)` instead.";
 
@@ -63,26 +71,14 @@ impl NestedFileDirname {
 /// (accepting `::File`). Excludes `File.dirname(path, n)` which already uses
 /// the level form.
 fn is_file_dirname(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-
-    // Receiver must be File or ::File.
-    let Some(recv) = receiver.get() else {
-        return false;
-    };
-    if !cx.is_global_const(recv, "File") {
+    // `(send (const nil? :File) :dirname ...)` — top-level `File.dirname`.
+    if !file_dirname(node, cx) {
         return false;
     }
 
-    if cx.symbol_str(method) != "dirname" {
+    let NodeKind::Send { args, .. } = *cx.kind(node) else {
         return false;
-    }
+    };
 
     // Must have exactly one argument. This excludes `File.dirname(path, 2)`
     // which already uses the level form — treating it as a chain segment would
@@ -264,6 +260,27 @@ mod tests {
         // The outer node has 2 args so is_file_dirname returns false → not flagged.
         test::<NestedFileDirname>().expect_no_offenses("File.dirname(File.dirname(path), 2)
 ");
+    }
+
+    // --- Boundary characterization (murphy-ft88.1): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :File) :dirname ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_ignores_namespaced_file() {
+        // `Foo::File` has a non-nil const scope, so it is not flagged.
+        test::<NestedFileDirname>()
+            .expect_no_offenses("Foo::File.dirname(Foo::File.dirname(path))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<NestedFileDirname>()
+            .expect_no_offenses("File&.dirname(File.dirname(path))\n");
     }
 
     #[test]

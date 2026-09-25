@@ -37,7 +37,18 @@
 //! Class case: replace the `DateTime` name token in the receiver const with `Time`.
 //! Coercion case: no autocorrect.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/DateTime` matcher `date_time?` is
+// `(call (const {nil? cbase} :DateTime) ...)` (any method). In Murphy `::DateTime`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+// `call` covers both `send` and `csend`, matching the two `#[on_node]`
+// handlers below.
+// The method slot is an explicit `_` wildcard: the macro requires a `:sym`,
+// `_`, or `{...}` union there, and `_ ...` (any method, any args) matches
+// the same node set as RuboCop's method-omitted `(call recv ...)`.
+def_node_matcher!(date_time, "(call (const nil? :DateTime) _ ...)");
 
 const CLASS_MSG: &str = "Prefer `Time` over `DateTime`.";
 const COERCION_MSG: &str = "Do not use `#to_datetime`.";
@@ -97,10 +108,8 @@ impl DateTime {
 /// Returns true if `node` is a call on the `DateTime` constant
 /// (e.g. `DateTime.now`, `DateTime.iso8601(...)`).
 fn is_date_time_call(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(recv) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    cx.is_global_const(recv, "DateTime")
+    // `(call (const nil? :DateTime) _ ...)` — any call on top-level `DateTime`.
+    date_time(node, cx)
 }
 
 /// Returns true if `node` is a `to_datetime` call (e.g. `something.to_datetime`).
@@ -236,6 +245,32 @@ mod tests {
     #[test]
     fn accepts_non_datetime_const() {
         test::<DateTime>().expect_no_offenses("Time.now\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.1): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(call (const nil? :DateTime) _ ...)` refactor can be proven
+    // equivalent. `call` covers both `send` and `csend`, matching the
+    // existing `#[on_node(kind = "send")]` + `#[on_node(kind = "csend")]`
+    // pair and RuboCop's `(call ...)` pattern.
+
+    #[test]
+    fn boundary_ignores_namespaced_datetime() {
+        // `Foo::DateTime` has a non-nil const scope, so it is not flagged.
+        test::<DateTime>().expect_no_offenses("Foo::DateTime.now\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_datetime() {
+        // `&.` is a `csend` node; RuboCop's `(call ...)` pattern matches it
+        // and `#[on_node(kind = "csend")]` dispatches on it.
+        test::<DateTime>().expect_correction(
+            indoc! {"
+                DateTime&.now
+                ^^^^^^^^^^^^^ Prefer `Time` over `DateTime`.
+            "},
+            "Time&.now\n",
+        );
     }
 
     #[test]
