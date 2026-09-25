@@ -15,9 +15,10 @@
 //!   `scope` whose second argument is a plain `send`. Any receiver on
 //!   `scope` suppresses, and a second arg that is not a `send` (block,
 //!   lambda, proc call with block, symbol, etc.) never flags. Offense is
-//!   the second argument; autocorrect wraps it as `-> { src }`.
-//!   Upstream Include gating (`**/app/models/**/*.rb`) has no file-path
-//!   infrastructure in Murphy yet, so the cop fires in all files.
+//!   the second argument; autocorrect wraps it as `-> { src }`. File
+//!   scope (`Include: ['**/app/models/**/*.rb']`) is enforced via the
+//!   murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};

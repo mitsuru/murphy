@@ -567,145 +567,20 @@ submit_cop!(BulkChangeTable);
 // `SafeNavigationWithBlank` promoted to real cop in
 // `cops::rails::safe_navigation_with_blank`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/SaveBang
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct SaveBang;
+// `SaveBang` promoted to real cop in
+// `cops::rails::save_bang`.
 
-#[cop(
-    name = "Rails/SaveBang",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl SaveBang {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(SaveBang);
+// `SchemaComment` promoted to real cop in
+// `cops::rails::schema_comment`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/SchemaComment
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct SchemaComment;
+// `ScopeArgs` promoted to real cop in
+// `cops::rails::scope_args`.
 
-#[cop(
-    name = "Rails/SchemaComment",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl SchemaComment {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(SchemaComment);
+// `SelectMap` promoted to real cop in
+// `cops::rails::select_map`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ScopeArgs
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ScopeArgs;
-
-#[cop(
-    name = "Rails/ScopeArgs",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ScopeArgs {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ScopeArgs);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/SelectMap
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct SelectMap;
-
-#[cop(
-    name = "Rails/SelectMap",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl SelectMap {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(SelectMap);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ShortI18n
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ShortI18n;
-
-#[cop(
-    name = "Rails/ShortI18n",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ShortI18n {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ShortI18n);
+// `ShortI18n` promoted to real cop in
+// `cops::rails::short_i18n`.
 
 /// ## RuboCop parity
 ///
