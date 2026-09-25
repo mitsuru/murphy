@@ -4,7 +4,7 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Lint/UselessAssignment
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues:
 //!   - murphy-ev4p
@@ -70,21 +70,24 @@
 //!   inside a `while` body is in the loop's chunk; we don't reason about
 //!   iteration counts.
 //!
-//! ## Known v1 limitations (Phase 4 — escalate to extend the AST)
+//! ## Known v1 limitations (Phase 4 — AST shapes now exposed via murphy-z0o6/ltlw)
 //!
-//! - `for x in xs`, pattern-match captures (`case ... in [a, b]`), and regexp
-//!   implicit named captures (`/(?<name>…)/ =~ str`) are reported without
-//!   autocorrect. RuboCop may rewrite some of these to `_`; Murphy keeps the
-//!   parity-relevant offense behavior only.
+//! - Pattern-match captures (`case ... in [a, b]`, `MatchVar`) are reported
+//!   without autocorrect, matching the parity-relevant offense behavior.
+//!   `for` targets and regexp named captures now carry RuboCop-compatible
+//!   autocorrect (`_` rename and `(?:` rewrite respectively).
 //!
 //! ## Autocorrect
 //!
 //! The cop mirrors RuboCop's safe local rewrites for exposed AST shapes:
-//! plain local assignments drop the `name =` prefix, multiple-assignment
-//! targets are renamed to `_`, and local `op=` assignments drop the `=`.
-//! `||=` / `&&=` and sequential assignments remain report-only because the
-//! rewrite can change local-variable declaration semantics or produce
-//! invalid Ruby.
+//! plain local assignments drop the `name =` prefix, multiple-assignment and
+//! `for` targets are renamed to `_`, local `op=` assignments drop the `=`,
+//! `rescue => var` bindings drop the `=> var` part, and regexp named captures
+//! rewrite `(?<name>` to `(?:`. `||=` / `&&=` and sequential assignments
+//! (`foo = 1, bar = 2`) remain report-only because the rewrite can change
+//! local-variable declaration semantics or produce invalid Ruby. Chained
+//! assignments (`foo = bar = 1`) autocorrect the outer write only; the inner
+//! write is ignored like RuboCop.
 
 use murphy_plugin_api::var_semantic_model::{Assignment, Variable};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
@@ -110,14 +113,24 @@ impl UselessAssignment {
             // "Did you mean?" suggestion but are not tracked by the model, so
             // collect them with a scope-local walk.
             let candidates = collect_candidates(cx, scope_node);
+            // Collect unreferenced writes first so chained-assignment inners
+            // (`bar` in `foo = bar = 1`) can be ignored like RuboCop's
+            // `ignore_node` after flagging the outer write.
+            let mut writes: Vec<Write> = Vec::new();
             for var in scope.variables() {
                 for asgn in &var.assignments {
                     if asgn.is_referenced {
                         continue;
                     }
-                    let write = make_write(cx, var, asgn);
-                    emit_useless_assignment(cx, &write, scope.variables(), &candidates);
+                    writes.push(make_write(cx, var, asgn));
                 }
+            }
+            let ignored = chained_inner_nodes(cx, &writes);
+            for write in &writes {
+                if ignored.contains(&write.node) {
+                    continue;
+                }
+                emit_useless_assignment(cx, scope_node, write, scope.variables(), &candidates);
             }
         }
     }
@@ -168,49 +181,76 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
             },
             node: asgn.node_id,
         },
-        // Value-less `Lvasgn`: either a `Masgn` target or a binding whose
-        // source cannot be safely autocorrected (exception, `for`, or regexp
-        // named capture). The model records the var node directly, so ancestry
-        // disambiguates report-only bindings from multiple-assignment targets.
+        NodeKind::MatchVar(_) => Write {
+            name,
+            end: asgn.end,
+            range: assignment_name_range(cx, asgn.node_id, name_str),
+            kind: WriteKind::Pattern,
+            node: asgn.node_id,
+        },
+        // Value-less `Lvasgn`: a `Masgn` target, a `for` target, a regexp
+        // named capture under `MatchWithLvasgn`, or an exception binding.
+        // The model records the var node directly, so ancestry through any
+        // `Mlhs` wrappers disambiguates the shape.
         NodeKind::Lvasgn { value, .. } if value.get().is_none() => {
-            // Walk ancestors, threading through any `Mlhs` wrappers, to decide
-            // whether this value-less target is a report-only binding (name
-            // range, no autocorrect) or a multiple-assignment target.
+            // Walk ancestors, threading through any `Mlhs` wrappers.
             // `for a, b in xs` wraps each target in an `Mlhs` whose parent is
             // the `For`, so the immediate parent alone is not enough. Regexp
             // named captures are lowered under `MatchWithLvasgn`.
-            let is_exception = {
-                let mut current = asgn.node_id;
-                let mut found = false;
-                #[allow(clippy::while_let_loop)]
-                loop {
-                    let Some(parent) = cx.parent(current).get() else {
+            let mut current = asgn.node_id;
+            let mut container: Option<NodeId> = None;
+            #[allow(clippy::while_let_loop)]
+            loop {
+                let Some(parent) = cx.parent(current).get() else {
+                    break;
+                };
+                match *cx.kind(parent) {
+                    NodeKind::Resbody { .. }
+                    | NodeKind::For { .. }
+                    | NodeKind::MatchWithLvasgn { .. } => {
+                        container = Some(parent);
                         break;
-                    };
-                    match *cx.kind(parent) {
-                        NodeKind::Resbody { .. }
-                        | NodeKind::For { .. }
-                        | NodeKind::MatchWithLvasgn { .. } => {
-                            found = true;
-                            break;
-                        }
-                        NodeKind::Mlhs(_) => current = parent,
-                        _ => break,
+                    }
+                    NodeKind::Mlhs(_) => current = parent,
+                    _ => break,
+                }
+            }
+            match container.map(|id| cx.kind(id)) {
+                Some(NodeKind::For { .. }) => Write {
+                    name,
+                    end: asgn.end,
+                    range: assignment_name_range(cx, asgn.node_id, name_str),
+                    kind: WriteKind::For,
+                    node: asgn.node_id,
+                },
+                Some(NodeKind::MatchWithLvasgn { call, .. }) => {
+                    let call = *call;
+                    let regexp_node = regexp_node_for_match(cx, call);
+                    let range = regexp_node
+                        .map(|id| cx.range(id))
+                        .unwrap_or_else(|| assignment_name_range(cx, asgn.node_id, name_str));
+                    Write {
+                        name,
+                        end: asgn.end,
+                        range,
+                        kind: WriteKind::Regexp { regexp_node },
+                        node: asgn.node_id,
                     }
                 }
-                found
-            };
-            let kind = if is_exception {
-                WriteKind::Exception
-            } else {
-                WriteKind::Multiple
-            };
-            Write {
-                name,
-                end: asgn.end,
-                range: assignment_name_range(cx, asgn.node_id, name_str),
-                kind,
-                node: asgn.node_id,
+                Some(NodeKind::Resbody { .. }) => Write {
+                    name,
+                    end: asgn.end,
+                    range: assignment_name_range(cx, asgn.node_id, name_str),
+                    kind: WriteKind::Exception,
+                    node: asgn.node_id,
+                },
+                _ => Write {
+                    name,
+                    end: asgn.end,
+                    range: assignment_name_range(cx, asgn.node_id, name_str),
+                    kind: WriteKind::Multiple,
+                    node: asgn.node_id,
+                },
             }
         }
         // Defensive fallback: treat anything else as an exception-style write
@@ -264,6 +304,9 @@ struct Write {
 enum WriteKind {
     Local { value: OptNodeId },
     Multiple,
+    For,
+    Regexp { regexp_node: Option<NodeId> },
+    Pattern,
     Operator { op: &'static str, autocorrect: bool },
     Exception,
 }
@@ -274,6 +317,7 @@ struct Candidate {
 
 fn emit_useless_assignment(
     cx: &Cx<'_>,
+    scope_node: NodeId,
     write: &Write,
     variables: &[Variable],
     candidates: &[Candidate],
@@ -287,9 +331,18 @@ fn emit_useless_assignment(
             ));
         }
         WriteKind::Operator { op, .. } => {
-            message.push_str(&format!(" Use `{op}` instead of `{op}=`."));
+            // RuboCop only adds the operator guidance when the operator
+            // assignment is the return value of the scope (last expression).
+            // Otherwise the message is the bare prefix.
+            if is_scope_return_value(cx, scope_node, write.node) {
+                message.push_str(&format!(" Use `{op}` instead of `{op}=`."));
+            }
         }
-        WriteKind::Local { .. } | WriteKind::Exception => {
+        WriteKind::Local { .. }
+        | WriteKind::For
+        | WriteKind::Regexp { .. }
+        | WriteKind::Pattern
+        | WriteKind::Exception => {
             if let Some(similar) = similar_name(cx, name, variables, candidates) {
                 message.push_str(&format!(" Did you mean `{similar}`?"));
             }
@@ -306,7 +359,14 @@ fn emit_autocorrect(cx: &Cx<'_>, write: &Write) {
             let Some(value) = value.get() else {
                 return;
             };
-            if contains_assignment(cx, value) || is_part_of_sequential_assignment(cx, write.node) {
+            // RuboCop skips autocorrect for sequential assignment
+            // (`foo = 1, bar = 2` where the value is an Array containing an
+            // assignment) but still corrects chained assignment
+            // (`foo = bar = 1`). `is_part_of_sequential_assignment` covers
+            // the inner write of a sequential assignment.
+            if is_sequential_assignment_value(cx, value)
+                || is_part_of_sequential_assignment(cx, write.node)
+            {
                 return;
             }
             cx.emit_edit(
@@ -317,9 +377,18 @@ fn emit_autocorrect(cx: &Cx<'_>, write: &Write) {
                 "",
             );
         }
-        WriteKind::Multiple => {
+        WriteKind::Multiple | WriteKind::For => {
             cx.emit_edit(write.range, "_");
         }
+        WriteKind::Regexp { regexp_node } => {
+            if let Some(regexp_id) = regexp_node {
+                let name = cx.symbol_str(write.name);
+                if let Some(edit) = regexp_named_capture_edit(cx, regexp_id, name) {
+                    cx.emit_edit(edit.0, &edit.1);
+                }
+            }
+        }
+        WriteKind::Pattern => {}
         WriteKind::Operator {
             autocorrect: true, ..
         } => {
@@ -329,8 +398,12 @@ fn emit_autocorrect(cx: &Cx<'_>, write: &Write) {
         }
         WriteKind::Operator {
             autocorrect: false, ..
+        } => {}
+        WriteKind::Exception => {
+            if let Some(edit) = exception_binding_edit(cx, write.node) {
+                cx.emit_edit(edit.0, &edit.1);
+            }
         }
-        | WriteKind::Exception => {}
     }
 }
 
@@ -360,8 +433,15 @@ fn operator_equals_range(cx: &Cx<'_>, write: &Write) -> Option<Range> {
     })
 }
 
-fn contains_assignment(cx: &Cx<'_>, node: NodeId) -> bool {
-    let mut stack = vec![node];
+/// RuboCop's `sequential_assignment?` for the value side: `foo = 1, bar = 2`
+/// lowers to `Lvasgn(foo, Array[Int, Lvasgn(bar)])`. Only an `Array` value
+/// containing an assignment counts as sequential (report-only). A direct
+/// `Lvasgn` value (`foo = bar = 1`, chained) still autocorrects the outer.
+fn is_sequential_assignment_value(cx: &Cx<'_>, value: NodeId) -> bool {
+    if !matches!(*cx.kind(value), NodeKind::Array(_)) {
+        return false;
+    }
+    let mut stack = vec![value];
     while let Some(id) = stack.pop() {
         if matches!(
             *cx.kind(id),
@@ -390,11 +470,11 @@ fn similar_name<'a>(
         .map(|v| cx.symbol_str(v.name))
         .chain(candidates.iter().map(|c| cx.symbol_str(c.name)))
     {
-        if candidate == name
-            || candidate.starts_with('_')
-            || candidate.contains(name)
-            || name.contains(candidate)
-        {
+        // Mirror RuboCop's DidYouMean-based suggestion: skip identical and
+        // underscore-prefixed candidates. Unlike the previous
+        // contains-filter, `item` vs `items` (as in `for item in items`)
+        // must still suggest, matching RuboCop's spec.
+        if candidate == name || candidate.starts_with('_') {
             continue;
         }
         let dist = levenshtein(name, candidate);
@@ -439,6 +519,171 @@ fn operator_text(cx: &Cx<'_>, node: NodeId) -> &'static str {
         NodeKind::OrAsgn { .. } => "||",
         NodeKind::AndAsgn { .. } => "&&",
         _ => "operator",
+    }
+}
+
+/// Find the `Regexp` node for a `MatchWithLvasgn` call (`=~` send).
+/// The `call` is `(send :=~ regexp str)`; the receiver is the regexp literal
+/// RuboCop uses as the offense range and autocorrect target.
+fn regexp_node_for_match(cx: &Cx<'_>, call: NodeId) -> Option<NodeId> {
+    if let NodeKind::Send { receiver, .. } = *cx.kind(call)
+        && let Some(recv) = receiver.get()
+        && matches!(*cx.kind(recv), NodeKind::Regexp { .. })
+    {
+        return Some(recv);
+    }
+    // Fallback: first Regexp descendant of the call.
+    let mut stack = vec![call];
+    while let Some(id) = stack.pop() {
+        if matches!(*cx.kind(id), NodeKind::Regexp { .. }) {
+            return Some(id);
+        }
+        stack.extend(cx.children(id));
+    }
+    None
+}
+
+/// Build the `(?:` rewrite for a regexp named capture:
+/// replace the first `(?<name>` in the regexp literal with `(?:`.
+fn regexp_named_capture_edit(
+    cx: &Cx<'_>,
+    regexp_node: NodeId,
+    name: &str,
+) -> Option<(Range, String)> {
+    let range = cx.range(regexp_node);
+    let src = cx.source();
+    let text = src.get(range.start as usize..range.end as usize)?;
+    let needle = format!("(?<{name}>");
+    let rel = text.find(&needle)?;
+    let start = range.start + rel as u32;
+    let edit_range = Range {
+        start,
+        end: start + needle.len() as u32,
+    };
+    Some((edit_range, "(?:".to_string()))
+}
+
+/// Build the `rescue => var` removal: from the end of the exception list
+/// (or the `rescue` keyword when typeless) to the end of the var node.
+/// Mirrors RuboCop's `remove_exception_assignment_part`.
+fn exception_binding_edit(cx: &Cx<'_>, var_node: NodeId) -> Option<(Range, String)> {
+    let resbody = cx.parent(var_node).get()?;
+    let NodeKind::Resbody { exceptions, .. } = *cx.kind(resbody) else {
+        return None;
+    };
+    let excs = cx.list(exceptions);
+    let start = if let Some(last) = excs.last() {
+        cx.range(*last).end
+    } else {
+        // Typeless `rescue => e`: start after the `rescue` keyword.
+        let res_range = cx.range(resbody);
+        let src = cx.source();
+        let text = src.get(res_range.start as usize..res_range.end as usize)?;
+        let rel = text.find("rescue")?;
+        res_range.start + rel as u32 + "rescue".len() as u32
+    };
+    let end = cx.range(var_node).end;
+    if start >= end {
+        return None;
+    }
+    Some((
+        Range { start, end },
+        String::new(),
+    ))
+}
+
+/// RuboCop's `return_value_node_of_scope`: the last expression of the scope
+/// body. Operator guidance (`Use X instead of X=`) is only shown when the
+/// operator assignment *is* that return value.
+fn is_scope_return_value(cx: &Cx<'_>, scope_node: NodeId, op_node: NodeId) -> bool {
+    let Some(body) = scope_body_node(cx, scope_node) else {
+        return false;
+    };
+    let return_node = match *cx.kind(body) {
+        NodeKind::Begin(ids) | NodeKind::Kwbegin(ids) => {
+            let stmts = cx.list(ids);
+            match stmts.last() {
+                Some(last) => *last,
+                None => return false,
+            }
+        }
+        _ => body,
+    };
+    return_node == op_node
+}
+
+/// Scope body for return-value checks: `Def`/`Defs`/`Class`/`Module`/
+/// `Sclass`/`Block`/`Numblock`/`Itblock` expose `body`; otherwise the scope
+/// node itself is the body (top-level single statement or `Begin` list).
+fn scope_body_node(cx: &Cx<'_>, scope_node: NodeId) -> Option<NodeId> {
+    match *cx.kind(scope_node) {
+        NodeKind::Def { body, .. } | NodeKind::Defs { body, .. } => body.get(),
+        NodeKind::Class { body, .. } | NodeKind::Module { body, .. } => body.get(),
+        NodeKind::Sclass { body, .. } => body.get(),
+        NodeKind::Block { body, .. }
+        | NodeKind::Numblock { body, .. }
+        | NodeKind::Itblock { body, .. } => body.get(),
+        _ => Some(scope_node),
+    }
+}
+
+/// RuboCop's chained-assignment `ignore_node`: for `foo = bar = 1` (outer
+/// `Lvasgn` whose value contains another `Lvasgn`), the inner write is
+/// ignored once the outer is flagged. Sequential assignment
+/// (`foo = 1, bar = 2`, value is `Array`) is *not* chained: both are flagged.
+fn chained_inner_nodes(cx: &Cx<'_>, writes: &[Write]) -> std::collections::HashSet<NodeId> {
+    use std::collections::{HashMap, HashSet};
+    // Map assignment node -> write index for unreferenced Lvasgn locals.
+    let mut by_node: HashMap<NodeId, usize> = HashMap::new();
+    for (idx, w) in writes.iter().enumerate() {
+        if matches!(w.kind, WriteKind::Local { .. }) {
+            by_node.insert(w.node, idx);
+        }
+    }
+    let mut ignored = HashSet::new();
+    for w in writes {
+        let WriteKind::Local { value } = w.kind else {
+            continue;
+        };
+        let Some(val) = value.get() else {
+            continue;
+        };
+        // Sequential (Array value with assignment inside) is not chained.
+        if is_sequential_assignment_value(cx, val) {
+            continue;
+        }
+        if !is_chained_value(cx, val) {
+            continue;
+        }
+        // Collect descendant Lvasgn writes inside the chained value.
+        let mut stack = vec![val];
+        while let Some(id) = stack.pop() {
+            if id != w.node && by_node.contains_key(&id) {
+                ignored.insert(id);
+            }
+            stack.extend(cx.children(id));
+        }
+    }
+    ignored
+}
+
+/// Chained value: direct `Lvasgn` or a `Send` wrapping one
+/// (`foo = bar = 1`, `foo = -bar = 1`). Mirrors RuboCop's
+/// `chained_assignment?` (`expression.send?` or `expression.lvasgn?`).
+fn is_chained_value(cx: &Cx<'_>, value: NodeId) -> bool {
+    match *cx.kind(value) {
+        NodeKind::Lvasgn { .. } => true,
+        NodeKind::Send { .. } => {
+            let mut stack = vec![value];
+            while let Some(id) = stack.pop() {
+                if matches!(*cx.kind(id), NodeKind::Lvasgn { .. }) {
+                    return true;
+                }
+                stack.extend(cx.children(id));
+            }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -489,10 +734,11 @@ mod tests {
 
     #[test]
     fn flags_assignments_that_are_never_read() {
+        // RuboCop's DidYouMean suggests `used` for `unused` (distance 2).
         test::<UselessAssignment>().expect_offense(indoc! {r#"
             used = 1
             unused = 2
-            ^^^^^^ Useless assignment to variable - `unused`.
+            ^^^^^^ Useless assignment to variable - `unused`. Did you mean `used`?
             used
         "#});
     }
@@ -655,6 +901,88 @@ mod tests {
             x = 0
             x &&= 1
             ^ Useless assignment to variable - `x`. Use `&&` instead of `&&=`.
+        "#});
+    }
+
+    #[test]
+    fn operator_message_only_when_last_expression() {
+        // RuboCop parity (murphy-ev4p): `Use || instead of ||=` only when
+        // the operator assignment is the scope return value.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            def some_method
+              foo = do_something_returns_object_or_nil
+              foo ||= 1
+              ^^^ Useless assignment to variable - `foo`. Use `||` instead of `||=`.
+            end
+        "#});
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            def some_method
+              foo = do_something_returns_object_or_nil
+              foo ||= 1
+              ^^^ Useless assignment to variable - `foo`.
+              some_return_value
+            end
+        "#});
+    }
+
+    #[test]
+    fn chained_assignment_flags_outer_only_and_corrects() {
+        // RuboCop parity (murphy-ev4p): `foo = bar = 1` flags only `foo`,
+        // autocorrect drops the outer `foo =` prefix.
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                def some_method
+                  foo = bar = do_something
+                  ^^^ Useless assignment to variable - `foo`.
+                end
+            "#},
+            "def some_method
+  bar = do_something
+end
+",
+        );
+    }
+
+    #[test]
+    fn exception_binding_autocorrect_removes_binding() {
+        // RuboCop parity (murphy-ev4p): `rescue => e` removes `=> e`.
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                begin
+                  do_something
+                rescue => error
+                          ^^^^^ Useless assignment to variable - `error`.
+                end
+            "#},
+            "begin
+  do_something
+rescue
+end
+",
+        );
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                begin
+                  do_something
+                rescue FirstError => error
+                                     ^^^^^ Useless assignment to variable - `error`.
+                end
+            "#},
+            "begin
+  do_something
+rescue FirstError
+end
+",
+        );
+    }
+
+    #[test]
+    fn for_loop_suggests_plural_collection_name() {
+        // RuboCop parity (murphy-ev4p): `for item in items` suggests `items`.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            for item in items
+                ^^^^ Useless assignment to variable - `item`. Did you mean `items`?
+            end
         "#});
     }
 
@@ -846,18 +1174,27 @@ mod tests {
     }
 
     #[test]
-    fn for_loop_unused_variable_is_not_autocorrected() {
-        // RuboCop rewrites the index to `_`; Murphy reports without a fix.
-        let run = run_cop_with_edits::<UselessAssignment>("for i in [1, 2]\n  do_something\nend\n");
-        assert_eq!(run.edits.len(), 0);
+    fn for_loop_unused_variable_is_autocorrected_to_underscore() {
+        // RuboCop parity (murphy-ev4p): `for i` rewrites the index to `_`.
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                for i in [1, 2]
+                    ^ Useless assignment to variable - `i`.
+                  do_something
+                end
+            "#},
+            "for _ in [1, 2]
+  do_something
+end
+",
+        );
     }
 
     #[test]
-    fn for_destructuring_unused_variable_is_not_autocorrected() {
+    fn for_destructuring_unused_variables_autocorrected_to_underscore() {
         // `for a, b in xs` wraps each target in an `Mlhs` whose parent is the
-        // `For`. The unused targets must be classified as exception-style
-        // writes (no autocorrect), not multiple-assignment targets (which
-        // would be rewritten to `_`).
+        // `For`. RuboCop parity (murphy-ev4p): each unused target is renamed
+        // to `_`, like multiple-assignment targets.
         let run =
             run_cop_with_edits::<UselessAssignment>("for a, b in [[1, 2]]\n  do_something\nend\n");
         assert!(
@@ -866,8 +1203,8 @@ mod tests {
         );
         assert_eq!(
             run.edits.len(),
-            0,
-            "for-destructuring targets must not be autocorrected, got {:?}",
+            2,
+            "for-destructuring targets must be autocorrected to `_`, got {:?}",
             run.edits
         );
     }
@@ -904,9 +1241,11 @@ mod tests {
 
     #[test]
     fn regexp_named_capture_flags_when_unused() {
+        // RuboCop parity (murphy-ev4p): offense range is the regexp literal,
+        // not the capture name.
         test::<UselessAssignment>().expect_offense(indoc! {r#"
             /(?<name>foo)/ =~ value
-                ^^^^ Useless assignment to variable - `name`.
+            ^^^^^^^^^^^^^^ Useless assignment to variable - `name`.
         "#});
     }
 
@@ -919,18 +1258,19 @@ mod tests {
     }
 
     #[test]
-    fn pattern_and_regexp_captures_are_not_autocorrected() {
-        for src in [
-            "case value\nin {name: name}\nend\n",
-            "/(?<name>foo)/ =~ value\n",
-        ] {
-            let run = run_cop_with_edits::<UselessAssignment>(src);
-            assert_eq!(
-                run.edits.len(),
-                0,
-                "captures must not be autocorrected: {src}"
-            );
-        }
+    fn pattern_captures_are_not_autocorrected_but_regexp_is() {
+        // Pattern-match captures stay report-only; regexp named captures
+        // rewrite `(?<name>` to `(?:` per RuboCop (murphy-ev4p).
+        let run = run_cop_with_edits::<UselessAssignment>("case value\nin {name: name}\nend\n");
+        assert_eq!(run.edits.len(), 0, "pattern captures must not be autocorrected");
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                /(?<name>foo)/ =~ value
+                ^^^^^^^^^^^^^^ Useless assignment to variable - `name`.
+            "#},
+            "/(?:foo)/ =~ value
+",
+        );
     }
 
     // murphy-xek: flow-sensitive dataflow — overwrite-before-read +
