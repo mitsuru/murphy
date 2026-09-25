@@ -10,11 +10,13 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the `send` call head `(call _ :send ...)` (murphy-s1yc.3):
+//!   `call` = `{send csend}` covers safe-navigation (`obj&.send`), mirroring
+//!   RuboCop's `alias on_csend on_send`; the `_` receiver binds an absent
+//!   (receiverless `send`) or present receiver per murphy-if9y; trailing `...`
+//!   absorbs any argument list, with the upstream `node.arguments?` guard
+//!   applied separately (bare `obj.send` is not flagged).
 //!   Disabled by default (matches upstream Enabled: false).
-//!   The cop fires on `send` method calls with at least one argument, matching
-//!   RuboCop's `node.arguments?` guard. Bare `obj.send` (no args) is not flagged.
-//!   Both `send` and `csend` (safe-navigation) calls are handled, mirroring
-//!   RuboCop's `alias on_csend on_send`.
 //!   No autocorrect is provided, matching the upstream implementation.
 //! ```
 //!
@@ -30,7 +32,15 @@
 //! quuz.public_send(fred)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
+
+// Verbatim port of the `send` call head (murphy-s1yc.3):
+// `(call _ :send ...)` — `call` = `{send csend}` covers safe-navigation
+// (`obj&.send(bar)`); the `_` receiver binds an absent (receiverless `send`)
+// or present receiver; trailing `...` absorbs any argument list (zero or
+// more), so the upstream `return unless node.arguments?` guard is applied
+// separately in `check` (`obj.send` with no args does not match the cop).
+def_node_matcher!(send_call, "(call _ :send ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -53,13 +63,18 @@ impl Send {
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) == Some("send") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ :send ...)` head: filters to `send` calls on either
+    // `send` or `csend` (safe-navigation), with any receiver (absent or
+    // present). Trailing `...` matches zero args too, so apply RuboCop's
+    // `return unless node.arguments?` guard separately.
+    if !send_call(node, cx) {
+        return;
+    }
     // Only flag calls that have at least one argument.
     if !cx.has_call_arguments(node) {
         return;
@@ -118,6 +133,34 @@ mod tests {
     fn accepts_send_without_args() {
         // Bare `obj.send` (no arguments) is not flagged.
         test::<Send>().expect_no_offenses("obj.send\n");
+    }
+
+    // --- Characterization (murphy-s1yc.3): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // `(call _ :send ...)` port can be proven byte-identical (plus the
+    // upstream `arguments?` guard). `call` = `{send csend}` covers
+    // safe-navigation; `_` binds the absent (receiverless) slot per if9y.
+
+    #[test]
+    fn s1yc3_flags_bare_send_with_arg() {
+        // Bare `send(bar)` matches: `_` binds the nil-filled receiver.
+        test::<Send>().expect_offense(indoc! {"
+            send(bar)
+            ^^^^ Prefer `Object#__send__` or `Object#public_send` to `send`.
+        "});
+    }
+
+    #[test]
+    fn s1yc3_accepts_csend_send_without_args() {
+        // Matcher `(call _ :send ...)` matches `obj&.send`, but the upstream
+        // `arguments?` guard rejects zero-arg calls — no offense.
+        test::<Send>().expect_no_offenses("obj&.send\n");
+    }
+
+    #[test]
+    fn s1yc3_accepts_bare_send_without_args() {
+        // Bare `send` with no args: matcher matches, guard rejects.
+        test::<Send>().expect_no_offenses("send\n");
     }
 }
 murphy_plugin_api::submit_cop!(Send);
