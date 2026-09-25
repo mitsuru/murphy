@@ -357,7 +357,7 @@ fn rails_pack_excludes_db_schema_from_discovery() {
     // union) → `discover_with_config`. The user also sets its own Exclude with
     // `inherit_mode: merge: [Exclude]`, so the pack default must *union* with
     // the user list rather than be replaced by it.
-    use murphy_core::{CopRegistry, MurphyConfig, discover_with_config};
+    use murphy_core::{discover_with_config, CopRegistry, MurphyConfig};
 
     let rails = rails_pack_path()
         .canonicalize()
@@ -615,36 +615,148 @@ fn rails_pack_enforces_audited_rails_file_scopes() {
     config.apply_pack_default_layers(&registry.pack_default_configs());
 
     let cases: &[(&str, &str, &str)] = &[
-        ("Rails/ActionControllerTestCase", "test/models/foo_test.rb", "app/models/foo.rb"),
-        ("Rails/ApplicationRecord", "app/models/foo.rb", "db/migrate/001_create_users.rb"),
-        ("Rails/AssertNot", "test/test_helper.rb", "app/models/foo.rb"),
-        ("Rails/AttributeDefaultBlockValue", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/ContentTag", "app/helpers/foo_helper.rb", "app/models/foo.rb"),
-        ("Rails/CreateTableWithTimestamps", "db/migrate/001_create_users.rb", "app/models/foo.rb"),
-        ("Rails/DangerousColumnNames", "db/migrate/001_add_col.rb", "app/models/foo.rb"),
-        ("Rails/Delegate", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/EnumHash", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/EnumSyntax", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/EnumUniqueness", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/EnvironmentVariableAccess", "app/models/foo.rb", "spec/models/foo_spec.rb"),
+        (
+            "Rails/ActionControllerTestCase",
+            "test/models/foo_test.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/ApplicationRecord",
+            "app/models/foo.rb",
+            "db/migrate/001_create_users.rb",
+        ),
+        (
+            "Rails/AssertNot",
+            "test/test_helper.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/AttributeDefaultBlockValue",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/ContentTag",
+            "app/helpers/foo_helper.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/CreateTableWithTimestamps",
+            "db/migrate/001_create_users.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/DangerousColumnNames",
+            "db/migrate/001_add_col.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/Delegate",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/EnumHash",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/EnumSyntax",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/EnumUniqueness",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/EnvironmentVariableAccess",
+            "app/models/foo.rb",
+            "spec/models/foo_spec.rb",
+        ),
         ("Rails/Exit", "app/models/foo.rb", "spec/models/foo_spec.rb"),
-        ("Rails/HasAndBelongsToMany", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/HasManyOrHasOneDependent", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/HelperInstanceVariable", "app/helpers/foo_helper.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/HttpPositionalArguments", "spec/requests/foo_spec.rb", "config/routes/admin.rb"),
-        ("Rails/HttpStatusNameConsistency", "app/controllers/foo_controller.rb", "app/models/foo.rb"),
-        ("Rails/I18nLazyLookup", "app/controllers/foo_controller.rb", "app/models/foo.rb"),
-        ("Rails/I18nLocaleAssignment", "spec/models/foo_spec.rb", "app/models/foo.rb"),
-        ("Rails/IgnoredSkipActionFilterOption", "app/controllers/foo_controller.rb", "app/models/foo.rb"),
-        ("Rails/InverseOf", "app/models/foo.rb", "app/controllers/foo_controller.rb"),
-        ("Rails/LexicallyScopedActionFilter", "app/controllers/foo_controller.rb", "app/models/foo.rb"),
-        ("Rails/MailerName", "app/mailers/foo_mailer.rb", "app/models/foo.rb"),
+        (
+            "Rails/HasAndBelongsToMany",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/HasManyOrHasOneDependent",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/HelperInstanceVariable",
+            "app/helpers/foo_helper.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/HttpPositionalArguments",
+            "spec/requests/foo_spec.rb",
+            "config/routes/admin.rb",
+        ),
+        (
+            "Rails/HttpStatusNameConsistency",
+            "app/controllers/foo_controller.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/I18nLazyLookup",
+            "app/controllers/foo_controller.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/I18nLocaleAssignment",
+            "spec/models/foo_spec.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/IgnoredSkipActionFilterOption",
+            "app/controllers/foo_controller.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/InverseOf",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/LexicallyScopedActionFilter",
+            "app/controllers/foo_controller.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/MailerName",
+            "app/mailers/foo_mailer.rb",
+            "app/models/foo.rb",
+        ),
         ("Rails/MatchRoute", "config/routes.rb", "app/models/foo.rb"),
-        ("Rails/MigrationClassName", "db/migrate/001_create_users.rb", "app/models/foo.rb"),
-        ("Rails/MultipleRoutePaths", "config/routes.rb", "app/models/foo.rb"),
-        ("Rails/NotNullColumn", "db/migrate/001_add_col.rb", "app/models/foo.rb"),
-        ("Rails/Output", "app/models/foo.rb", "spec/models/foo_spec.rb"),
-        ("Rails/RefuteMethods", "test/test_helper.rb", "app/models/foo.rb"),
+        (
+            "Rails/MigrationClassName",
+            "db/migrate/001_create_users.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/MultipleRoutePaths",
+            "config/routes.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/NotNullColumn",
+            "db/migrate/001_add_col.rb",
+            "app/models/foo.rb",
+        ),
+        (
+            "Rails/Output",
+            "app/models/foo.rb",
+            "spec/models/foo_spec.rb",
+        ),
+        (
+            "Rails/RefuteMethods",
+            "test/test_helper.rb",
+            "app/models/foo.rb",
+        ),
     ];
     for (cop, in_scope, out_of_scope) in cases {
         assert!(
@@ -660,10 +772,7 @@ fn rails_pack_enforces_audited_rails_file_scopes() {
     // Spot-checks for multi-glob / Exclude variants that the table above
     // does not fully pin.
     assert!(
-        config.cop_applies_to_file(
-            "Rails/EnumSyntax",
-            std::path::Path::new("lib/foo.rb")
-        ),
+        config.cop_applies_to_file("Rails/EnumSyntax", std::path::Path::new("lib/foo.rb")),
         "Rails/EnumSyntax must also apply under lib/"
     );
     assert!(
@@ -676,7 +785,9 @@ fn rails_pack_enforces_audited_rails_file_scopes() {
     assert!(
         !config.cop_applies_to_file(
             "Rails/CreateTableWithTimestamps",
-            std::path::Path::new("db/migrate/20240101000000_create_active_storage_tables.active_storage.rb")
+            std::path::Path::new(
+                "db/migrate/20240101000000_create_active_storage_tables.active_storage.rb"
+            )
         ),
         "CreateTableWithTimestamps must exclude active_storage migration"
     );
