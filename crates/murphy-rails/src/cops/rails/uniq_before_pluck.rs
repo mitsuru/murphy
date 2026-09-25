@@ -5,17 +5,16 @@
 //! upstream: rubocop-rails
 //! upstream_cop: Rails/UniqBeforePluck
 //! upstream_version_checked: 2.35.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-31sx
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Audited against rubocop-rails 2.35.0 for murphy-h8ke. The
-//!   conservative/aggressive receiver gates, the uniq-selector offense
-//!   range, and the distinct-insert autocorrect all match upstream.
-//!   Residual gaps tracked in murphy-31sx: numblock/itblock `uniq`
-//!   (`pluck(:x).uniq { _1 }` is flagged; upstream `[!^any_block]` ignores
-//!   every block form); zero-arg `pluck.uniq` and uniq-with-args are
-//!   skipped while upstream `...` wildcards match them (near-dead code).
+//!   Audited against rubocop-rails 2.35.0 for murphy-h8ke; murphy-31sx
+//!   closed the residual gaps. The `[!^any_block $(send $(send _ :pluck ...)
+//!   :uniq ...)]` pattern is mirrored exactly: every block form
+//!   (Block/Numblock/Itblock) suppresses the offense, `pluck`/`uniq`
+//!   accept any arity, and the conservative/aggressive receiver gates,
+//!   the uniq-selector offense range, and the distinct-insert
+//!   autocorrect all match upstream.
 //! ```
 //!
 //! recommend `distinct.pluck(:col)`. `uniq` materialises the entire
@@ -25,18 +24,24 @@
 //!
 //! ## Matched shape (Send node)
 //!
-//! Outer `Send(receiver=Some(inner), method="uniq", args=[])`, where
-//! `inner` is itself `Send(receiver=_, method="pluck", args=[_, ...])`.
-//! Block forms (`pluck(:id).uniq { ... }`) are skipped because the block
-//! changes Array#uniq's equality key.
+//! Outer `Send(receiver=Some(inner), method="uniq", args=[...])`, where
+//! `inner` is itself `Send(receiver=_, method="pluck", args=[...])`,
+//! mirroring upstream `[!^any_block $(send $(send _ :pluck ...) :uniq ...)]`.
+//! Any block form (`pluck(:id).uniq { ... }`, `uniq { _1[0] }`,
+//! `uniq { it[0] }`) suppresses the offense because the block changes
+//! Array#uniq's equality key. Both `pluck` and `uniq` accept any arity —
+//! zero-arg `pluck.uniq` and `uniq`-with-args are near-dead code at
+//! runtime (`pluck` needs columns, `uniq` takes no arguments) but are
+//! still flagged, matching upstream's `...` wildcards.
 //!
 //! `EnforcedStyle = "conservative"` (the default) only accepts `pluck`
 //! whose receiver is a constant, matching RuboCop's model-class guard.
 //! `EnforcedStyle = "aggressive"` accepts any `pluck` receiver.
 //!
 //! Same shape as `Rails/Pick` with `:first` → `:uniq`; see that cop's
-//! module docs for the DSL semantics. `pluck` arity ≥1 (zero-arg
-//! `pluck` is a degenerate form), outer `uniq` arity 0.
+//! module docs for the DSL semantics. Unlike `Pick` (where `first(5)`
+//! is not rewritable to `pick`), `uniq` arguments do not affect the
+//! `distinct.pluck` rewrite, so no arity gate applies on either side.
 //!
 //! ## Autocorrect
 //!
@@ -98,38 +103,45 @@ impl UniqBeforePluck {
 }
 
 fn pluck_uniq_receiver(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    // Mirrors upstream `$(send $(send _ :pluck ...) :uniq ...)`: both
+    // `pluck` and `uniq` accept any arity (`...` wildcards).
     let NodeKind::Send {
-        receiver,
-        method,
-        args,
+        receiver, method, ..
     } = *cx.kind(node)
     else {
         return None;
     };
-    if cx.symbol_str(method) != "uniq" || !cx.list(args).is_empty() {
+    if cx.symbol_str(method) != "uniq" {
         return None;
     };
 
     let pluck = receiver.get()?;
     let NodeKind::Send {
         method: pluck_method,
-        args: pluck_args,
         ..
     } = *cx.kind(pluck)
     else {
         return None;
     };
-    if cx.symbol_str(pluck_method) != "pluck" || cx.list(pluck_args).is_empty() {
+    if cx.symbol_str(pluck_method) != "pluck" {
         return None;
     }
     Some(pluck)
 }
 
 fn is_block_call(node: NodeId, cx: &Cx<'_>) -> bool {
+    // Mirrors upstream `[!^any_block ...]`: the uniq send is ignored when
+    // it is the call of ANY block form (cf. Rails/Output block-call check
+    // for the `Block{call}` / `Numblock{send}` / `Itblock{send}` fields).
     let Some(parent) = cx.parent(node).get() else {
         return false;
     };
-    matches!(*cx.kind(parent), NodeKind::Block { call, .. } if call == node)
+    match *cx.kind(parent) {
+        NodeKind::Block { call, .. } => call == node,
+        NodeKind::Numblock { send, .. } => send == node,
+        NodeKind::Itblock { send, .. } => send == node,
+        _ => false,
+    }
 }
 
 fn pluck_receiver_is_const(pluck: NodeId, cx: &Cx<'_>) -> bool {
@@ -284,10 +296,45 @@ mod tests {
     }
 
     #[test]
-    fn does_not_flag_pluck_zero_args_then_uniq() {
-        // Degenerate `pluck.uniq` — `pluck` with no args is
-        // ill-formed for `distinct.pluck` rewriting too.
-        test::<UniqBeforePluck>().expect_no_offenses("Post.pluck.uniq\n");
+    fn does_not_flag_pluck_uniq_with_numblock() {
+        // Mirrors upstream `ignores uniq with a numblock` spec:
+        // `uniq { _1[0] }` is a Numblock whose call is the uniq send,
+        // so the upstream `[!^any_block]` guard ignores it.
+        test::<UniqBeforePluck>().expect_no_offenses("Post.pluck(:id).uniq { _1[0] }\n");
+    }
+
+    #[test]
+    fn does_not_flag_pluck_uniq_with_itblock() {
+        // Mirrors upstream `ignores uniq with an \`it\` block` spec
+        // (Ruby 3.4): `uniq { it[0] }` is an Itblock whose call is the
+        // uniq send, so the upstream `[!^any_block]` guard ignores it.
+        test::<UniqBeforePluck>().expect_no_offenses("Post.pluck(:id).uniq { it[0] }\n");
+    }
+
+    #[test]
+    fn flags_zero_arg_pluck_then_uniq() {
+        // Upstream `:pluck ...` wildcard matches zero-arg `pluck` too
+        // (near-dead code at runtime, still flagged for parity).
+        test::<UniqBeforePluck>().expect_correction(
+            indoc! {r#"
+                Post.pluck.uniq
+                           ^^^^ Use `distinct` before `pluck`.
+            "#},
+            "Post.distinct.pluck\n",
+        );
+    }
+
+    #[test]
+    fn flags_pluck_then_uniq_with_args() {
+        // Upstream `:uniq ...` wildcard matches `uniq` with args too
+        // (near-dead code at runtime, still flagged for parity).
+        test::<UniqBeforePluck>().expect_correction(
+            indoc! {r#"
+                Post.pluck(:id).uniq(:foo)
+                                ^^^^ Use `distinct` before `pluck`.
+            "#},
+            "Post.distinct.pluck(:id)\n",
+        );
     }
 
     #[test]
