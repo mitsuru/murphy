@@ -87,6 +87,20 @@ mod tests {
     }
 
     #[test]
+    fn node_kind_tag_is_unified_with_murphy_ast_murphy_skd() {
+        // murphy-skd: `murphy-plugin-api` must re-export `murphy_ast::NodeKindTag`
+        // instead of keeping its own `pub struct NodeKindTag(pub u8)`. If a duplicate
+        // definition is reintroduced, the `TypeId`s diverge and this fails.
+        assert_eq!(
+            std::any::TypeId::of::<crate::NodeKindTag>(),
+            std::any::TypeId::of::<murphy_ast::NodeKindTag>()
+        );
+        assert_eq!(crate::NodeKindTag(17), murphy_ast::NodeKindTag(17));
+        // Unification must not bump the ABI version.
+        assert_eq!(crate::MURPHY_PLUGIN_ABI_VERSION, 4);
+    }
+
+    #[test]
     fn node_cop_can_override_kinds_for_dynamic_dispatch() {
         struct Dynamic {
             kinds: Vec<NodeKindTag>,
