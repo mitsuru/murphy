@@ -28,7 +28,13 @@
 //! (`URI::DEFAULT_PARSER.make_regexp` vs `URI::RFC2396_PARSER.make_regexp`)
 //! and is not safe to automate.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/UriRegexp` matcher is
+// `(send (const {nil? cbase} :URI) :regexp ...)`. In Murphy `::URI`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+def_node_matcher!(uri_regexp, "(send (const nil? :URI) :regexp ...)");
 
 const MSG: &str = "`URI.regexp` is obsolete and should not be used. Instead, use `URI::DEFAULT_PARSER.make_regexp` (Ruby <= 3.3) or `URI::RFC2396_PARSER.make_regexp` (Ruby >= 3.4).";
 
@@ -45,12 +51,8 @@ pub struct UriRegexp;
 impl UriRegexp {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, method, .. } = *cx.kind(node) else { return; };
-        if cx.symbol_str(method) != "regexp" {
-            return;
-        }
-        let Some(receiver_id) = receiver.get() else { return; };
-        if !cx.is_global_const(receiver_id, "URI") {
+        // `(send (const nil? :URI) :regexp ...)` — top-level `URI.regexp`.
+        if !uri_regexp(node, cx) {
             return;
         }
         cx.emit_offense(cx.node(node).loc.name, MSG, None);
@@ -113,6 +115,24 @@ mod tests {
         test::<UriRegexp>().expect_no_offenses(indoc! {"
             URI.parse('http://example.com')
         "});
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :URI) :regexp ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_ignores_namespaced_uri() {
+        // `Foo::URI` has a non-nil const scope, so it is not flagged.
+        test::<UriRegexp>().expect_no_offenses("Foo::URI.regexp('x')\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it.
+        test::<UriRegexp>().expect_no_offenses("URI&.regexp('x')\n");
     }
 }
 

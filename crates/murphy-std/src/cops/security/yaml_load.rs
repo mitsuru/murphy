@@ -51,7 +51,13 @@
 //!
 //! `` Prefer using `YAML.safe_load` over `YAML.load`. `` (matches RuboCop).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
+
+// RuboCop parity: `Security/YAMLLoad` matcher `yaml_load` is
+// `(send (const {nil? cbase} :YAML) :load ...)`. In Murphy `::YAML`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+def_node_matcher!(yaml_load, "(send (const nil? :YAML) :load ...)");
 
 #[derive(Default)]
 pub struct YamlLoad;
@@ -72,13 +78,8 @@ impl YamlLoad {
         // `maximum_target_ruby_version 3.0` — registry gates production runs
         // (target <= 3.0); no runtime guard so direct invocations (tests)
         // always run the receiver check.
-        let Some(receiver) = cx.call_receiver(node).get() else {
-            return;
-        };
-        // `(const {nil? cbase} :YAML)` — `YAML` / `::YAML`. Murphy normalises
-        // `::YAML` to a scope-less `Const`, so `is_global_const` matches both
-        // and rejects nested consts (`Foo::YAML`).
-        if !cx.is_global_const(receiver, "YAML") {
+        // `(send (const nil? :YAML) :load ...)` — top-level `YAML.load`.
+        if !yaml_load(node, cx) {
             return;
         }
         cx.emit_offense(
@@ -175,6 +176,19 @@ mod tests {
         // Bare `load(arg)` has a nil receiver — the pattern requires the
         // `YAML` const receiver.
         test::<YamlLoad>().expect_no_offenses("load(arg)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :YAML) :load ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<YamlLoad>().expect_no_offenses("YAML&.load(arg)\n");
     }
 
     // === autocorrect ===
