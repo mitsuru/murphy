@@ -479,6 +479,40 @@ The host calls `dlopen` → `dlsym("murphy_plugin_register")` → reads the
 returned `PluginRegistration`, validates `MURPHY_PLUGIN_ABI_VERSION`,
 and registers each cop's metadata with the dispatch table.
 
+### Refreshing staged packs after a rebuild (murphy-ghxy)
+
+A rebuilt pack under `target/release` (or `debug`) is **not**
+auto-propagated to a project's `.murphy/plugins/` dir — the project keeps
+`dlopen`-ing the staged copy, so bundled config/cop changes silently don't
+take effect until the staged file is refreshed:
+
+```sh
+# Manual refresh (always works):
+cp -f target/release/libmurphy_rails.so <project>/.murphy/plugins/
+
+# Tooled refresh (same effect, with staleness checks):
+murphy plugins sync --from target/release
+# CI gate (no writes; exit 2 when stale):
+murphy plugins sync --from target/release --check
+```
+
+`sync` only touches packs staged inside `<project>/.murphy/plugins/`.
+A `Detailed { path }` pointing elsewhere (e.g. directly at
+`target/release/...`) is already live and needs no sync. Candidate builds
+are searched in `--from` dirs, `MURPHY_PLUGIN_PATH`, the `murphy` binary's
+own dir (typically `target/{debug,release}/` under `cargo run`), and
+`<project>/target/{debug,release}/`. A staged file counts as stale when
+its bytes differ from the fresh build and the fresh mtime is newer-or-equal
+(byte-identical rebuilds never count as stale; symlinked staging never
+counts as stale).
+
+`murphy lint` also warns (stderr, non-failing) when a staged pack is older
+than a discoverable fresher build:
+
+```text
+warning: plugin `murphy-rails` loaded from `.../.murphy/plugins/libmurphy_rails.so` is older than `.../target/release/libmurphy_rails.so` — run `murphy plugins sync --from <dir>` (or `cp -f ... ...`) to refresh it
+```
+
 ## 11. Testing cops: the `test-support` feature
 
 `murphy-plugin-api` exposes an in-process cop test harness gated by the

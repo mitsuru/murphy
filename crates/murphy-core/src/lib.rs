@@ -30,6 +30,7 @@ mod offense;
 mod parse;
 pub mod plugin_loader;
 pub mod plugin_resolver;
+pub mod plugin_sync;
 mod registry;
 // var_semantic_model has been moved to murphy-plugin-api
 
