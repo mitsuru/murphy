@@ -60,7 +60,21 @@
 //! array.grep_v(Foo)
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/SelectByKind` receiver guards are
+// `env_const?` = `(const {nil? cbase} :ENV)` and the `Hash` head of
+// `creates_hash?` = `(call (const _ :Hash) {:new :[]} ...)` (plus the `to_h`/
+// `to_hash` arms and the `(block (call (const _ :Hash) :new ...) ...)` arm).
+// In Murphy `::ENV` / `::Hash` collapse to `Const{scope:None}`: `nil?` covers
+// bare + `::` for `ENV` (namespaced `Foo::ENV` still flags — pinned by
+// `boundary_flags_namespaced_env`), while `_` covers any scope for `Hash`
+// (namespaced `Foo::Hash` still suppresses, unlike `ENV`). `call` covers
+// both `send` and `csend`, matching the `Send`/`Csend` arms below (pinned by
+// `boundary_accepts_csend_hash_new`); the `Block` arm stays hand-rolled
+// (normal `block` only, Numblock/Itblock bail).
+def_node_matcher!(env_const, "(const nil? :ENV)");
+def_node_matcher!(hash_new_or_index, "(call (const _ :Hash) {:new :[]} ...)");
 
 #[derive(Default)]
 pub struct SelectByKind;
@@ -231,7 +245,7 @@ fn receiver_allowed(receiver: Option<NodeId>, cx: &Cx<'_>) -> bool {
     let Some(recv) = receiver else {
         return false;
     };
-    matches!(cx.kind(recv), NodeKind::Hash(_)) || creates_hash(recv, cx) || cx.is_global_const(recv, "ENV")
+    matches!(cx.kind(recv), NodeKind::Hash(_)) || creates_hash(recv, cx) || env_const(recv, cx)
 }
 
 /// RuboCop's `creates_hash?`: `Hash.new(...)` / `Hash.new { ... }` / `Hash[...]`
@@ -259,19 +273,10 @@ fn creates_hash(node: NodeId, cx: &Cx<'_>) -> bool {
         return true;
     }
 
-    // `Hash.new` / `Hash[]` — receiver must be a `Hash` constant (any scope).
-    if matches!(method, "new" | "[]")
-        && let Some(recv) = cx.call_receiver(call).get()
-    {
-        return is_hash_const(recv, cx);
-    }
-
-    false
-}
-
-/// A `Const` named `Hash` with any scope (mirrors RuboCop's `(const _ :Hash)`).
-fn is_hash_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(*cx.kind(node), NodeKind::Const { name, .. } if cx.symbol_str(name) == "Hash")
+    // `(call (const _ :Hash) {:new :[]} ...)` — `Hash.new` / `Hash[]`
+    // (any scope); `call` covers `send` + `csend`.
+    // `to_h` / `to_hash` (any receiver) stays hand-rolled above.
+    hash_new_or_index(call, cx)
 }
 
 #[cfg(test)]
@@ -517,6 +522,52 @@ mod tests {
     #[test]
     fn accepts_env_receiver() {
         test::<SelectByKind>().expect_no_offenses("ENV.select { |x| x.is_a?(Foo) }\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.5): pin the exact node set
+    // the hand-rolled `ENV` / `Hash` guards match, so the verbatim
+    // `(const nil? :ENV)` / `(call (const _ :Hash) {:new :[]} ...)` refactor
+    // can be proven equivalent. `::ENV` / `::Hash` collapse to
+    // `Const{scope:None}` in Murphy: `nil?` covers bare + `::` for `ENV`
+    // (namespaced `Foo::ENV` still flags), while `_` covers any scope for
+    // `Hash` (namespaced `Foo::Hash` still suppresses, unlike `ENV`). `call`
+    // covers both `send` and `csend`, matching the `Send`/`Csend` arms
+    // (the `Block` arm stays hand-rolled, normal `block` only).
+
+    #[test]
+    fn boundary_accepts_cbase_env() {
+        // `::ENV` collapses to scope-less `Const`, so `nil?` matches.
+        test::<SelectByKind>().expect_no_offenses("::ENV.select { |x| x.is_a?(Foo) }\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_env() {
+        // Upstream `(const {nil? cbase} :ENV)` matches top-level only, so
+        // `Foo::ENV` still flags (unlike `Hash`, where namespaced suppresses).
+        test::<SelectByKind>().expect_offense(indoc! {r#"
+            Foo::ENV.select { |x| x.is_a?(Foo) }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a kind check.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_hash_new() {
+        // `::Hash` collapses to scope-less `Const`, so wildcard `_` matches.
+        test::<SelectByKind>().expect_no_offenses("::Hash.new.select { |x| x.is_a?(Foo) }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_hash_new() {
+        // Upstream `(const _ :Hash)` matches any scope, so `Foo::Hash` still
+        // suppresses (unlike `ENV`, where namespaced flags).
+        test::<SelectByKind>().expect_no_offenses("Foo::Hash.new.select { |x| x.is_a?(Foo) }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_hash_new() {
+        // `&.` is a `csend` node; `call` covers both dispatch kinds and both
+        // `Send`/`Csend` arms suppress, so it stays suppressed.
+        test::<SelectByKind>().expect_no_offenses("Hash&.new.select { |x| x.is_a?(Foo) }\n");
     }
 
     // --- shape guards (no offense) ---

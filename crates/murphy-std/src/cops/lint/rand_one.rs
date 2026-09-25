@@ -26,7 +26,19 @@
 //! None. The user must decide the appropriate replacement.
 //!
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Lint/RandOne` receiver guards are bare (`nil?`) and
+// `Kernel` top-level (`(const {nil? cbase} :Kernel)`), method `:rand`.
+// In Murphy `::Kernel` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` for `Kernel` (namespaced `Foo::Kernel` still accepts — pinned by
+// `boundary_accepts_namespaced_kernel_rand`). `send` covers `Send` only (not
+// `Csend`), matching the `Send`-only dispatch below (pinned by
+// `boundary_accepts_csend_kernel_rand`). Argument value guards
+// (`{(int {-1 1}) (float {-1.0 1.0})}`) stay hand-rolled as source checks
+// below (preserving the exact `1`/`-1`/`1.0`/`-1.0` contract).
+def_node_matcher!(rand_bare, "(send nil? :rand ...)");
+def_node_matcher!(rand_kernel, "(send (const nil? :Kernel) :rand ...)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -42,35 +54,15 @@ pub struct RandOne;
 impl RandOne {
     #[on_node(kind = "send", methods = ["rand"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
+        let NodeKind::Send { args, .. } = *cx.kind(node) else {
             return;
         };
 
-        // Gate: bare rand (no receiver) or Kernel/::Kernel receiver
-        if let Some(recv) = receiver.get() {
-            let mut id = recv;
-            while let NodeKind::Begin(list) = *cx.kind(id) {
-                let children = cx.list(list);
-                if children.len() == 1 {
-                    id = children[0];
-                } else {
-                    break;
-                }
-            }
-            let NodeKind::Const { name, scope } = *cx.kind(id) else {
-                return;
-            };
-            if cx.symbol_str(name) != "Kernel" {
-                return;
-            }
-            // Accept nil scope (bare `Kernel`) or cbase scope (`::Kernel`).
-            // Scope with a non-cbase value (e.g. `MyModule::Kernel`) is rejected.
-            if scope
-                .get()
-                .is_some_and(|s| !matches!(*cx.kind(s), NodeKind::Cbase))
-            {
-                return;
-            }
+        // `(send nil? :rand ...)` (bare) or
+        // `(send (const nil? :Kernel) :rand ...)` (`Kernel` / `::Kernel`,
+        // top-level only). `send` covers `Send` only (not `Csend`).
+        if !rand_bare(node, cx) && !rand_kernel(node, cx) {
+            return;
         }
 
         // Gate: single argument
@@ -233,4 +225,29 @@ mod tests {
     fn accepts_foo_rand_neg_1() {
         test::<RandOne>().expect_no_offenses("obj.rand(-1)\n");
     }
+
+    // --- Boundary characterization (murphy-ft88.5): pin the exact node set
+    // the hand-rolled `Kernel` guard matches, so the verbatim
+    // `(send nil? :rand ...)` / `(send (const nil? :Kernel) :rand ...)`
+    // refactor can be proven equivalent. `::Kernel` collapses to
+    // `Const{scope:None}` in Murphy: `nil?` covers bare + `::` for `Kernel`
+    // (namespaced `Foo::Kernel` still accepts — pinned by
+    // `boundary_accepts_namespaced_kernel_rand`). `send` covers `Send` only
+    // (not `Csend`), matching the `Send`-only dispatch below (pinned by
+    // `boundary_accepts_csend_kernel_rand`).
+
+    #[test]
+    fn boundary_accepts_namespaced_kernel_rand() {
+        // Upstream `(const {nil? cbase} :Kernel)` matches top-level only, so
+        // `Foo::Kernel` still accepts (not flagged).
+        test::<RandOne>().expect_no_offenses("Foo::Kernel.rand(1)\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_kernel_rand() {
+        // `&.` is a `csend` node; `send` covers `Send` only, so it stays
+        // accepted (not flagged).
+        test::<RandOne>().expect_no_offenses("Kernel&.rand(1)\n");
+    }
+
 }
