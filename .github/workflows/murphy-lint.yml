@@ -21,3 +21,5 @@ jobs:
       security-events: write
     with:
       since: origin/main
+      # Lint with this PR's (or push's) own murphy build, not main's.
+      murphy-ref: ${{ github.sha }}
