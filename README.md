@@ -394,4 +394,6 @@ murphy lint --profile --profile-format speedscope app.rb > /tmp/profile.json
 murphy lint --profile-format speedscope app.rb  # exits 2
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) for the contributor command reference.
+See [`docs/guides/profile.md`](docs/guides/profile.md) for the full
+profiler guide (cop x file matrix, hot files, perf-CI relationship), and
+[`CLAUDE.md`](CLAUDE.md) for the contributor command reference.

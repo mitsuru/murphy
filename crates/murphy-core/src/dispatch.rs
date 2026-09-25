@@ -29,6 +29,7 @@
 //! 0033's per-cop fault isolation contract.
 
 use std::ffi::c_void;
+use std::time::Instant;
 
 use murphy_ast::{Ast, NodeId, NodeKind};
 use murphy_plugin_api::var_semantic_model::VarSemanticModel;
@@ -324,6 +325,22 @@ pub fn run_cops_with_options_and_context(
 /// cleanly). The wire [`WireParseDiagnostic`] slice borrows the owned
 /// messages for the dispatch duration; the caller keeps `parse_diagnostics`
 /// alive across the call (it does — the slice is borrowed here).
+/// Per-cop wall-clock time for one dispatched file (microseconds).
+///
+/// Returned by
+/// [`run_cops_with_options_context_and_diagnostics_timed`]; the CLI's
+/// `--profile` path (Phase 9 B6) aggregates these into the cop x file matrix.
+/// The span covers the cop's full dispatch loop over its matched nodes plus
+/// its per-cop `options_json` build. The shared arena index / `CxRaw` setup
+/// is unattributed, so per-cop numbers sum to slightly less than the file's
+/// total dispatch wall time (same accounting as `--debug` totals).
+pub struct CopTiming {
+    /// Registry cop name (`PluginCopV1::name` as UTF-8, lossy on invalid).
+    pub cop_name: String,
+    /// Wall time for this cop on this file, microseconds.
+    pub wall_micros: u64,
+}
+
 pub fn run_cops_with_options_context_and_diagnostics(
     ast: &Ast,
     cops: &[&PluginCopV1],
@@ -333,7 +350,86 @@ pub fn run_cops_with_options_context_and_diagnostics(
     // borrowed param.
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) {
+    run_cops_inner(
+        ast,
+        cops,
+        sink,
+        ctx,
+        config_disabled_cops,
+        parse_diagnostics,
+        options_for,
+        None,
+    );
+}
+
+/// Timed dispatch for `--profile` (Phase 9 B6, murphy-fmw.2.6).
+///
+/// Identical offenses to
+/// [`run_cops_with_options_context_and_diagnostics`]; additionally returns
+/// one [`CopTiming`] per cop in `cops` order (including zero-wall entries —
+/// the caller decides the sub-microsecond cutoff). The untimed entry point
+/// above delegates to the same inner loop with timing disabled, so there is
+/// exactly one dispatch implementation and no behavior drift between
+/// profiled and normal runs.
+pub fn run_cops_with_options_context_and_diagnostics_timed(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    ctx: AllCopsContext,
+    // See `run_cops_with_options_and_context` for why this stays a separate
+    // borrowed param.
+    config_disabled_cops: &[RawSlice],
+    parse_diagnostics: &[OwnedParseDiagnostic],
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) -> Vec<CopTiming> {
+    let mut timings = Vec::with_capacity(cops.len());
+    run_cops_inner(
+        ast,
+        cops,
+        sink,
+        ctx,
+        config_disabled_cops,
+        parse_diagnostics,
+        options_for,
+        Some(&mut timings),
+    );
+    timings
+}
+
+/// Record one cop's wall time when timing is enabled; a no-op for
+/// untimed runs (`timings == None`, so the normal lint path pays one
+/// `is_some` branch per cop and no `Instant` reads).
+fn push_cop_timing(
+    timings: &mut Option<&mut Vec<CopTiming>>,
+    started: Option<&Instant>,
+    cop_name: &str,
+) {
+    if let (Some(out), Some(begin)) = (timings.as_mut(), started) {
+        out.push(CopTiming {
+            cop_name: cop_name.to_owned(),
+            wall_micros: u64::try_from(begin.elapsed().as_micros()).unwrap_or(u64::MAX),
+        });
+    }
+}
+
+// `too_many_arguments` allow rationale: this private inner mirrors the
+// public timed/untimed dispatch signatures one-to-one plus the timings
+// out-param; bundling into a params struct would churn every dispatch caller
+// for no behavior gain.
+#[allow(clippy::too_many_arguments)]
+fn run_cops_inner(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    ctx: AllCopsContext,
+    // See `run_cops_with_options_and_context` for why this stays a separate
+    // borrowed param.
+    config_disabled_cops: &[RawSlice],
+    parse_diagnostics: &[OwnedParseDiagnostic],
     mut options_for: impl FnMut(&str) -> Vec<u8>,
+    mut timings: Option<&mut Vec<CopTiming>>,
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
@@ -365,6 +461,9 @@ pub fn run_cops_with_options_context_and_diagnostics(
     for cop in cops {
         base.cop_name = cop.name;
         let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");
+        // Zero-cost when untimed: no `Instant::now` unless the caller asked
+        // for timings (`--profile`).
+        let cop_started = timings.is_some().then(Instant::now);
         let options_json = options_for(name);
         base.options_json = RawSlice {
             ptr: options_json.as_ptr(),
@@ -391,6 +490,7 @@ pub fn run_cops_with_options_context_and_diagnostics(
                      disabling for this file"
                 );
             }
+            push_cop_timing(&mut timings, cop_started.as_ref(), name);
             continue;
         }
         let kinds: &[PluginNodeKindTag] =
@@ -431,6 +531,7 @@ pub fn run_cops_with_options_context_and_diagnostics(
                 }
             }
         }
+        push_cop_timing(&mut timings, cop_started.as_ref(), name);
     }
     // Touch the constant so future refactors that drop the use line don't
     // silently lose the `SEVERITY_UNSET` import — it's the documented
@@ -1313,6 +1414,39 @@ mod tests {
             names,
             vec!["Test/StampA".to_string(), "Test/StampB".to_string()],
             "each cop's offense must carry the cop_name the host stamped"
+        );
+    }
+
+    #[test]
+    fn timed_dispatch_returns_per_cop_wall_times_with_identical_offenses() {
+        // Same AST/cops as the stamp test: the timed path must emit the
+        // same offenses as `run_cops` plus one timing per cop, in order.
+        // (`STAMP_COP_*` are stateless, so reusing them across parallel
+        // tests is race-free.)
+        let mut b = AstBuilder::new("nil", "t.rb");
+        let n = b.push(NodeKind::Nil, murphy_ast::Range { start: 0, end: 3 });
+        let ast = b.finish(n);
+
+        let mut sink = OffenseSink::new("t.rb");
+        let timings = run_cops_with_options_context_and_diagnostics_timed(
+            &ast,
+            &[&STAMP_COP_A, &STAMP_COP_B],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert_eq!(timings.len(), 2, "one timing per cop");
+        assert_eq!(timings[0].cop_name, "Test/StampA");
+        assert_eq!(timings[1].cop_name, "Test/StampB");
+
+        let names: Vec<_> = sink.offenses().iter().map(|o| o.cop_name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["Test/StampA".to_string(), "Test/StampB".to_string()],
+            "timed dispatch must emit identical offenses to the untimed path"
         );
     }
 

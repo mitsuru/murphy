@@ -137,9 +137,9 @@ fn lint_default_output_is_human_readable() {
     );
 }
 
-// `--profile` / `--profile-format` were dropped in murphy-9cr.22 along with
-// the legacy per-cop timing path (`run_cop_timed`); the new dispatcher will
-// grow its own profile surface in a follow-up issue (perf gate).
+// `--profile` / `--profile-format` live here since murphy-fmw.2.6 (B6):
+// see `tests/profile.rs` for the profiler surface (re-introduced on the new
+// dispatcher's per-cop timing path after the .22 perf-gate follow-up).
 
 #[test]
 fn lint_format_json_preserves_machine_readable_stdout() {

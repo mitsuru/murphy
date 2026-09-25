@@ -18,15 +18,19 @@
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
 //! - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` — scaffold git-hook configs (see `install.rs`).
 //!
-//! `murphy lint --profile / --profile-format` await re-introduction
-//! once the new dispatcher carries its own per-cop timing path (.22
-//! perf-gate follow-up).
+//! `murphy lint --profile [--profile-format summary|speedscope]` emits the
+//! Phase 9 B6 profile (per-cop wall time + p95 + cop x file matrix + hot
+//! files as JSON) on stdout instead of lint output. Per-cop timing comes from
+//! the dispatcher's timed path
+//! (`murphy_core::dispatch::run_cops_with_options_context_and_diagnostics_timed`),
+//! re-introduced on the new dispatcher after the .22 perf-gate follow-up.
 
 mod cops;
 mod explain;
 mod install;
 mod lsp;
 mod plugins;
+mod profile;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use murphy_cache::Cache;
@@ -42,6 +46,7 @@ use murphy_plugin_api::{
     tristate_from_wire,
 };
 use murphy_reporting::{OutputFormat, format_lint_output};
+use profile::ProfileSummary;
 
 /// The standard built-in cop pack (`murphy-std`), unpacked once and
 /// shared by every `CopRegistry` constructed in this process.
@@ -162,6 +167,15 @@ struct LintArgs {
     /// Output format.
     #[arg(long, value_enum, default_value = "human")]
     format: LintOutputFormatArg,
+    /// Emit per-cop profiling JSON to stdout instead of lint output.
+    /// Stdout is the profile summary (Phase 9 gate 5 shape); the exit code
+    /// still reflects lint offenses. `--format` is ignored with `--profile`.
+    #[arg(long)]
+    profile: bool,
+    /// Profile output shape: `summary` (cop wall + p95 + matrix + hot files)
+    /// or `speedscope` (traceEvents). Requires `--profile`.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    profile_format: Option<ProfileFormatArg>,
     /// Explain one cop instead of linting (docs URL + rationale + example).
     /// Alias for `murphy explain <COP>`; kept as a lint flag per B4 spec
     /// (`--explain <cop_id>`).
@@ -213,6 +227,13 @@ impl From<LintOutputFormatArg> for OutputFormat {
             LintOutputFormatArg::Markdown => OutputFormat::Markdown,
         }
     }
+}
+
+/// Profile output shape for `murphy lint --profile`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProfileFormatArg {
+    Summary,
+    Speedscope,
 }
 
 #[derive(Debug, clap::Args)]
@@ -582,21 +603,39 @@ fn run_mruby_user_cops(
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
 ) -> Vec<Offense> {
+    run_mruby_user_cops_profiled(source, file, mruby_cops, config).0
+}
+
+/// mruby user-cop run with per-cop wall times for `--profile`. Offenses are
+/// identical to [`run_mruby_user_cops`]; the timings feed the profile matrix
+/// alongside native cop timings.
+#[cfg(feature = "mruby-user-cops")]
+fn run_mruby_user_cops_profiled(
+    source: &str,
+    file: &str,
+    mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
+) -> (Vec<Offense>, Vec<(String, u64)>) {
     if mruby_cops.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let applicable_cops: Vec<_> = mruby_cops
         .iter()
         .filter(|cop| config.cop_applies_to_file(&cop.name, Path::new(file)))
         .collect();
     if applicable_cops.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let ctx = AstContext::new(source.as_bytes().to_vec());
-    applicable_cops
-        .into_iter()
-        .flat_map(|cop| run_mruby_cop_isolated(&ctx, &cop.source, &cop.name, file))
-        .collect()
+    let mut offenses = Vec::new();
+    let mut timings = Vec::with_capacity(applicable_cops.len());
+    for cop in applicable_cops {
+        let started = Instant::now();
+        offenses.extend(run_mruby_cop_isolated(&ctx, &cop.source, &cop.name, file));
+        let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        timings.push((cop.name.clone(), micros));
+    }
+    (offenses, timings)
 }
 
 #[cfg(not(feature = "mruby-user-cops"))]
@@ -607,6 +646,16 @@ fn run_mruby_user_cops(
     _config: &MurphyConfig,
 ) -> Vec<Offense> {
     Vec::new()
+}
+
+#[cfg(not(feature = "mruby-user-cops"))]
+fn run_mruby_user_cops_profiled(
+    _source: &str,
+    _file: &str,
+    _mruby_cops: &[MrubyCopSource],
+    _config: &MurphyConfig,
+) -> (Vec<Offense>, Vec<(String, u64)>) {
+    (Vec::new(), Vec::new())
 }
 
 fn scoped_native_cops<'a>(
@@ -1111,6 +1160,137 @@ fn lint_files_memoized_debug(
     (all, timings)
 }
 
+/// Profiled single-file lint for `--profile` (Phase 9 B6).
+/// Offenses are identical to [`lint_source`] (same dispatch inputs — empty
+/// parse diagnostics, same scoping, same inline-directive filter); the
+/// extra fields feed the cop x file matrix.
+struct ProfiledFile {
+    offenses: Vec<Offense>,
+    parse_micros: u128,
+    cop_timings: Vec<(String, u64)>,
+    mruby_timings: Vec<(String, u64)>,
+}
+
+fn lint_source_profiled(
+    source: &str,
+    file: &str,
+    cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
+    cache: Option<&Cache>,
+) -> ProfiledFile {
+    let parse_started = Instant::now();
+    let parsed = parse_with_cache(source, file, cache);
+    let parse_micros = parse_started.elapsed().as_micros();
+    match parsed {
+        Ok(ast) => {
+            let mut sink = dispatch::OffenseSink::new(file);
+            let scoped_cops = scoped_native_cops(cops, config, file);
+            // Borrows config-owned cop-name strings; must outlive the dispatch call.
+            let disabled_names: Vec<RawSlice> = config
+                .disabled_cop_names()
+                .map(RawSlice::borrowed)
+                .collect();
+            let timings = dispatch::run_cops_with_options_context_and_diagnostics_timed(
+                &ast,
+                &scoped_cops,
+                &mut sink,
+                config.allcops_context(),
+                &disabled_names,
+                &[],
+                |name| config.cop_options_json(name),
+            );
+            let mut offenses = sink.into_offenses();
+            let (mruby_offenses, mruby_timings) =
+                run_mruby_user_cops_profiled(source, file, mruby_cops, config);
+            offenses.extend(mruby_offenses);
+            ProfiledFile {
+                offenses: apply_inline_directive_filter(
+                    offenses,
+                    source,
+                    &comment_ranges(ast.sorted_tokens()),
+                ),
+                parse_micros,
+                cop_timings: timings
+                    .into_iter()
+                    .map(|t| (t.cop_name, t.wall_micros))
+                    .collect(),
+                mruby_timings,
+            }
+        }
+        Err(err) => ProfiledFile {
+            offenses: vec![Offense::new(
+                file,
+                SYNTAX_COP_NAME,
+                err.range,
+                Severity::Error,
+                &err.message,
+            )],
+            parse_micros,
+            cop_timings: Vec::new(),
+            mruby_timings: Vec::new(),
+        },
+    }
+}
+
+/// Profiled batch lint for `--profile`.
+///
+/// Unlike [`lint_files_memoized`] there is deliberately NO content
+/// memoization: profiling attributes wall time per (cop, file), so
+/// identical-content files are linted independently and each appears in the
+/// matrix and hot-file list. Parallel across files like the fast path
+/// (wall times are measured under parallel lint); the returned offenses are
+/// still pre-aggregate flat results for the shared pipeline. The per-file
+/// `(parse, cops)` totals mirror the `--debug` shape for combined runs.
+fn lint_files_profiled(
+    sources: &[(String, String)],
+    cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
+    cache: Option<&Cache>,
+) -> (Vec<Offense>, ProfileSummary, Vec<(String, u128, u128)>) {
+    struct FileProfile {
+        path: String,
+        offenses: Vec<Offense>,
+        parse_micros: u128,
+        native: Vec<(String, u64)>,
+        mruby: Vec<(String, u64)>,
+    }
+
+    let files: Vec<FileProfile> = sources
+        .par_iter()
+        .map(|(path, content)| {
+            let t = lint_source_profiled(content, path, cops, mruby_cops, config, cache);
+            FileProfile {
+                path: path.clone(),
+                offenses: t.offenses,
+                parse_micros: t.parse_micros,
+                native: t.cop_timings,
+                mruby: t.mruby_timings,
+            }
+        })
+        .collect();
+
+    let mut summary = ProfileSummary::default();
+    let mut all: Vec<Offense> = Vec::new();
+    let mut timings: Vec<(String, u128, u128)> = Vec::with_capacity(files.len());
+    for f in files {
+        summary.record_parse(&f.path, f.parse_micros);
+        let mut cops_sum: u128 = 0;
+        for (cop, micros) in &f.native {
+            summary.record_native(cop, &f.path, *micros);
+            cops_sum += u128::from(*micros);
+        }
+        for (cop, micros) in &f.mruby {
+            summary.record_mruby(cop, &f.path, *micros);
+            cops_sum += u128::from(*micros);
+        }
+        timings.push((f.path.clone(), f.parse_micros, cops_sum));
+        all.extend(f.offenses);
+    }
+    (all, summary, timings)
+}
+
 fn to_snake_case(s: &str) -> String {
     let mut res = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -1333,8 +1513,17 @@ fn run_install(args: &InstallArgs) -> Result<u8, AppError> {
 }
 
 fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
+    // B6 `--profile-format` requires `--profile` (legacy contract, exit 2).
+    // Validated before the `--explain` alias so bad usage errors even when
+    // combined with `--explain`.
+    if args.profile_format.is_some() && !args.profile {
+        return Err(AppError::setup(
+            "--profile-format requires --profile (use --profile --profile-format summary|speedscope)",
+        ));
+    }
     // B4 `--explain <cop_id>` alias: behave exactly like
     // `murphy explain <cop_id>` (human format), ignoring lint paths.
+    // `--profile` is ignored in this mode (no lint run to profile).
     if let Some(cop_id) = &args.explain {
         return explain::run_explain(cop_id, explain::Format::Human);
     }
@@ -1559,7 +1748,24 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             run_started.elapsed().as_millis()
         );
     }
-    let flat_offenses: Vec<Offense> = if debug {
+    // B6 `--profile`: per-cop timed lint. The offenses are identical to
+    // the normal path (same dispatch inputs); the summary carries the
+    // cop x file matrix for the stdout profile JSON below.
+    let mut profile_summary: Option<ProfileSummary> = None;
+    let flat_offenses: Vec<Offense> = if args.profile {
+        let (offenses, summary, timings) =
+            lint_files_profiled(&sources_for_lint, cops, mruby_cops, &config, cache_ref);
+        if debug {
+            for (path, parse_us, cops_us) in &timings {
+                eprintln!(
+                    "murphy: debug: lint {} parse_us={} cops_us={}",
+                    path, parse_us, cops_us
+                );
+            }
+        }
+        profile_summary = Some(summary);
+        offenses
+    } else if debug {
         let (offenses, timings) =
             lint_files_memoized_debug(&sources_for_lint, cops, mruby_cops, &config, cache_ref);
         for (path, parse_us, cops_us) in &timings {
@@ -1632,6 +1838,25 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     } else {
         EXIT_OFFENSES
     };
+
+    // B6 `--profile`: stdout is the profile JSON (summary or speedscope),
+    // NOT lint output — `--format` is ignored. The exit code still reflects
+    // lint offenses, so `murphy lint --profile ... > profile.json` stays
+    // CI-usable (Phase 9 gate 5).
+    if let Some(summary) = profile_summary {
+        let payload = match args.profile_format.unwrap_or(ProfileFormatArg::Summary) {
+            ProfileFormatArg::Summary => summary.to_summary_profile(),
+            ProfileFormatArg::Speedscope => summary.to_speedscope(),
+        };
+        let mut stdout = std::io::stdout().lock();
+        if let Err(e) = writeln!(stdout, "{payload}") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(exit);
+            }
+            return Err(AppError::setup(format!("failed to write stdout: {e}")));
+        }
+        return Ok(exit);
+    }
 
     let file_paths: Vec<String> = sources_for_lint.iter().map(|(p, _)| p.clone()).collect();
     let formatted =
