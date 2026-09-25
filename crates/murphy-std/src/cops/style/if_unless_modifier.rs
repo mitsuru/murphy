@@ -12,11 +12,12 @@
 //!   - murphy-y3h2
 //! notes: >
 //!   Murphy v1 handles the common case: a multi-line if/unless with no else
-//!   branch, a single-statement body, where the modifier form fits in 120 chars.
-//!   Gaps vs RuboCop: heredoc body handling, comment repositioning, Layout/LineLength
-//!   and Layout/IndentationStyle config integration, endless methods, string
+//!   branch, a single-statement body, where the modifier form fits within the
+//!   configured `Layout/LineLength.Max` (read via `Cx::max_line_length()`,
+//!   murphy-y3h2 cross-cop infra; default 120).
+//!   Gaps vs RuboCop: heredoc body handling, comment repositioning,
+//!   Layout/IndentationStyle config integration, endless methods, string
 //!   interpolation scope detection, and pattern-matching / defined? guards.
-//!   MaxLineLength is hardcoded at 120 (RuboCop reads it from Layout/LineLength).
 //! ```
 //!
 //! ## Matched shapes
@@ -27,7 +28,8 @@
 //! - Are not `elsif`
 //! - Have no `else` branch (single-branch conditional)
 //! - Have a non-nil, single-line, non-`Begin` body
-//! - Would produce a modifier-form line that fits within 120 chars
+//! - Would produce a modifier-form line that fits within `Cx::max_line_length()`
+//!   (`Layout/LineLength.Max`, default 120)
 //!
 //! ## Unless AST shape
 //!
@@ -41,9 +43,6 @@
 //! The offense and autocorrect range cover the entire `if`/`unless` expression.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
-
-/// Maximum line length before the modifier form is rejected.
-const MAX_LINE_LENGTH: usize = 120;
 
 const MSG: &str = "Favor modifier `%s` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.";
 
@@ -175,8 +174,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let indent_col = start - line_start;
 
     // Candidate: "<indent><body_src> <keyword> <cond_src>"
+    // RuboCop reads the budget from `Layout/LineLength.Max`; Murphy threads
+    // the resolved value via `Cx::max_line_length()` (murphy-y3h2).
     let candidate_len = indent_col + body_src.len() + 1 + keyword.len() + 1 + cond_src.len();
-    if candidate_len > MAX_LINE_LENGTH {
+    if candidate_len > cx.max_line_length() {
         return;
     }
 
@@ -392,6 +393,38 @@ mod tests {
               MESSAGE
             end
         "});
+    }
+
+    #[test]
+    fn respects_configured_max_line_length() {
+        // The modifier candidate `do_something if condition` is 25 chars.
+        // With `Max: 20` it does not fit, so no offense (murphy-y3h2).
+        test::<IfUnlessModifier>()
+            .with_max_line_length(20)
+            .expect_no_offenses(indoc! {"
+                if condition
+                  do_something
+                end
+            "});
+    }
+
+    #[test]
+    fn long_candidate_respects_raised_max_line_length() {
+        // 60-char body + 60-char condition exceeds the default 120 budget,
+        // so the default context flags nothing; with `Max: 200` the same
+        // shape fits and is flagged (murphy-y3h2 cross-cop read).
+        let long_body = "a".repeat(60);
+        let long_cond = "b".repeat(60);
+        let src = format!("if {long_cond}\n  {long_body}\nend\n");
+        test::<IfUnlessModifier>().expect_no_offenses(&src);
+        test::<IfUnlessModifier>()
+            .with_max_line_length(200)
+            .expect_correction(
+                &format!(
+                    "if {long_cond}\n^^ Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.\n  {long_body}\nend\n"
+                ),
+                &format!("{long_body} if {long_cond}\n"),
+            );
     }
 }
 murphy_plugin_api::submit_cop!(IfUnlessModifier);

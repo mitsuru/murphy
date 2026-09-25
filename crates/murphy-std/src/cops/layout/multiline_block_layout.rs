@@ -42,9 +42,8 @@
 //!   onto the opener line and/or inserts a newline before the body; the
 //!   detect-only port ships without it.
 //!
-//!   Gap vs RuboCop: the line-length limit is hardcoded at RuboCop's default
-//!   of 120 (`Layout/LineLength: Max`). A user-overridden `Max` is not read
-//!   — the same foreign-config gap that `Style/IfUnlessModifier` documents.
+//!   The line-length limit is the configured `Layout/LineLength.Max` read via
+//!   `Cx::max_line_length()` (murphy-y3h2 cross-cop infra; default 120).
 //! ```
 //!
 //! ## Matched shapes
@@ -57,10 +56,6 @@ use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Block body expression is on the same line as the block start.";
 const ARG_MSG: &str = "Block argument expression is not on the same line as the block start.";
-
-/// RuboCop's hardcoded fallback: `Layout/LineLength: Max` defaults to 120.
-/// A user override is not read (documented gap).
-const MAX_LINE_LENGTH: usize = 120;
 
 /// Stateless unit struct (ADR 0035).
 #[derive(Default)]
@@ -185,9 +180,10 @@ fn args_on_beginning_line(opener: Range, args: &[NodeId], cx: &Cx<'_>) -> bool {
 
 /// RuboCop's `line_break_necessary_in_args?`: a line break in the arguments is
 /// acceptable when reconstructing them on the opener line would exceed the
-/// line-length limit.
+/// line-length limit (read from `Layout/LineLength.Max` via
+/// `Cx::max_line_length()`, murphy-y3h2).
 fn line_break_necessary_in_args(node: NodeId, opener: Range, args: &[NodeId], cx: &Cx<'_>) -> bool {
-    needed_length_for_args(node, opener, args, cx) > MAX_LINE_LENGTH
+    needed_length_for_args(node, opener, args, cx) > cx.max_line_length()
 }
 
 /// RuboCop's `needed_length_for_args`: the column of the block plus the

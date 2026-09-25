@@ -12,10 +12,10 @@
 //!   - murphy-y3h2
 //! notes: >
 //!   Murphy v1 handles the common case: a multi-line while/until with a
-//!   single-statement body where the modifier form fits in 120 chars.
-//!   Gaps vs RuboCop: heredoc body handling, comment repositioning,
-//!   Layout/LineLength config integration.
-//!   MaxLineLength is hardcoded at 120 (RuboCop reads it from Layout/LineLength).
+//!   single-statement body where the modifier form fits within the configured
+//!   `Layout/LineLength.Max` (read via `Cx::max_line_length()`, murphy-y3h2
+//!   cross-cop infra; default 120).
+//!   Gaps vs RuboCop: heredoc body handling, comment repositioning.
 //! ```
 //!
 //! ## Matched shapes
@@ -26,7 +26,8 @@
 //! - The body is not itself a conditional or loop keyword
 //! - The condition is single-line
 //! - The node is multi-line
-//! - The modifier form candidate fits within 120 chars
+//! - The modifier form candidate fits within `Cx::max_line_length()`
+//!   (`Layout/LineLength.Max`, default 120)
 //! - The node contains no comments
 //!
 //! ## Autocorrect
@@ -36,9 +37,6 @@
 //! structural rearrangement.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
-
-/// Maximum line length before the modifier form is rejected.
-const MAX_LINE_LENGTH: usize = 120;
 
 const MSG: &str = "Favor modifier `%s` usage when having a single-line body.";
 
@@ -156,9 +154,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let indent_col = indent_str.chars().count();
 
     // Candidate: "<indent><body_src> <keyword> <cond_src>"
+    // RuboCop reads the budget from `Layout/LineLength.Max`; Murphy threads
+    // the resolved value via `Cx::max_line_length()` (murphy-y3h2).
     let candidate_len =
         indent_col + body_src.chars().count() + 1 + keyword.len() + 1 + cond_src.chars().count();
-    if candidate_len > MAX_LINE_LENGTH {
+    if candidate_len > cx.max_line_length() {
         return;
     }
 
@@ -337,6 +337,19 @@ mod tests {
               io.write(buffer)
             end
         "});
+    }
+
+    #[test]
+    fn respects_configured_max_line_length() {
+        // The modifier candidate `do_something while condition` is 28 chars.
+        // With `Max: 20` it does not fit, so no offense (murphy-y3h2).
+        test::<WhileUntilModifier>()
+            .with_max_line_length(20)
+            .expect_no_offenses(indoc! {"
+                while condition
+                  do_something
+                end
+            "});
     }
 }
 murphy_plugin_api::submit_cop!(WhileUntilModifier);

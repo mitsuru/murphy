@@ -639,6 +639,24 @@ impl<'a> Cx<'a> {
         self.raw.parse_diagnostics_len != 0
     }
 
+    /// The run-wide resolved `Layout/LineLength.Max` (default 120).
+    ///
+    /// RuboCop's `Style/IfUnlessModifier`, `Style/WhileUntilModifier`,
+    /// `Layout/MultilineBlockLayout` and `Layout/RedundantLineBreak` read
+    /// `config.for_cop('Layout/LineLength')['Max']`; this is that value
+    /// (murphy-y3h2, murphy-bgd8 pattern: host resolves into `AllCopsContext`
+    /// and threads it into `CxRaw` without a numeric ABI bump). A wire value
+    /// of `0` (only observed in raw-ABI test harnesses that build `CxRaw` by
+    /// hand) falls back to 120.
+    pub fn max_line_length(&self) -> usize {
+        let wire = self.raw.max_line_length;
+        if wire == 0 {
+            crate::AllCopsContext::DEFAULT_MAX_LINE_LENGTH as usize
+        } else {
+            wire as usize
+        }
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -3389,6 +3407,7 @@ mod tests {
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
             block_braces_space: true,
+            max_line_length: 120,
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
         }
@@ -3482,6 +3501,32 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(!cx.block_braces_space());
         assert!(!cx.space_required_after_lcurly());
+    }
+
+    #[test]
+    fn max_line_length_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        raw.max_line_length = 80;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.max_line_length(), 80);
+
+        raw.max_line_length = 120;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.max_line_length(), 120);
+
+        // Wire 0 (hand-built harness default) falls back to 120.
+        raw.max_line_length = 0;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(
+            cx.max_line_length(),
+            crate::AllCopsContext::DEFAULT_MAX_LINE_LENGTH as usize
+        );
     }
 
     #[test]

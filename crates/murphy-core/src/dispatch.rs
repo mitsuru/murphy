@@ -237,6 +237,7 @@ fn build_cx_raw(
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
         block_braces_space: ctx.block_braces_space,
+        max_line_length: ctx.max_line_length_wire(),
         parse_diagnostics: if parse_diagnostics.is_empty() {
             std::ptr::null()
         } else {
@@ -711,6 +712,56 @@ mod tests {
         );
 
         assert_eq!(INDENTATION_WIDTH_SEEN.load(Ordering::SeqCst), 4);
+    }
+
+    // Per-test atomic for the murphy-y3h2 cross-cop signal.
+    static MAX_LINE_LENGTH_SEEN: std::sync::atomic::AtomicU16 =
+        std::sync::atomic::AtomicU16::new(0);
+    unsafe extern "C" fn max_line_length_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        MAX_LINE_LENGTH_SEEN.store(cx.max_line_length, Ordering::SeqCst);
+        0
+    }
+    static MAX_LINE_LENGTH_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/MaxLineLength"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        maximum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: max_line_length_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_max_line_length_to_cx_raw() {
+        // The resolved `Layout/LineLength.Max` threaded through the
+        // context reaches the cop's `CxRaw` (murphy-y3h2).
+        MAX_LINE_LENGTH_SEEN.store(0, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&MAX_LINE_LENGTH_COP],
+            &mut sink,
+            AllCopsContext {
+                max_line_length: 80,
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert_eq!(MAX_LINE_LENGTH_SEEN.load(Ordering::SeqCst), 80);
     }
 
     // Per-test atomic (one tagged per test) so context-threading tests stay

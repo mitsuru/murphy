@@ -357,6 +357,14 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set the run-wide resolved `Layout/LineLength.Max` for this cop test —
+    /// what `Cx::max_line_length()` returns (murphy-y3h2). Use this to exercise
+    /// a cop's cross-cop read of the shared line-length budget.
+    pub fn with_max_line_length(mut self, max: i64) -> Self {
+        self.context.max_line_length = max;
+        self
+    }
+
     /// Override the file path threaded into `Cx::file_path()` for this cop
     /// test. Defaults to `"t.rb"`. Use this for cops that inspect the source
     /// file name (e.g. `Naming/FileName`); the path is decoupled from the
@@ -1179,6 +1187,7 @@ fn cx_raw_for(
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
         block_braces_space: ctx.block_braces_space,
+        max_line_length: ctx.max_line_length_wire(),
         parse_diagnostics: if parse_diagnostics.is_empty() {
             std::ptr::null()
         } else {
