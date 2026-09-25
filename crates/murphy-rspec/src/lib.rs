@@ -87,6 +87,11 @@
 //! - `RSpec/ReceiveCounts` — prefer `once`/`twice` helpers (murphy-4gd.3.17).
 //! - `RSpec/ReceiveMessages` — prefer `receive_messages` (murphy-4gd.3.17).
 //! - `RSpec/RedundantAround` — no redundant `around` hooks (murphy-4gd.3.17).
+//! - `RSpec/RedundantPredicateMatcher` — prefer predicate matchers (murphy-4gd.3.18).
+//! - `RSpec/RemoveConst` — do not use `remove_const` (murphy-4gd.3.18).
+//! - `RSpec/RepeatedDescription` — no repeated descriptions (murphy-4gd.3.18).
+//! - `RSpec/RepeatedExample` — no repeated examples (murphy-4gd.3.18).
+//! - `RSpec/RepeatedExampleGroupBody` — no repeated group bodies (murphy-4gd.3.18).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
