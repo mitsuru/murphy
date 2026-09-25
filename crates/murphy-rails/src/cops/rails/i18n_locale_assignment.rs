@@ -9,8 +9,9 @@
 //! gap_issues:
 //!   - murphy-l5v2
 //! notes: >
-//!   Path gating (RuboCop only flags in test/spec paths) is not implemented;
-//!   Murphy flags in all files. Known limitation, not a blocker.
+//!   Path gating (`Include: spec/test` upstream) is enforced via the
+//!   murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! `I18n.locale` attribute (`I18n.locale = "ja"`). Direct assignment
@@ -50,9 +51,10 @@
 //!
 //! ## Known limitation
 //!
-//! RuboCop gates this cop to spec/test paths. Murphy does not implement
-//! path gating in v1; the cop fires on all files. This is a known gap
-//! tracked in `murphy-l5v2`.
+//! RuboCop gates this cop to spec/test paths. File scope (`Include:
+//! `**/spec/**/*.rb`, `**/test/**/*.rb`) is enforced via the murphy-rails
+//! pack default.yml (engine `cop_applies_to_file` gate, verified vs
+//! rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 

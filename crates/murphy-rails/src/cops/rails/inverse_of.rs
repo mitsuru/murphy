@@ -19,7 +19,9 @@
 //!   `with_options` ancestor hashes (implicit and `|assoc|` explicit
 //!   receivers) contribute options. Offense is the association selector;
 //!   `inverse_of: nil` reports the nil message. Upstream Include path
-//!   gating (app/models) absent in Murphy.
+//!   gating (`**/app/models/**/*.rb`) is enforced via the murphy-rails
+//!   pack default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Looks for `has_(one|many)` and `belongs_to` associations where Active

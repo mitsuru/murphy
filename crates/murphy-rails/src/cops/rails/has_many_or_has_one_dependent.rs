@@ -21,9 +21,9 @@
 //!   and `readonly? → true` exclusion. Lambda/extension-block forms are
 //!   handled (trailing hash must be last; a `has_many ... do` extension
 //!   block does not itself suppress). Selector-only offense, no autocorrect.
-//!   Upstream Include (`**/app/models/**/*.rb`) has no file-path
-//!   infrastructure in Murphy yet, so the cop fires in all files (audit
-//!   tracked by murphy-4gd.1.15).
+//!   Upstream Include (`**/app/models/**/*.rb`) is enforced via the
+//!   murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Looks for `has_many` or `has_one` associations that don't specify a

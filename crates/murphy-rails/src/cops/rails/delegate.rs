@@ -20,8 +20,10 @@
 //!   `private` sections) and `module_function` declarations are skipped.
 //!   Offense on the `def` keyword; autocorrect replaces the whole `def`
 //!   with `delegate :m, to: :recv[, prefix: true]`. Controllers exemption
-//!   (upstream disables for controllers) is not implemented — Murphy has no
-//!   path gating in v1. Keyword/block-arg delegation is not implemented.
+//!   (upstream `Exclude: ['**/app/controllers/**/*.rb']`) is enforced via
+//!   the murphy-rails pack default.yml (engine `cop_applies_to_file` gate,
+//!   verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
+//!   Keyword/block-arg delegation is not implemented.
 //! ```
 //!
 //! ## Matched shapes

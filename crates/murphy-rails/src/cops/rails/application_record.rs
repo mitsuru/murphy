@@ -15,6 +15,9 @@
 //!   TargetRailsVersion >= 5.0 gating (unset means newest): class form,
 //!   Class.new form (exactly one arg), superclass-only offense range, and
 //!   `ApplicationRecord` replacement. Self-definitions are excluded.
+//!   File scope (`Exclude: ['db/**/*.rb']`) is enforced via the murphy-rails
+//!   pack default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

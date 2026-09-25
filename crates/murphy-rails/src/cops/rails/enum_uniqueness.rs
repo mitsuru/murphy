@@ -17,7 +17,9 @@
 //!   `consecutive_duplicates` (Duplication mixin) grouped by value source;
 //!   offense on the duplicate value node with
 //!   `Duplicate value \`v\` found in \`e\` enum declaration.` No autocorrect
-//!   upstream. Include path gating (`app/models`) is not implemented.
+//!   upstream. Include path gating (`**/app/models/**/*.rb`) is enforced
+//!   via the murphy-rails pack default.yml (engine `cop_applies_to_file`
+//!   gate, verified vs rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

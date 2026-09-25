@@ -16,7 +16,10 @@
 //!   assigned via the nearest ancestor casgn. Offense is the class short
 //!   name (class form) or the casgn name (Class.new form); autocorrect
 //!   appends `Mailer` preserving any `Foo::` scope or `::` prefix on the
-//!   base. Upstream Include path gating (app/mailers) absent in Murphy.
+//!   base. Upstream Include path gating (`**/app/mailers/**/*.rb`) is
+//!   enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Enforces that mailer names end with `Mailer` suffix.

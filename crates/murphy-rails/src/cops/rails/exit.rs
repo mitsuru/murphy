@@ -18,8 +18,10 @@
 //!   and any scope's `Kernel`/`Process` match — mirroring the upstream const
 //!   destructure). Offense on the selector range; no autocorrect. Upstream
 //!   Include/Exclude path gating (`app/`, `config/`, `lib/` minus rake
-//!   files) has no file-path infrastructure in Murphy yet, so the cop fires
-//!   in all files; users can scope it per-directory via `.murphy.yml`.
+//!   files) is enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15); users can further scope per-directory
+//!   via `.murphy.yml`.
 //! ```
 //!
 //! ## Matched shape (Send node)

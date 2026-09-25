@@ -17,7 +17,9 @@
 //!   positional-column (`\A\d+\z`) suppression, downcased column names, and
 //!   the use_hash conversion (`:col` while leading ASC, `col: :dir`
 //!   afterwards). Offense is first-arg-start to last-arg-end; autocorrect
-//!   replaces it with the preferred form. Upstream Include gating absent.
+//!   replaces it with the preferred form. Upstream carries no per-file
+//!   `Include`/`Exclude` for this cop (verified vs rubocop-rails 2.38.0
+//!   default.yml); Murphy runs in all files, matching upstream.
 //! ```
 //!
 //! Prefer symbol arguments over strings in `order` method.

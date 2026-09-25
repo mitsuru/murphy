@@ -12,10 +12,12 @@
 //!   Bare-call gating, whole-send offense range, and backtick message all
 //!   mirror upstream. Defined methods (direct `def` children with no
 //!   receiver), `delegate` with `:to`, and `alias`/`alias_method` (old->new)
-//!   are all implemented. Two intentional narrowings vs upstream are
-//!   documented below: Include path gating is absent (flags in all files),
-//!   and hash matching is permissive (any hash arg / any pair position)
-//!   to avoid false negatives for `only: ..., if: ...` multi-option calls.
+//!   are all implemented. File scope (`Include: controllers/mailers`) is
+//!   enforced via the murphy-rails pack default.yml (engine
+//!   `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//!   default.yml, murphy-4gd.1.15); hash matching stays permissive (any
+//!   hash arg / any pair position) to avoid false negatives for
+//!   `only: ..., if: ...` multi-option calls.
 //! ```
 //!
 //! Checks that methods specified in the filter's `only` or `except` options
@@ -60,9 +62,10 @@
 //!
 //! ## Known limitation
 //!
-//! Upstream ships `Include: ['**/app/controllers/**/*.rb']` (plus mailers
-//! via `Lint/UselessAccessModifier` interplay). Murphy does not implement
-//! path gating in v1; the cop fires in all files.
+//! Upstream `Include: ['**/app/controllers/**/*.rb', '**/app/mailers/**/*.rb']`
+//! is enforced via the murphy-rails pack default.yml (engine
+//! `cop_applies_to_file` gate, verified vs rubocop-rails 2.38.0
+//! default.yml, murphy-4gd.1.15).
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 

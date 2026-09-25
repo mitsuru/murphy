@@ -16,7 +16,9 @@
 //!   single pair sym :id, bare/qualified primary_key send, hash with
 //!   single pair primary_key send). Multi-pair hashes and multi-arg
 //!   calls do not match. Offense is selector-start to call-end; no
-//!   autocorrect. Upstream Include gating absent.
+//!   autocorrect. Upstream carries no per-file `Include`/`Exclude` for
+//!   this cop (verified vs rubocop-rails 2.38.0 default.yml); Murphy runs
+//!   in all files, matching upstream.
 //! ```
 //!
 //! Checks for places where ordering by `id` column is used.

@@ -18,8 +18,9 @@
 //!   computation (underscore + tr), lazy flags only when key == scoped key,
 //!   explicit flags any `.key`. Offense is the key node, autocorrect rewrites
 //!   to `.last` / scoped key with single quotes. Upstream Include
-//!   (`**/app/controllers/**/*.rb`) has no file-path infrastructure in
-//!   Murphy (audit murphy-4gd.1.15).
+//!   (`**/app/controllers/**/*.rb`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! Checks for places where I18n "lazy" lookup can be used.

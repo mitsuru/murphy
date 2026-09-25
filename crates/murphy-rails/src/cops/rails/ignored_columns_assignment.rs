@@ -14,7 +14,9 @@
 //!   Mirrors rubocop-rails 2.35.0: RESTRICT_ON_SEND [:ignored_columns=]
 //!   gating, offense on the assignment operator (`=`), autocorrect to `+=`.
 //!   Any receiver matches (upstream does not gate on receiver; the idiom is
-//!   `self.ignored_columns =`). Upstream Include path gating absent in Murphy.
+//!   `self.ignored_columns =`). Upstream carries no per-file
+//!   `Include`/`Exclude` for this cop (verified vs rubocop-rails 2.38.0
+//!   default.yml); Murphy runs in all files, matching upstream.
 //! ```
 //!
 //! Looks for assignments of `ignored_columns` that may override previous

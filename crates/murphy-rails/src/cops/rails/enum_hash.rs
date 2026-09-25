@@ -17,7 +17,9 @@
 //!   old-syntax `(send nil? :enum (hash $...))` with `(pair $_ $array)`.
 //!   Offense on the array node; autocorrect to `{elem => idx}` hash via
 //!   `str.dump` / `sym.inspect` / raw source. Include path gating
-//!   (`app/models`) is not implemented — Murphy has no path gating in v1.
+//!   (`**/app/models/**/*.rb`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //! ```
 //!
 //! ## Matched shapes

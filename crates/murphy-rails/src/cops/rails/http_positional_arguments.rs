@@ -13,7 +13,9 @@
 //!   routing-block (draw/routes ancestors), Rack::Test::Methods file guard,
 //!   TargetRailsVersion >= 5.0 gating, highlight range (second arg to last),
 //!   and params/session autocorrect are implemented. Include path gating
-//!   (**/spec/**, **/test/**) is not implemented; Murphy flags in all files.
+//!   (`**/spec/**/*`, `**/test/**/*`) is enforced via the murphy-rails pack
+//!   default.yml (engine `cop_applies_to_file` gate, verified vs
+//!   rubocop-rails 2.38.0 default.yml, murphy-4gd.1.15).
 //!   Middle data args (>= 4 call args) are dropped like upstream (first to
 //!   params, last to session).
 //! ```
