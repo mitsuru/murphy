@@ -541,150 +541,16 @@ submit_cop!(BulkChangeTable);
 // `cops::rails::relative_date_constant`.
 // `RenderInline` promoted to real cop in
 // `cops::rails::render_inline`.
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RenderPlainText
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RenderPlainText;
-
-#[cop(
-    name = "Rails/RenderPlainText",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RenderPlainText {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RenderPlainText);
-
-// `RequestReferer` is now a real cop in `cops::rails::request_referer`
-// — `pub use`d at the crate root via the `use cops::rails::{Output,
-// RequestReferer};` above so the `register_cops!` ident below resolves
-// unchanged.
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/RequireDependency
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RequireDependency;
-
-#[cop(
-    name = "Rails/RequireDependency",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RequireDependency {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RequireDependency);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ResponseParsedBody
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ResponseParsedBody;
-
-#[cop(
-    name = "Rails/ResponseParsedBody",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ResponseParsedBody {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ResponseParsedBody);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ReversibleMigration
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ReversibleMigration;
-
-#[cop(
-    name = "Rails/ReversibleMigration",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ReversibleMigration {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ReversibleMigration);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ReversibleMigrationMethodDefinition
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ReversibleMigrationMethodDefinition;
-
-#[cop(
-    name = "Rails/ReversibleMigrationMethodDefinition",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ReversibleMigrationMethodDefinition {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ReversibleMigrationMethodDefinition);
+// `RenderPlainText` promoted to real cop in
+// `cops::rails::render_plain_text`.
+// `RequireDependency` promoted to real cop in
+// `cops::rails::require_dependency`.
+// `ResponseParsedBody` promoted to real cop in
+// `cops::rails::response_parsed_body`.
+// `ReversibleMigration` promoted to real cop in
+// `cops::rails::reversible_migration`.
+// `ReversibleMigrationMethodDefinition` promoted to real cop in
+// `cops::rails::reversible_migration_method_definition`.
 
 /// ## RuboCop parity
 ///
