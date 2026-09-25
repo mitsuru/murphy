@@ -528,9 +528,12 @@ fn lint_department_directive_does_not_suppress_other_departments() {
 fn lint_full_line_rubocop_todo_persists_like_disable() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("fullline_todo.rb");
+    // `todo` counts as a disable for both suppression and
+    // `Lint/MissingCopEnableDirective` (murphy-3bod): it needs a matching
+    // `enable` like `disable` does, otherwise Missing flags it.
     fs::write(
         &path,
-        "# frozen_string_literal: true\n\n# rubocop:todo Lint/Debugger\ndebugger\n",
+        "# frozen_string_literal: true\n\n# rubocop:todo Lint/Debugger\ndebugger\n# rubocop:enable Lint/Debugger\n",
     )
     .expect("write fullline_todo.rb");
 

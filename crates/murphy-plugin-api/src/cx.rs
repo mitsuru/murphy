@@ -2907,7 +2907,12 @@ impl<'a> Cx<'a> {
     /// Reads the run-wide `CxRaw::config_disabled_cops` slice the host fills
     /// from `.murphy.yml` `Enabled: false` rules. Non-UTF-8 entries are
     /// skipped.
-    fn config_disabled_cops(&self) -> impl Iterator<Item = &'a str> {
+    ///
+    /// Exposed for `Lint/MissingCopEnableDirective` (murphy-3bod) so a
+    /// `disable` of a config-disabled cop until EOF is accepted, mirroring
+    /// RuboCop's `acceptable_range?`. Reads the existing `CxRaw` tail field;
+    /// no wire change, no ABI bump.
+    pub fn config_disabled_cops(&self) -> impl Iterator<Item = &'a str> {
         let slices = unsafe {
             slice(
                 self.raw.config_disabled_cops,
@@ -2963,7 +2968,7 @@ impl<'a> Cx<'a> {
 
             let is_all = group.iter().any(|d| d.cop.is_none());
             match d0.kind {
-                CommentDirectiveKind::Disable => {
+                CommentDirectiveKind::Disable | CommentDirectiveKind::Todo => {
                     if is_all {
                         disable_all_depth += 1;
                     } else {
@@ -3023,7 +3028,6 @@ impl<'a> Cx<'a> {
                         }
                     }
                 }
-                CommentDirectiveKind::Todo => {}
             }
         }
         out
@@ -3156,7 +3160,7 @@ impl<'a> Cx<'a> {
 
             let is_all = group.iter().any(|d| d.cop.is_none());
             match d0.kind {
-                CommentDirectiveKind::Disable => {
+                CommentDirectiveKind::Disable | CommentDirectiveKind::Todo => {
                     if is_all {
                         for name in &all_expansion {
                             *count.entry(name.clone()).or_insert(0) += 1;
@@ -3283,7 +3287,6 @@ impl<'a> Cx<'a> {
                         }
                     }
                 }
-                CommentDirectiveKind::Todo => {}
             }
         }
         out
