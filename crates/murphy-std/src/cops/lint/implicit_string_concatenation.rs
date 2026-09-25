@@ -5,16 +5,21 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Lint/ImplicitStringConcatenation
-//! upstream_version_checked: master
-//! status: partial
-//! gap_issues: [murphy-irhu]
+//! upstream_version_checked: 1.87.0
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Covers adjacent same-line `Str` parts lowered as `Dstr`, array/method
-//!   argument hint messages, line-continuation non-offenses, and ` + `
-//!   autocorrection between adjacent parts. Known v1 limitation: RuboCop's full
-//!   formatting parity for nested interpolated strings, multiline display text,
-//!   and triple-quote empty-string removal needs more string-literal delimiter /
-//!   component metadata than the current cop uses from the plugin surface.
+//!   Mirrors RuboCop's `on_dstr` / `each_bad_cons`: adjacent same-line
+//!   `Str` / `Dstr` parts lowered as `Dstr` (including a nested interpolated
+//!   `Dstr` part such as `"string#{x}"` in `"foo""string#{x}""bar"`),
+//!   the same-line check, the closing-delimiter guard (single/double quotes
+//!   only, so `%` literals are ignored), array/method hint suffixes, the
+//!   multiline display form (inspected string content, e.g. `"ab\nc"`), and
+//!   empty-string removal for triple-quote adjacency (`"""string"""` corrects
+//!   to `"string"`). Regular autocorrect joins the gap with ` + `.
+//!   Backslash line continuation stays a non-offense (the gap holds a
+//!   newline). `Csend` parents also get the method hint although RuboCop
+//!   checks `send` only; a harmless superset for `&.` calls.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
@@ -67,17 +72,31 @@ impl ImplicitStringConcatenation {
             }
             cx.emit_offense(range, &message, None);
 
-            let join_range = Range {
-                start: cx.range(*lhs).end,
-                end: cx.range(*rhs).start,
-            };
-            cx.emit_edit(join_range, " + ");
+            // RuboCop removes an empty adjacent part (`"""string"""` holds
+            // `""` parts) instead of joining with ` + `.
+            if is_empty_string(*lhs, cx) {
+                cx.emit_edit(cx.range(*lhs), "");
+            } else if is_empty_string(*rhs, cx) {
+                cx.emit_edit(cx.range(*rhs), "");
+            } else {
+                let join_range = Range {
+                    start: cx.range(*lhs).end,
+                    end: cx.range(*rhs).start,
+                };
+                cx.emit_edit(join_range, " + ");
+            }
         }
     }
 }
 
 fn is_string_literal_part(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(cx.kind(node), NodeKind::Str(_) | NodeKind::Dstr(_))
+}
+
+/// RuboCop's `lhs_node.value == ''` — only a plain empty `Str` part. A
+/// `Dstr` part (possibly interpolated) never counts as empty.
+fn is_empty_string(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Str(id) if cx.string_str(id).is_empty())
 }
 
 fn ends_with_string_delimiter(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -94,7 +113,31 @@ fn ends_with_string_delimiter(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn display_string(node: NodeId, cx: &Cx<'_>) -> String {
-    cx.raw_source(cx.range(node)).to_string()
+    let raw = cx.raw_source(cx.range(node));
+    if raw.contains('\n') {
+        // RuboCop's `display_str`: a part spanning lines is shown as the
+        // inspected string content (`"ab\nc"`), not the raw multiline text.
+        inspect_content(&str_content(node, cx))
+    } else {
+        raw.to_string()
+    }
+}
+
+/// RuboCop's `str_content`: the plain `Str` values joined together.
+/// Interpolation fragments (`Begin`, `Send`, ...) contribute `""`.
+fn str_content(node: NodeId, cx: &Cx<'_>) -> String {
+    match *cx.kind(node) {
+        NodeKind::Str(id) => cx.string_str(id).to_string(),
+        NodeKind::Dstr(parts) => cx.list(parts).iter().map(|child| str_content(*child, cx)).collect(),
+        _ => String::new(),
+    }
+}
+
+/// Ruby `String#inspect` for message display: double-quoted with `\`, `"`,
+/// and control escapes. Matches for the newline-bearing contents this cop
+/// displays; exotic codepoints may escape differently than CRuby.
+fn inspect_content(content: &str) -> String {
+    format!("{content:?}")
 }
 
 fn parent_is_array(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -117,7 +160,7 @@ murphy_plugin_api::submit_cop!(ImplicitStringConcatenation);
 
 #[cfg(test)]
 mod tests {
-    use super::{same_line_gap, ImplicitStringConcatenation};
+    use super::{inspect_content, same_line_gap, ImplicitStringConcatenation};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -145,15 +188,57 @@ mod tests {
     }
 
     #[test]
+    fn flags_adjacent_interpolated_string_on_same_line() {
+        test::<ImplicitStringConcatenation>().expect_correction(
+            indoc! {r#"
+                "string#{x}" "def"
+                ^^^^^^^^^^^^^^^^^^ Combine "string#{x}" and "def" into a single string literal, rather than using implicit string concatenation.
+            "#},
+            "\"string#{x}\" + \"def\"\n",
+        );
+    }
+
+    #[test]
+    fn flags_multiple_concatenations_with_nested_interpolation() {
+        test::<ImplicitStringConcatenation>().expect_correction(
+            indoc! {r#"
+                "foo""string#{x}""bar"
+                ^^^^^^^^^^^^^^^^^ Combine "foo" and "string#{x}" into a single string literal, rather than using implicit string concatenation.
+                     ^^^^^^^^^^^^^^^^^ Combine "string#{x}" and "bar" into a single string literal, rather than using implicit string concatenation.
+            "#},
+            "\"foo\" + \"string#{x}\" + \"bar\"\n",
+        );
+    }
+
+    #[test]
+    fn removes_empty_strings_in_triple_quoted_concatenation() {
+        test::<ImplicitStringConcatenation>().expect_correction(
+            indoc! {r#"
+                """string"""
+                ^^^^^^^^^^ Combine "" and "string" into a single string literal, rather than using implicit string concatenation.
+                  ^^^^^^^^^^ Combine "string" and "" into a single string literal, rather than using implicit string concatenation.
+            "#},
+            "\"string\"\n",
+        );
+    }
+
+    #[test]
     fn accepts_single_strings_and_line_continuation() {
         test::<ImplicitStringConcatenation>()
             .expect_no_offenses("\"abc\"\n")
+            .expect_no_offenses("'abc\ndef'\n")
             .expect_no_offenses(indoc! {r#"
                 array = [
                   'abc'\
                   'def'
                 ]
             "#});
+    }
+
+    #[test]
+    fn accepts_single_string_with_interpolations() {
+        test::<ImplicitStringConcatenation>()
+            .expect_no_offenses("array = [\"abc#{something}def#{something_else}\"]\n");
     }
 
     #[test]
@@ -169,6 +254,13 @@ mod tests {
               WHERE name = '#{name}'
             SQL
         "#});
+    }
+
+    #[test]
+    fn multiline_display_inspects_string_content() {
+        assert_eq!(inspect_content("ab\nc"), "\"ab\\nc\"");
+        assert_eq!(inspect_content("string\n"), "\"string\\n\"");
+        assert_eq!(inspect_content("plain"), "\"plain\"");
     }
 
     #[test]
