@@ -36,15 +36,24 @@ the public `test_support` harness, and the pack-registration test asserts
 
 ## Load it in Murphy
 
-Build the shared library, then stage it as a pack directory (ADR 0046):
+Build the shared library, then stage it as a pack directory (ADR 0046 +
+ADR 0054). Local iteration stages the host slot only; CI cross-builds all
+four slots (see `.github/workflows/ci.yml`):
 
 ```sh
 cargo build
 PACK={{project-name}}
+# Host slot is one of: linux-x86_64, linux-aarch64, darwin-x86_64, darwin-arm64.
 mkdir -p /tmp/murphy-packs/$PACK/lib/linux-x86_64
 cp -f target/debug/lib{{crate_name}}.so /tmp/murphy-packs/$PACK/lib/linux-x86_64/
 cp -f murphy-plugin.toml /tmp/murphy-packs/$PACK/
 ```
+
+Multi-arch CI (`build` matrix + `pack` job) cross-builds
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-apple-darwin`, and `aarch64-apple-darwin`, stages each under its
+`lib/<platform>/` slot, and assembles `{{project-name}}.tar.gz` holding
+`murphy-plugin.toml` + all four `lib/` slots.
 
 Point Murphy at the pack directory from `.murphy.yml`:
 
@@ -68,8 +77,10 @@ quick iteration; the pack directory is the distributable form.)
 
 - Authoring surface (`#[cop]`, `#[on_node]`, options, testing): Murphy's
   `docs/guides/plugin-cop-infrastructure.md`.
-- Pack format (manifest schema, `lib/<arch>/` layout, search-path rules):
+- Pack format (manifest schema, `lib/<platform>/` layout, search-path rules):
   ADR 0046 in the Murphy repo (`docs/decisions/0046-plugin-pack-format.md`).
+- Multi-arch slots + release matrix (slot names, auto-select tiers, CI):
+  ADR 0054 (`docs/decisions/0054-plugin-multiarch-release.md`).
 - Single-surface rule: runtime `[dependencies]` must stay exactly
   `{murphy-plugin-api}` — reaching into `murphy-core` / `murphy-ast` etc.
   breaks the plugin ABI boundary.

@@ -27,7 +27,7 @@ the future standalone repo root, so splitting it out is a plain copy) contains:
 | `README.md.liquid` | Generated-pack readme (build / load / delete-the-demo) |
 | `LICENSE` | MIT (update the copyright holder line) |
 | `cargo-generate.toml` | Built-in placeholders only (`project-name`, `crate_name`, `authors`) |
-| `.github/workflows/ci.yml.liquid` | `cargo test` + `clippy -D warnings` + `fmt --check` |
+| `.github/workflows/ci.yml.liquid` | `cargo test` + `clippy -D warnings` + `fmt --check` + 4-slot cross-build matrix + multi-arch pack assembler |
 
 The bundled `Example/NoTodo` cop is a smoke target, not a starting point:
 delete it (code, manifest `provided` entry, and smoke assertions together)
@@ -64,12 +64,14 @@ infrastructure guide §10).
 ## Distribution
 
 An installed pack is a directory: `murphy-plugin.toml` at the root,
-per-arch binaries under `lib/<arch>/` (`linux-x86_64`, `darwin-arm64`, …).
-Multi-arch matrix releases are a future option — the template's CI builds
-and tests the host arch only; the `lib/<arch>/` slots are where cross-built
-binaries go. Remote discovery is a static index + git/HTTPS fetch
-(marketplace, uk7.2; guide: `docs/guides/plugin-marketplace.md`) — no
-hosted service.
+per-platform binaries under `lib/<platform>/` (`linux-x86_64`,
+`linux-aarch64`, `darwin-x86_64`, `darwin-arm64`; gem tags and Rust triples
+accepted as aliases). The template's CI cross-builds all four slots
+(`build` matrix + `pack` assembler, mirroring `release-gem.yml`'s runners)
+and the host loader auto-selects the exact slot, then the platform
+extension, then sorted-first (ADR 0054). Remote discovery is a static
+index plus git/HTTPS fetch (marketplace, uk7.2; guide:
+`docs/guides/plugin-marketplace.md`) — no hosted service.
 
 Install a pack to the user-local dir (`~/.local/share/murphy/plugins/`,
 search-path layer 5) with `murphy plugins install` (`murphy plugin
@@ -91,8 +93,8 @@ murphy plugins publish --from ./dist/murphy-rails  # index snippet for publisher
 After install, `plugins = ["murphy-rails"]` resolves with no `path:` pin.
 `murphy add murphy-rails` remains the `.murphy.yml` config half; `plugins
 install` is the artifact half for non-Bundler users (Bundler users resolve
-gems directly, no copy needed). Multi-arch auto-selection is a follow-up
-(uk7.3).
+gems directly, no copy needed). Multi-arch auto-selection is the exact-slot
+→ extension → sorted-first rule (ADR 0054, uk7.3).
 
 Packs also ship as Ruby gems (C2; ADR 0048): a `murphy-*` gem holding
 `murphy-plugin.toml` (+ `lib/<arch>/` cdylibs) at its root, under

@@ -1,14 +1,21 @@
-# Pack manifest for {{project-name}} (ADR 0046).
+# Pack manifest for {{project-name}} (ADR 0046 + ADR 0054).
 #
 # This file lives at the pack root and lets Murphy read the pack's
 # identity and cop catalogue *without* `dlopen`. An installed pack
-# pairs it with per-arch binaries:
+# pairs it with per-platform binaries (the template CI cross-builds all
+# four; see `.github/workflows/ci.yml`):
 #
 #   {{project-name}}/
 #   |-- murphy-plugin.toml
 #   `-- lib/
 #       |-- linux-x86_64/lib{{crate_name}}.so
+#       |-- linux-aarch64/lib{{crate_name}}.so
+#       |-- darwin-x86_64/lib{{crate_name}}.dylib
 #       `-- darwin-arm64/lib{{crate_name}}.dylib
+#
+# The host loader picks the exact `lib/<platform>/` slot, then the
+# platform extension, then sorted-first (ADR 0054). Gem tags
+# (`x86_64-linux`, ...) and Rust triples are accepted as slot aliases.
 #
 # `murphy-api-version` must equal the host's MURPHY_PLUGIN_ABI_VERSION
 # (currently 4 — keep in step with the Murphy release you target).
