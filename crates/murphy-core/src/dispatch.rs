@@ -77,7 +77,14 @@ impl OffenseSink {
 
 /// Convert plugin-api's `Range` (byte range over the source) into core's
 /// `Range`. Both are `u32` byte offsets; the field names differ.
+///
+/// `murphy_ast::Range::NO_LOCATION` decodes to `Range::NO_LOCATION`
+/// (murphy-e7bz.41.2); the wire reuses the existing `range` field so the
+/// plugin ABI layout and `MURPHY_PLUGIN_ABI_VERSION` are unchanged.
 fn convert_range(r: murphy_ast::Range) -> Range {
+    if r.is_no_location() {
+        return Range::NO_LOCATION;
+    }
     Range {
         start_offset: r.start,
         end_offset: r.end,
@@ -1535,6 +1542,33 @@ mod tests {
         assert_eq!(ac.edits[0].range.start_offset, 0);
         assert_eq!(ac.edits[0].range.end_offset, 3);
         assert_eq!(ac.edits[0].replacement, "logger.info");
+    }
+
+    #[test]
+    fn host_emit_offense_preserves_no_location() {
+        let mut b = AstBuilder::new("nil", "demo.rb");
+        let n = b.push(NodeKind::Nil, murphy_ast::Range { start: 0, end: 3 });
+        let ast = b.finish(n);
+
+        let mut sink = OffenseSink::new("demo.rb");
+        unsafe {
+            host_emit_offense(
+                &mut sink as *mut OffenseSink as *mut std::ffi::c_void,
+                &RawOffense {
+                    cop_name: RawSlice::from_str("Naming/InclusiveLanguage"),
+                    message: RawSlice::from_str("filepath hit"),
+                    range: murphy_ast::Range::NO_LOCATION,
+                    severity: 0,
+                } as *const RawOffense,
+            );
+        }
+
+        let offenses = sink.into_offenses();
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range::NO_LOCATION);
+        assert!(!offenses[0].has_location());
+        assert_eq!(offenses[0].location(), None);
+        let _ = ast;
     }
 
     // (7) Empty `KINDS` = file-visit: the cop is invoked exactly once,

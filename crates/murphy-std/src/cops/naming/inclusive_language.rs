@@ -16,7 +16,8 @@
 //!   The cop is disabled by default. Remaining limits: Rust `regex` lacks Ruby
 //!   look-around/backreferences, and config JSON loses YAML Regexp tags, making
 //!   tagged regexes and slash-delimited plain strings ambiguous. Filepath
-//!   offenses use `Range::ZERO` as Murphy's no-location approximation. Heredoc
+//!   offenses use `Range::NO_LOCATION` via `Cx::emit_file_offense` so no
+//!   fabricated range is serialized or rendered. Heredoc
 //!   strings use label-paired body ranges; ambiguous or incomplete delimiters
 //!   are skipped so corrections cannot touch the opener or terminator. AST
 //!   ranges are collected once per file because the cop macro cannot combine
@@ -743,11 +744,10 @@ fn check_filepath(cx: &Cx<'_>, compiled: &CompiledOptions) {
             .join("', '");
         format!("Consider replacing '{joined}' in file path with other terms.")
     };
-    cx.emit_offense(global_offense_range(cx), &message, None);
-}
-
-fn global_offense_range(_cx: &Cx<'_>) -> Range {
-    Range::ZERO
+    // Filepath-only offense: no source location (murphy-e7bz.41.2). Uses
+    // `Range::NO_LOCATION` on the wire so the ABI stays frozen; the host
+    // serializes/renders it without a fabricated range or line/column.
+    cx.emit_file_offense(&message, None);
 }
 
 fn check_source_range(range: Range, cx: &Cx<'_>, compiled: &CompiledOptions) {
@@ -1787,7 +1787,9 @@ mod tests {
         };
         let offenses = run_cop_with_options::<InclusiveLanguage>("x = 1\n", &options);
         assert_eq!(offenses.len(), 1);
-        assert_eq!(offenses[0].range, Range::ZERO);
+        assert_eq!(offenses[0].range, Range::NO_LOCATION);
+        assert!(!offenses[0].has_location());
+        assert_eq!(offenses[0].location(), None);
         assert!(offenses[0].message.contains("in file path"));
     }
 }

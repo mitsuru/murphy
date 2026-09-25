@@ -824,6 +824,11 @@ fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
     {
         return false;
     }
+    // Filepath-only offenses carry no source location (murphy-e7bz.41.2);
+    // inline `# rubocop:disable` comments cannot suppress them.
+    if !offense.has_location() {
+        return false;
+    }
     let start = offense.range.start_offset as usize;
     for state in states {
         if start >= state.line_start && start < state.line_end {

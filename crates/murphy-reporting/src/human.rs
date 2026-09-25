@@ -9,6 +9,18 @@ pub fn format(offenses: &[Offense], files: &[String]) -> Result<String, String> 
         out.push('\n');
         let mut line_indexes: HashMap<&str, Option<LineColumnIndex>> = HashMap::new();
         for offense in offenses {
+            if !offense.has_location() {
+                // Filepath-only offense (murphy-e7bz.41.2): no fabricated
+                // line/column. Renders as `file: C: Cop: message`.
+                out.push_str(&format!(
+                    "{}: {}: {}: {}\n",
+                    offense.file,
+                    severity_label(offense.severity),
+                    offense.cop_name,
+                    offense.message
+                ));
+                continue;
+            }
             let line_index = line_indexes
                 .entry(offense.file.as_str())
                 .or_insert_with(|| LineColumnIndex::from_path(&offense.file));

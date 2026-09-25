@@ -73,7 +73,30 @@ impl Range {
     /// The empty range `[0, 0)`. Used as the sentinel for "no recorded
     /// position", notably on [`NodeLoc::name`] for nodes without an
     /// identifier.
+    ///
+    /// `ZERO` is a *located* empty range at the start of the file. It must
+    /// NOT be used for filepath-only offenses; use [`Range::NO_LOCATION`]
+    /// for those (murphy-e7bz.41.2).
     pub const ZERO: Range = Range { start: 0, end: 0 };
+
+    /// No-location sentinel for filepath-only offenses (murphy-e7bz.41.2).
+    ///
+    /// `[u32::MAX, u32::MAX)` can never be a real source range: `parse()`
+    /// rejects sources longer than `u32::MAX` bytes, and a real empty range
+    /// at the end of a max-size file would still end at `u32::MAX` with a
+    /// start <= end, never `start == end == MAX` from a real file (the
+    /// source would need exactly `u32::MAX` bytes, which is rejected).
+    /// Distinct from [`Range::ZERO`] so a rendered `1:1` is never fabricated
+    /// for a locationless finding.
+    pub const NO_LOCATION: Range = Range {
+        start: u32::MAX,
+        end: u32::MAX,
+    };
+
+    /// `true` iff this is the [`Range::NO_LOCATION`] sentinel.
+    pub fn is_no_location(self) -> bool {
+        self == Self::NO_LOCATION
+    }
 }
 
 /// Per-node source-location bundle — Murphy's analog of the parser

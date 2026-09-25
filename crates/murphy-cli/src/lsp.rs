@@ -289,8 +289,17 @@ fn publish_diagnostics_message(uri: &str, diagnostics: &[Value]) -> Value {
 }
 
 fn to_diagnostic(offense: &Offense, source: &str) -> Value {
-    let start = offset_to_lsp_position(offense.range.start_offset, source);
-    let end = offset_to_lsp_position(offense.range.end_offset, source);
+    // LSP has no no-location concept: a filepath-only offense
+    // (murphy-e7bz.41.2) degrades to the document start so it stays visible
+    // instead of carrying a fabricated 1:1 from `Range::ZERO`.
+    let (start, end) = if offense.has_location() {
+        (
+            offset_to_lsp_position(offense.range.start_offset, source),
+            offset_to_lsp_position(offense.range.end_offset, source),
+        )
+    } else {
+        ((0, 0), (0, 0))
+    };
 
     json!({
         "range": {
