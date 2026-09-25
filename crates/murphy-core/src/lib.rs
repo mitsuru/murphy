@@ -62,7 +62,7 @@ pub use mruby::{
 pub use murphy_ast::ast_to_sexp;
 pub use murphy_plugin_api::RubyVersion;
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
-pub use parse::{ParseError, parse, parse_with_cache};
+pub use parse::{ParseDiagnostic, ParseError, collect_parse_diagnostics, parse, parse_with_cache};
 pub use registry::CopRegistry;
 
 /// Returns the Murphy core crate version.

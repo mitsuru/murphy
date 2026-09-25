@@ -45,6 +45,41 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// One owned parser diagnostic for `Lint/Syntax` parity (murphy-zpgm).
+///
+/// The host harvests these from prism (see [`collect_parse_diagnostics`])
+/// and threads them into every cop's `Cx` as the wire
+/// [`murphy_plugin_api::ParseDiagnostic`] slice. `message` is the verbatim
+/// prism text; `range` is the byte-offset span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseDiagnostic {
+    /// Verbatim prism diagnostic text.
+    pub message: String,
+    /// Byte-offset span of the offending source.
+    pub range: Range,
+}
+
+/// Harvest every prism error for `source`, in source order.
+///
+/// Returns an empty vec when the file parses cleanly. Sources exceeding
+/// the `u32` offset domain yield an empty vec here — [`parse`] surfaces
+/// that shape as a structured [`ParseError`] instead, so diagnostics
+/// callers never observe truncated offsets.
+pub fn collect_parse_diagnostics(source: &str) -> Vec<ParseDiagnostic> {
+    if exceeds_offset_domain(source.len()) {
+        return Vec::new();
+    }
+    let result = prism::parse(source.as_bytes());
+    result
+        .errors()
+        .map(|err| {
+            let range = Range::from_prism_location(&err.location());
+            let message = String::from_utf8_lossy(err.message().as_bytes()).into_owned();
+            ParseDiagnostic { message, range }
+        })
+        .collect()
+}
+
 /// Whether a source of `len` bytes exceeds the `u32` byte-offset domain.
 ///
 /// ADR 0001 fixes offsets at `u32` byte positions; `murphy-ast::Range`
@@ -75,16 +110,11 @@ pub fn parse(source: &str, path: impl Into<PathBuf>) -> Result<Ast, ParseError> 
         });
     }
 
-    {
-        let result = prism::parse(source.as_bytes());
-        if let Some(err) = result.errors().next() {
-            let loc = err.location();
-            let range = Range::from_prism_location(&loc);
-            let message = String::from_utf8_lossy(err.message().as_bytes()).into_owned();
-            return Err(ParseError { message, range });
-        }
-        // `result` borrows `source`; drop the borrow before translate
-        // re-parses (translate does its own `prism::parse`).
+    if let Some(first) = collect_parse_diagnostics(source).into_iter().next() {
+        return Err(ParseError {
+            message: first.message,
+            range: first.range,
+        });
     }
 
     Ok(murphy_translate::translate(source, path))
@@ -127,14 +157,11 @@ pub fn parse_with_cache(
     }
     // Miss: harvest the first prism error so a syntax-error file degrades
     // through the Murphy/Syntax path (ADR 0006) rather than getting cached.
-    {
-        let result = prism::parse(source.as_bytes());
-        if let Some(err) = result.errors().next() {
-            let loc = err.location();
-            let range = Range::from_prism_location(&loc);
-            let message = String::from_utf8_lossy(err.message().as_bytes()).into_owned();
-            return Err(ParseError { message, range });
-        }
+    if let Some(first) = collect_parse_diagnostics(source).into_iter().next() {
+        return Err(ParseError {
+            message: first.message,
+            range: first.range,
+        });
     }
     let ast = murphy_translate::translate(source, path);
     cache.put(&hash, &ast);
@@ -229,6 +256,32 @@ mod tests {
         let _ = parse_with_cache(src, "a.rb", Some(&cache)).unwrap();
         let hit = parse_with_cache(src, "b.rb", Some(&cache)).unwrap();
         assert_eq!(hit.path().to_str(), Some("b.rb"));
+    }
+
+    #[test]
+    fn collect_parse_diagnostics_empty_on_clean_source() {
+        let diags = collect_parse_diagnostics("x = 1\n");
+        assert!(diags.is_empty(), "clean source yields no diagnostics");
+    }
+
+    #[test]
+    fn collect_parse_diagnostics_first_matches_parse_error() {
+        let src = "def (\n";
+        let err = parse(src, "t.rb").unwrap_err();
+        let diags = collect_parse_diagnostics(src);
+        assert!(!diags.is_empty(), "broken source yields diagnostics");
+        assert_eq!(diags[0].message, err.message);
+        assert_eq!(diags[0].range, err.range);
+    }
+
+    #[test]
+    fn collect_parse_diagnostics_ranges_inside_source() {
+        let src = "def (\n";
+        for diag in collect_parse_diagnostics(src) {
+            assert!(!diag.message.is_empty());
+            assert!(diag.range.start_offset <= diag.range.end_offset);
+            assert!((diag.range.end_offset as usize) <= src.len());
+        }
     }
 
     #[test]

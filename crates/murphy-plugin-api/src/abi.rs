@@ -162,6 +162,27 @@ unsafe impl Sync for FnTable {}
 pub type AllocNodeSliceFn =
     unsafe extern "C" fn(*mut c_void, *const NodeId, usize) -> *const NodeId;
 
+/// `#[repr(C)]` parser diagnostic passed to plugin cops for `Lint/Syntax`
+/// parity (murphy-zpgm).
+///
+/// One entry per prism error: `message` is the verbatim prism diagnostic
+/// text (UTF-8), `range` is the byte-offset span of the offending source.
+/// The slice lives in [`CxRaw::parse_diagnostics`]; the host guarantees it
+/// (and the bytes `message` points at) stays valid for the dispatch call.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ParseDiagnostic {
+    /// Verbatim prism diagnostic text.
+    pub message: RawSlice,
+    /// Byte-offset span of the offending source.
+    pub range: Range,
+}
+
+// Safety: ParseDiagnostic is an immutable aggregate of a non-owning RawSlice
+// view plus a Copy Range; it lives only in host-owned dispatch slices.
+// Sharing the view across threads is sound for the same reason RawSlice is Sync.
+unsafe impl Sync for ParseDiagnostic {}
+
 /// `#[repr(C)]` bundle the host passes per dispatch call. `Cx<'a>` is
 /// the safe wrapper built from a borrowed `&CxRaw`.
 #[repr(C)]
@@ -286,6 +307,14 @@ pub struct CxRaw {
     /// not bumped for tail-appended CxRaw fields. Read via
     /// `Cx::block_braces_space()`.
     pub block_braces_space: bool,
+    /// Parser diagnostics for `Lint/Syntax` parity (murphy-zpgm): one entry
+    /// per prism error, in source order. Empty (`null`/`0`) when the file
+    /// parsed cleanly or when the host did not harvest diagnostics (e.g.
+    /// option-only entry points). Tail-appended under ABI v4 lockstep; per
+    /// project policy the numeric ABI is not bumped for tail-appended CxRaw
+    /// fields. Read via `Cx::parse_diagnostics()`.
+    pub parse_diagnostics: *const ParseDiagnostic,
+    pub parse_diagnostics_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -338,6 +367,10 @@ pub struct CxRaw {
 /// into the trailing padding after `block_body_empty_lines` under ABI v4
 /// lockstep for murphy-4qhr; it fits the existing tail padding so
 /// `size_of::<CxRaw>()` is unchanged.
+/// `CxRaw::parse_diagnostics` (+`_len`) was tail-appended under ABI v4
+/// lockstep for murphy-zpgm; it grows `size_of::<CxRaw>()` (a pointer+len do
+/// not fit the trailing padding). Per project policy the numeric ABI is not
+/// bumped for tail-appended CxRaw fields.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -639,7 +672,11 @@ mod tests {
         // murphy-4qhr: tail-appended into the trailing padding after
         // `block_body_empty_lines` (265); size unchanged.
         assert_eq!(offset_of!(CxRaw, block_braces_space), 266);
-        assert_eq!(size_of::<CxRaw>(), 272);
+        // murphy-zpgm: tail-appended pointer+len; needs 8-byte alignment so it
+        // starts at 272 (after 264-266 bools + 267-271 padding).
+        assert_eq!(offset_of!(CxRaw, parse_diagnostics), 272);
+        assert_eq!(offset_of!(CxRaw, parse_diagnostics_len), 280);
+        assert_eq!(size_of::<CxRaw>(), 288);
     }
 
     #[test]
@@ -665,6 +702,17 @@ mod tests {
             5 * size_of::<RawSlice>()
         );
         assert_eq!(offset_of!(OptionSpec, reason), 6 * size_of::<RawSlice>());
+    }
+
+    #[test]
+    fn parse_diagnostic_field_offsets_are_frozen() {
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(ParseDiagnostic, message), 0);
+        assert_eq!(offset_of!(ParseDiagnostic, range), size_of::<RawSlice>());
+        assert_eq!(
+            size_of::<ParseDiagnostic>(),
+            size_of::<RawSlice>() + size_of::<Range>()
+        );
     }
 
     #[test]

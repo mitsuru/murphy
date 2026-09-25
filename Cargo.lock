@@ -956,6 +956,7 @@ dependencies = [
  "murphy-ast",
  "murphy-pattern",
  "murphy-plugin-macros",
+ "murphy-prism",
  "murphy-translate",
  "regex",
  "serde_json",

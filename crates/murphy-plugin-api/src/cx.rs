@@ -11,7 +11,7 @@ use murphy_ast::{
     slot_layout,
 };
 
-use crate::abi::CxRaw;
+use crate::abi::{CxRaw, ParseDiagnostic};
 use crate::{ConfigError, CopOptions, RubyVersion};
 
 /// Borrowed, direct-read view of the arena for one dispatch call.
@@ -621,6 +621,22 @@ impl<'a> Cx<'a> {
     /// `Layout/SpaceInsideBlockBraces` resolves to `space` (the default).
     pub fn space_required_after_lcurly(&self) -> bool {
         self.raw.block_braces_space
+    }
+
+    /// Parser diagnostics for `Lint/Syntax` parity (murphy-zpgm).
+    ///
+    /// One entry per prism error, in source order; empty when the file
+    /// parsed cleanly. Each entry's `message` is the verbatim prism text
+    /// and `range` is the byte-offset span. Read the message with
+    /// `String::from_utf8_lossy(unsafe { d.message.as_bytes() })` — the
+    /// host keeps the bytes alive for the dispatch call.
+    pub fn parse_diagnostics(&self) -> &'a [ParseDiagnostic] {
+        unsafe { slice(self.raw.parse_diagnostics, self.raw.parse_diagnostics_len) }
+    }
+
+    /// `true` when the parser reported at least one diagnostic.
+    pub fn has_parse_errors(&self) -> bool {
+        self.raw.parse_diagnostics_len != 0
     }
 
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
@@ -3269,6 +3285,8 @@ mod tests {
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
             block_braces_space: true,
+            parse_diagnostics: std::ptr::null(),
+            parse_diagnostics_len: 0,
         }
     }
 
@@ -3391,6 +3409,41 @@ mod tests {
             cx.target_ruby_version(),
             Some(crate::RubyVersion::new(3, 2))
         );
+    }
+
+    #[test]
+    fn parse_diagnostics_decodes_from_raw_context() {
+        use crate::abi::ParseDiagnostic;
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        // Empty by default.
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.parse_diagnostics().is_empty());
+        assert!(!cx.has_parse_errors());
+
+        // Non-empty slice threads through.
+        let message = "unexpected token";
+        let diags = [ParseDiagnostic {
+            message: crate::abi::RawSlice {
+                ptr: message.as_ptr(),
+                len: message.len(),
+            },
+            range: Range { start: 0, end: 3 },
+        }];
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.parse_diagnostics = diags.as_ptr();
+        raw.parse_diagnostics_len = diags.len();
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.has_parse_errors());
+        let got = cx.parse_diagnostics();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].range, Range { start: 0, end: 3 });
+        let text = String::from_utf8_lossy(unsafe { got[0].message.as_bytes() });
+        assert_eq!(text, "unexpected token");
     }
 
     #[test]
