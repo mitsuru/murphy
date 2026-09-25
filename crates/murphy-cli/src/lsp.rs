@@ -51,7 +51,7 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
             let result = json!({
                 "capabilities": {
                     "textDocumentSync": 1,
-                    "codeActionProvider": false,
+                    "codeActionProvider": true,
                 }
             });
             let response = json!({"jsonrpc": "2.0", "id": id, "result": result});
@@ -146,8 +146,35 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
 
         if method == "textDocument/codeAction" {
             if let Some(value) = id {
-                let response = json!({"jsonrpc": "2.0", "id": value, "result": []});
-                write_message(&mut stdout, &response)?;
+                match code_actions_for_params(params, &open_documents, &config, &registry) {
+                    Ok(actions) => {
+                        let response = json!({"jsonrpc": "2.0", "id": value, "result": actions});
+                        write_message(&mut stdout, &response)?;
+                    }
+                    Err(message) => {
+                        write_message(&mut stdout, &invalid_params_error(value, &message))?;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // B2 (murphy-fmw.2.2): range-selected re-lint. A custom request that
+        // re-lints the open document and returns only the diagnostics
+        // intersecting the requested range, so editors can refresh a
+        // selection without a full publish cycle.
+        if method == "murphy/rangeDiagnostics" {
+            if let Some(value) = id {
+                match range_diagnostics_for_params(params, &open_documents, &config, &registry) {
+                    Ok(diagnostics) => {
+                        let response =
+                            json!({"jsonrpc": "2.0", "id": value, "result": diagnostics});
+                        write_message(&mut stdout, &response)?;
+                    }
+                    Err(message) => {
+                        write_message(&mut stdout, &invalid_params_error(value, &message))?;
+                    }
+                }
             }
             continue;
         }
@@ -245,6 +272,280 @@ fn uri_from_message(params: Option<&Value>) -> Option<String> {
         .and_then(|td| td.get("uri"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// B2 (murphy-fmw.2.2): quick-fix code actions built from the existing
+/// autocorrect edits carried by [`Offense`] values.
+///
+/// The handler re-lints the open document text (same pipeline as
+/// `publish_diagnostics`), then:
+/// - when `context.diagnostics` is non-empty, only offenses matching a
+///   context diagnostic (same cop code + intersecting range) get an action;
+/// - otherwise, every fixable offense intersecting the requested `range`
+///   gets an action.
+///
+/// Offenses without autocorrect edits (or without a location) never produce
+/// actions. A non-`file://` URI is `InvalidParams`, matching
+/// `didOpen`/`didChange`; an unknown (never opened) document yields `[]`.
+fn code_actions_for_params(
+    params: Option<&Value>,
+    open_documents: &HashMap<String, String>,
+    config: &MurphyConfig,
+    registry: &CopRegistry,
+) -> Result<Vec<Value>, String> {
+    let uri = uri_from_message(params).ok_or_else(|| "Invalid params".to_string())?;
+    let file = uri_to_file_path(&uri)
+        .ok_or_else(|| "Invalid params".to_string())?
+        .to_string();
+    let text = match open_documents.get(&uri) {
+        Some(text) => text.clone(),
+        None => return Ok(Vec::new()),
+    };
+
+    let range = params
+        .and_then(|p| p.get("range"))
+        .and_then(parse_lsp_range);
+    let Some(((start_line, start_char), (end_line, end_char))) = range else {
+        return Ok(Vec::new());
+    };
+    let range_start = lsp_position_to_offset((start_line, start_char), &text);
+    let range_end = lsp_position_to_offset((end_line, end_char), &text);
+
+    if only_filters_out_quickfix(params) {
+        return Ok(Vec::new());
+    }
+
+    let offenses = run_offenses_for_source(&text, &file, config, registry);
+    let context_diagnostics = params
+        .and_then(|p| p.get("context"))
+        .and_then(|c| c.get("diagnostics"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut actions = Vec::new();
+    for offense in &offenses {
+        if offense
+            .autocorrect
+            .as_ref()
+            .is_none_or(|ac| ac.edits.is_empty())
+        {
+            continue;
+        }
+        if !offense.has_location() {
+            continue;
+        }
+        if !context_diagnostics.is_empty() {
+            if !context_matches_offense(&context_diagnostics, offense, &text) {
+                continue;
+            }
+        } else if !byte_ranges_intersect(
+            offense.range.start_offset as usize,
+            offense.range.end_offset as usize,
+            range_start,
+            range_end,
+        ) {
+            continue;
+        }
+        if let Some(action) = build_quickfix_action(&uri, offense, &text) {
+            actions.push(action);
+        }
+    }
+    Ok(actions)
+}
+
+/// B2 (murphy-fmw.2.2): range-selected re-lint.
+///
+/// Re-lints the open document and returns only the diagnostics intersecting
+/// `params.range`. Errors mirror `codeAction`: non-`file://` URIs and missing
+/// ranges are `InvalidParams`; a never-opened document reports
+/// `InvalidParams` ("document not open") so clients can distinguish it from
+/// an empty (clean) range result.
+fn range_diagnostics_for_params(
+    params: Option<&Value>,
+    open_documents: &HashMap<String, String>,
+    config: &MurphyConfig,
+    registry: &CopRegistry,
+) -> Result<Vec<Value>, String> {
+    let uri = uri_from_message(params).ok_or_else(|| "Invalid params".to_string())?;
+    let file = uri_to_file_path(&uri)
+        .ok_or_else(|| "Invalid params".to_string())?
+        .to_string();
+    let text = open_documents
+        .get(&uri)
+        .cloned()
+        .ok_or_else(|| "document not open".to_string())?;
+
+    let range = params
+        .and_then(|p| p.get("range"))
+        .and_then(parse_lsp_range);
+    let Some(((start_line, start_char), (end_line, end_char))) = range else {
+        return Err("Invalid params".to_string());
+    };
+    let range_start = lsp_position_to_offset((start_line, start_char), &text);
+    let range_end = lsp_position_to_offset((end_line, end_char), &text);
+
+    let offenses = run_offenses_for_source(&text, &file, config, registry);
+    Ok(offenses
+        .iter()
+        .filter(|offense| {
+            offense.has_location()
+                && byte_ranges_intersect(
+                    offense.range.start_offset as usize,
+                    offense.range.end_offset as usize,
+                    range_start,
+                    range_end,
+                )
+        })
+        .map(|offense| to_diagnostic(offense, &text))
+        .collect())
+}
+
+/// Build one `quickfix` code action from an offense's autocorrect edits.
+///
+/// Returns `None` when the offense carries no usable fix (no autocorrect,
+/// empty edits, or no location). Edit byte offsets map to LSP ranges with
+/// [`offset_to_lsp_position`], the same conversion as diagnostics.
+fn build_quickfix_action(uri: &str, offense: &Offense, source: &str) -> Option<Value> {
+    let edits = offense.autocorrect.as_ref()?.edits.as_slice();
+    if edits.is_empty() || !offense.has_location() {
+        return None;
+    }
+    let text_edits = edits
+        .iter()
+        .map(|edit| {
+            let (start, end) = (
+                offset_to_lsp_position(edit.range.start_offset, source),
+                offset_to_lsp_position(edit.range.end_offset, source),
+            );
+            json!({
+                "range": {
+                    "start": {"line": start.0, "character": start.1},
+                    "end": {"line": end.0, "character": end.1},
+                },
+                "newText": edit.replacement,
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(json!({
+        "title": format!("Murphy: fix {}", offense.cop_name),
+        "kind": "quickfix",
+        "diagnostics": [to_diagnostic(offense, source)],
+        "edit": {"changes": {uri: text_edits}},
+    }))
+}
+
+/// `true` when `context.only` is present, non-empty, and excludes quickfix
+/// actions (we only provide the `quickfix` kind in B2 scope).
+fn only_filters_out_quickfix(params: Option<&Value>) -> bool {
+    let only = params
+        .and_then(|p| p.get("context"))
+        .and_then(|c| c.get("only"))
+        .and_then(Value::as_array);
+    match only {
+        None => false,
+        Some(kinds) if kinds.is_empty() => false,
+        Some(kinds) => !kinds.iter().any(|kind| {
+            kind.as_str()
+                .is_some_and(|k| k == "quickfix" || k == "source.fixAll")
+        }),
+    }
+}
+
+/// `true` when any context diagnostic refers to this offense: the diagnostic
+/// `code` (string or `{value}` form) equals the cop name and its range
+/// intersects the offense byte range.
+fn context_matches_offense(context: &[Value], offense: &Offense, source: &str) -> bool {
+    context.iter().any(|diagnostic| {
+        let code_matches = diagnostic
+            .get("code")
+            .is_some_and(|code| diagnostic_code(code) == offense.cop_name);
+        if !code_matches {
+            return false;
+        }
+        let Some(((sl, sc), (el, ec))) = diagnostic.get("range").and_then(parse_lsp_range) else {
+            return true;
+        };
+        byte_ranges_intersect(
+            offense.range.start_offset as usize,
+            offense.range.end_offset as usize,
+            lsp_position_to_offset((sl, sc), source),
+            lsp_position_to_offset((el, ec), source),
+        )
+    })
+}
+
+/// Extract a diagnostic code string from either the plain-string form
+/// (`"code": "Style/Foo"`) or the object form (`"code": {"value": ...}`).
+fn diagnostic_code(code: &Value) -> &str {
+    if let Some(name) = code.as_str() {
+        return name;
+    }
+    code.get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// Parse an LSP `{"start": {"line", "character"}, "end": {...}}` range value.
+fn parse_lsp_range(value: &Value) -> Option<((u32, u32), (u32, u32))> {
+    let start = value.get("start").and_then(parse_lsp_position)?;
+    let end = value.get("end").and_then(parse_lsp_position)?;
+    Some((start, end))
+}
+
+/// Parse an LSP `{"line", "character"}` position value.
+fn parse_lsp_position(value: &Value) -> Option<(u32, u32)> {
+    let line = value.get("line").and_then(Value::as_u64)?;
+    let character = value.get("character").and_then(Value::as_u64)?;
+    Some((u32::try_from(line).ok()?, u32::try_from(character).ok()?))
+}
+
+/// Convert an LSP line/character position back to a source byte offset.
+///
+/// This is the inverse of [`offset_to_lsp_position`]: `character` counts bytes
+/// within the line (not UTF-16 code units — see the B2 follow-up note in
+/// `docs/guides/lsp.md`). Positions past end-of-line/document clamp to the
+/// line/document end so out-of-range client ranges degrade to empty results
+/// instead of panics.
+fn lsp_position_to_offset(position: (u32, u32), source: &str) -> usize {
+    let (line, character) = (position.0 as usize, position.1 as usize);
+    let bytes = source.as_bytes();
+    let mut offset = 0usize;
+    let mut current_line = 0usize;
+    while current_line < line && offset < bytes.len() {
+        if bytes[offset] == b'\n' {
+            current_line += 1;
+        }
+        offset += 1;
+    }
+    if current_line < line {
+        return bytes.len();
+    }
+    let line_end = bytes[offset..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(bytes.len(), |pos| offset + pos);
+    offset + character.min(line_end.saturating_sub(offset))
+}
+
+/// Half-open byte-range intersection with point containment.
+///
+/// Non-empty ranges intersect when `a.start < b.end && b.start < a.end`
+/// (adjacent ranges do not intersect). An empty range (cursor/selection
+/// anchor) intersects when its point lies inside — or exactly on the edge
+/// of — the other range, so a cursor parked at an offense boundary still
+/// offers the fix.
+fn byte_ranges_intersect(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
+    if a_start == a_end && b_start == b_end {
+        return a_start == b_start;
+    }
+    if a_start == a_end {
+        return b_start <= a_start && a_start <= b_end;
+    }
+    if b_start == b_end {
+        return a_start <= b_start && b_start <= a_end;
+    }
+    a_start < b_end && b_start < a_end
 }
 
 fn publish_diagnostics(
@@ -374,6 +675,170 @@ mod tests {
         data.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
         data.extend_from_slice(&body);
         data
+    }
+
+    #[test]
+    fn byte_ranges_intersect_overlaps_but_not_adjacent() {
+        assert!(byte_ranges_intersect(0, 8, 0, 8));
+        assert!(byte_ranges_intersect(0, 8, 4, 12));
+        assert!(!byte_ranges_intersect(0, 8, 8, 12));
+        assert!(!byte_ranges_intersect(8, 12, 0, 8));
+    }
+
+    #[test]
+    fn byte_ranges_intersect_point_containment_includes_edges() {
+        // Cursor (empty range) on, inside, or at the edge of an offense
+        // still offers the fix; a cursor outside does not.
+        assert!(byte_ranges_intersect(0, 8, 0, 0));
+        assert!(byte_ranges_intersect(0, 8, 8, 8));
+        assert!(byte_ranges_intersect(0, 8, 4, 4));
+        assert!(!byte_ranges_intersect(0, 8, 9, 9));
+    }
+
+    #[test]
+    fn lsp_position_round_trips_through_offset() {
+        let source = "x = 1\ny = 2\n";
+        for offset in [0u32, 3, 5, 6, 8, 11, 12] {
+            let pos = offset_to_lsp_position(offset, source);
+            assert_eq!(
+                lsp_position_to_offset(pos, source),
+                offset as usize,
+                "offset {offset} must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn lsp_position_clamps_past_end() {
+        let source = "ab\n";
+        assert_eq!(lsp_position_to_offset((10, 0), source), source.len());
+        assert_eq!(lsp_position_to_offset((0, 99), source), 2);
+        assert_eq!(lsp_position_to_offset((0, 0), ""), 0);
+    }
+
+    #[test]
+    fn diagnostic_code_reads_string_and_object_forms() {
+        assert_eq!(diagnostic_code(&json!("Style/Foo")), "Style/Foo");
+        assert_eq!(diagnostic_code(&json!({"value": "Lint/Bar"})), "Lint/Bar");
+        assert_eq!(diagnostic_code(&json!(null)), "");
+    }
+
+    #[test]
+    fn only_filter_keeps_quickfix_and_drops_others() {
+        assert!(!only_filters_out_quickfix(None));
+        assert!(!only_filters_out_quickfix(Some(
+            &json!({"context": {"only": ["quickfix"]}})
+        )));
+        assert!(!only_filters_out_quickfix(Some(&json!({}))));
+        assert!(only_filters_out_quickfix(Some(
+            &json!({"context": {"only": ["refactor"]}})
+        )));
+    }
+
+    #[test]
+    fn build_quickfix_action_maps_edits_to_text_edits() {
+        use murphy_core::{Autocorrect, Edit, Range};
+
+        let offense = Offense::new(
+            "a.rb",
+            "Layout/TrailingWhitespace",
+            Range {
+                start_offset: 5,
+                end_offset: 7,
+            },
+            Severity::Warning,
+            "Trailing whitespace detected.",
+        )
+        .with_autocorrect(Autocorrect {
+            edits: vec![Edit {
+                range: Range {
+                    start_offset: 5,
+                    end_offset: 7,
+                },
+                replacement: String::new(),
+            }],
+        });
+
+        let action = build_quickfix_action("file:///a.rb", &offense, "x = 1  \n")
+            .expect("fixable offense must produce an action");
+        assert_eq!(action["kind"], json!("quickfix"));
+        assert_eq!(
+            action["title"],
+            json!("Murphy: fix Layout/TrailingWhitespace")
+        );
+        let edits = action["edit"]["changes"]["file:///a.rb"]
+            .as_array()
+            .expect("changes must list text edits");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["newText"], json!(""));
+        assert_eq!(
+            edits[0]["range"]["start"],
+            json!({"line": 0, "character": 5})
+        );
+        assert_eq!(edits[0]["range"]["end"], json!({"line": 0, "character": 7}));
+    }
+
+    #[test]
+    fn build_quickfix_action_returns_none_without_fix() {
+        use murphy_core::Range;
+
+        let offense = Offense::new(
+            "a.rb",
+            "Lint/Debugger",
+            Range {
+                start_offset: 0,
+                end_offset: 8,
+            },
+            Severity::Warning,
+            "Remove debugger entry point `debugger`.",
+        );
+        assert_eq!(
+            build_quickfix_action("file:///a.rb", &offense, "debugger"),
+            None
+        );
+    }
+
+    #[test]
+    fn context_matches_offense_by_code_and_range() {
+        use murphy_core::Range;
+
+        let source = "x = 1  \n";
+        let offense = Offense::new(
+            "a.rb",
+            "Layout/TrailingWhitespace",
+            Range {
+                start_offset: 5,
+                end_offset: 7,
+            },
+            Severity::Warning,
+            "Trailing whitespace detected.",
+        );
+        let matching = json!({
+            "range": {
+                "start": {"line": 0, "character": 5},
+                "end": {"line": 0, "character": 7},
+            },
+            "code": "Layout/TrailingWhitespace",
+        });
+        assert!(context_matches_offense(&[matching], &offense, source));
+
+        let wrong_code = json!({
+            "range": {
+                "start": {"line": 0, "character": 5},
+                "end": {"line": 0, "character": 7},
+            },
+            "code": "Style/Foo",
+        });
+        assert!(!context_matches_offense(&[wrong_code], &offense, source));
+
+        let far_range = json!({
+            "range": {
+                "start": {"line": 5, "character": 0},
+                "end": {"line": 5, "character": 1},
+            },
+            "code": "Layout/TrailingWhitespace",
+        });
+        assert!(!context_matches_offense(&[far_range], &offense, source));
     }
 
     #[test]
