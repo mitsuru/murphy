@@ -9,6 +9,15 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the call head `(call _ {:=~ :=== :!~ :match :match?} ...)`
+//!   (murphy-s1yc.12): `call` covers safe-navigation (`string&.match?`),
+//!   mirroring RuboCop `alias on_csend on_send` plus `RESTRICT_ON_SEND`; the
+//!   wildcard receiver binds an absent or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list. The inner
+//!   `(regexp (str $_) (regopt))` child is not expressible in murphy
+//!   NodePattern v1, so the regexp-shape plus anchor plus metachar guards
+//!   below apply separately, mirroring upstream `return unless node.receiver`
+//!   plus `parse_regexp` plus `exact_match_pattern?`.
 //!   Flags `=~`, `!~`, `===`, `match`, and `match?` calls where the regexp
 //!   argument is a plain anchored literal: `/\Astring\z/` (no flags,
 //!   no interpolation, no regexp metacharacters in the literal content).
@@ -45,12 +54,25 @@
 //! string != 'string'
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.12):
+// `(call _ {:=~ :=== :!~ :match :match?} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`string&.match?`), mirroring RuboCop `alias
+// on_csend on_send` plus `RESTRICT_ON_SEND`. The `_` receiver binds an
+// absent or present receiver per murphy-if9y; trailing `...` absorbs any
+// argument list, so the receiver plus regexp-shape plus anchor plus
+// metachar guards below apply separately (mirroring upstream `return
+// unless node.receiver` plus `parse_regexp` plus `exact_match_pattern?`).
+// The inner `(regexp (str $_) (regopt))` child is not expressible in
+// murphy NodePattern v1 (`regexp`/`str`/`regopt` are outside
+// SUPPORTED_TAGS), so it stays a hand-rolled complementary guard.
+def_node_matcher!(
+    exact_regexp_match_call,
+    "(call _ {:=~ :=== :!~ :match :match?} ...)"
+);
 
 const MSG: &str = "Use `%<prefer>s`.";
-
-/// Methods that trigger this cop.
-const FLAGGED_METHODS: &[&str] = &["=~", "===", "!~", "match", "match?"];
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -76,27 +98,29 @@ impl ExactRegexpMatch {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return;
-    };
-
-    // Must have a receiver (the string being tested).
-    let Some(recv_id) = receiver.get() else {
-        return;
-    };
-
-    let method_str = cx.symbol_str(method);
-    if !FLAGGED_METHODS.contains(&method_str) {
+    // Verbatim `(call _ {:=~ :=== :!~ :match :match?} ...)` head: filters to
+    // the five flagged methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated
+    // call over a regexp argument (e.g. `string.search(/\\Atest\\z/)`)
+    // would run check on every call node instead of being rejected by the
+    // method set up front.
+    if !exact_regexp_match_call(node, cx) {
         return;
     }
 
+    // Must have a receiver (the string being tested). Mirrors upstream
+    // `return unless node.receiver`; `_` binds an absent receiver, so bare
+    // `match(/.../)` is accepted here.
+    let Some(recv_id) = cx.call_receiver(node).get() else {
+        return;
+    };
+
+    let method_str = cx.method_name(node).unwrap_or_default();
+
     // Find the regexp argument. For all supported methods, it's arg[0].
-    let arg_list = cx.list(args);
+    // Trailing `...` absorbs any argument list, so the no-argument case
+    // (`string.match`) is accepted here.
+    let arg_list = cx.call_arguments(node);
     let Some(&regexp_arg) = arg_list.first() else {
         return;
     };
@@ -263,6 +287,50 @@ mod tests {
     fn accepts_regexp_with_metachar() {
         // `.` is a metacharacter.
         test::<ExactRegexpMatch>().expect_no_offenses("string =~ /\\Ahello.world\\z/\n");
+    }
+
+    // --- Characterization (murphy-s1yc.12): pin the exact node set the
+    // hand-rolled send dispatch matches, so the verbatim
+    // `(call _ {:=~ :=== :!~ :match :match?} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send`); trailing `...` absorbs any argument list,
+    // so the receiver plus regexp-shape plus anchor plus metachar guards
+    // below apply separately (mirroring upstream `return unless receiver`
+    // plus `parse_regexp` plus `exact_match_pattern?`).
+
+    #[test]
+    fn s1yc12_flags_csend_match_predicate_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. (Pre-port the `csend` handler
+        // is dead code: `check` destructures `NodeKind::Send` only.)
+        test::<ExactRegexpMatch>().expect_correction(
+            indoc! {r#"
+                string&.match?(/\Atest\z/)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `string == 'test'`.
+            "#},
+            "string == 'test'\n",
+        );
+    }
+
+    #[test]
+    fn s1yc12_accepts_bare_match() {
+        // Bare receiver: `_` binds an absent receiver per murphy-if9y, so
+        // the head matches and the complementary receiver guard (mirroring
+        // upstream `return unless node.receiver`) accepts.
+        test::<ExactRegexpMatch>().expect_no_offenses("match(/\\Atest\\z/)\n");
+    }
+
+    #[test]
+    fn s1yc12_accepts_no_arg_match() {
+        // No arguments: trailing `...` absorbs the empty list, so the head
+        // matches and the complementary regexp-arg guard accepts.
+        test::<ExactRegexpMatch>().expect_no_offenses("string.match\n");
+    }
+
+    #[test]
+    fn s1yc12_accepts_unrelated_method() {
+        // `search` is outside the verbatim method set, so the head rejects.
+        test::<ExactRegexpMatch>().expect_no_offenses("string.search(/\\Atest\\z/)\n");
     }
 }
 
