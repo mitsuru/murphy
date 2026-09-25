@@ -1,0 +1,1070 @@
+# Translate mapping snapshot — DO NOT EDIT BY HAND.
+# Regenerate with: BLESS=1 cargo test -p murphy-translate --test layer_version_gate
+# When prism->NodeKind mapping changes: bump murphy_translate::LAYER_VERSION
+# in crates/murphy-translate/src/lib.rs, then re-bless and commit both.
+LAYER_VERSION=9
+---
+case: nil_literal
+source: "nil"
+sexp:
+(nil)
+---
+case: true_literal
+source: "true"
+sexp:
+(true)
+---
+case: false_literal
+source: "false"
+sexp:
+(false)
+---
+case: self_expr
+source: "self"
+sexp:
+(self)
+---
+case: int_literal
+source: "42"
+sexp:
+(int 42)
+---
+case: float_literal
+source: "3.14"
+sexp:
+(float 3.14)
+---
+case: string_literal
+source: "\"hello\""
+sexp:
+(str "hello")
+---
+case: symbol_literal
+source: ":foo"
+sexp:
+(sym :foo)
+---
+case: rational_literal
+source: "1r"
+sexp:
+(rational 1r)
+---
+case: complex_literal
+source: "1i"
+sexp:
+(complex 1i)
+---
+case: huge_int_unknown
+source: "99999999999999999999999999"
+sexp:
+(unknown)
+---
+case: lvar_read
+source: "x = 1; x"
+sexp:
+(begin
+  (lvasgn x
+    (int 1))
+  (lvar x))
+---
+case: ivar_read
+source: "@x"
+sexp:
+(ivar @x)
+---
+case: cvar_read
+source: "@@x"
+sexp:
+(cvar @@x)
+---
+case: gvar_read
+source: "$x"
+sexp:
+(gvar $x)
+---
+case: backref_read
+source: "$&"
+sexp:
+(back_ref :$&)
+---
+case: gvar_tilde
+source: "$~"
+sexp:
+(gvar $~)
+---
+case: nth_ref
+source: "$1"
+sexp:
+(nth_ref 1)
+---
+case: const_read
+source: "Foo"
+sexp:
+(const :Foo
+  nil)
+---
+case: const_path
+source: "Foo::Bar"
+sexp:
+(const :Bar
+  (const :Foo
+    nil))
+---
+case: cbase
+source: "::Foo"
+sexp:
+(const :Foo
+  nil)
+---
+case: lvasgn
+source: "x = 1"
+sexp:
+(lvasgn x
+  (int 1))
+---
+case: ivasgn
+source: "@x = 1"
+sexp:
+(ivasgn @x
+  (int 1))
+---
+case: cvasgn
+source: "@@x = 1"
+sexp:
+(cvasgn @@x
+  (int 1))
+---
+case: gvasgn
+source: "$x = 1"
+sexp:
+(gvasgn $x
+  (int 1))
+---
+case: casgn_simple
+source: "Foo = 1"
+sexp:
+(casgn :Foo
+  nil
+  (int 1))
+---
+case: casgn_scoped
+source: "A::B = 1"
+sexp:
+(casgn :B
+  (const :A
+    nil)
+  (int 1))
+---
+case: masgn
+source: "a, b = 1, 2"
+sexp:
+(masgn
+  (mlhs
+    (lvasgn a
+      nil)
+    (lvasgn b
+      nil))
+  (array
+    (int 1)
+    (int 2)))
+---
+case: op_asgn
+source: "x = 1; x += 2"
+sexp:
+(begin
+  (lvasgn x
+    (int 1))
+  (op-asgn :+
+    (lvasgn x
+      nil)
+    (int 2)))
+---
+case: or_asgn
+source: "x = 1; x ||= 2"
+sexp:
+(begin
+  (lvasgn x
+    (int 1))
+  (or-asgn
+    (lvasgn x
+      nil)
+    (int 2)))
+---
+case: and_asgn
+source: "x = 1; x &&= 2"
+sexp:
+(begin
+  (lvasgn x
+    (int 1))
+  (and-asgn
+    (lvasgn x
+      nil)
+    (int 2)))
+---
+case: index_or_asgn
+source: "h = {}; h[:k] ||= 1"
+sexp:
+(begin
+  (lvasgn h
+    (hash))
+  (or-asgn
+    (index
+      (lvar h)
+      (sym :k))
+    (int 1)))
+---
+case: const_path_op_asgn
+source: "A::B += 1"
+sexp:
+(op-asgn :+
+  (casgn :B
+    (const :A
+      nil)
+    nil)
+  (int 1))
+---
+case: destructured_param
+source: "def f((a, b)); end"
+sexp:
+(def :f
+  nil
+  (args
+    (mlhs
+      (arg a)
+      (arg b)))
+  nil)
+---
+case: send_simple
+source: "foo(1, 2)"
+sexp:
+(send :foo
+  nil
+  (int 1)
+  (int 2))
+---
+case: csend
+source: "foo&.bar"
+sexp:
+(csend :bar
+  (send :foo
+    nil))
+---
+case: index_call
+source: "a[1, 2]"
+sexp:
+(send :[]
+  (send :a
+    nil)
+  (int 1)
+  (int 2))
+---
+case: index_asgn
+source: "a[1] = 2"
+sexp:
+(send :[]=
+  (send :a
+    nil)
+  (int 1)
+  (int 2))
+---
+case: block
+source: "foo { |x| x }"
+sexp:
+(block
+  (send :foo
+    nil)
+  (args
+    (arg x))
+  (lvar x))
+---
+case: block_local
+source: "items.each { |item; blacklist| nil }"
+sexp:
+(block
+  (send :each
+    (send :items
+      nil))
+  (args
+    (arg item)
+    (shadowarg :blacklist))
+  (nil))
+---
+case: numblock
+source: "foo { _1 + _2 }"
+sexp:
+(numblock max_n=2
+  (send :foo
+    nil)
+  (send :+
+    (lvar _1)
+    (lvar _2)))
+---
+case: itblock
+source: "foo { it }"
+sexp:
+(itblock
+  (send :foo
+    nil)
+  (send :it
+    nil))
+---
+case: lambda_arrow
+source: "->(x) { x }"
+sexp:
+(block
+  (lambda)
+  (args
+    (arg x))
+  (lvar x))
+---
+case: yield_call
+source: "def f; yield 1; end"
+sexp:
+(def :f
+  nil
+  (args)
+  (yield
+    (int 1)))
+---
+case: super_args
+source: "def f; super(1); end"
+sexp:
+(def :f
+  nil
+  (args)
+  (super
+    (int 1)))
+---
+case: super_bare
+source: "def f; super; end"
+sexp:
+(def :f
+  nil
+  (args)
+  (zsuper))
+---
+case: array
+source: "[1, 2, 3]"
+sexp:
+(array
+  (int 1)
+  (int 2)
+  (int 3))
+---
+case: hash_rocket
+source: "{ :a => 1 }"
+sexp:
+(hash
+  (pair
+    (sym :a)
+    (int 1)))
+---
+case: hash_label
+source: "{ a: 1 }"
+sexp:
+(hash
+  (pair
+    (sym :a)
+    (int 1)))
+---
+case: splat_array
+source: "[*a]"
+sexp:
+(array
+  (splat
+    (send :a
+      nil)))
+---
+case: kwsplat_call
+source: "foo(**opts)"
+sexp:
+(send :foo
+  nil
+  (hash
+    (kwsplat
+      (send :opts
+        nil))))
+---
+case: assoc_splat_hash
+source: "{ a: 1, **opts }"
+sexp:
+(hash
+  (pair
+    (sym :a)
+    (int 1))
+  (kwsplat
+    (send :opts
+      nil)))
+---
+case: if_else
+source: "if x; 1; else; 2; end"
+sexp:
+(if
+  (send :x
+    nil)
+  (int 1)
+  (int 2))
+---
+case: unless
+source: "unless x; 1; end"
+sexp:
+(if
+  (send :x
+    nil)
+  nil
+  (int 1))
+---
+case: while
+source: "while x; 1; end"
+sexp:
+(while post=false
+  (send :x
+    nil)
+  (int 1))
+---
+case: until
+source: "until x; 1; end"
+sexp:
+(until post=false
+  (send :x
+    nil)
+  (int 1))
+---
+case: while_post
+source: "begin; 1; end while x"
+sexp:
+(while post=true
+  (send :x
+    nil)
+  (begin
+    (int 1)))
+---
+case: for_loop
+source: "for i in [1, 2]; i; end"
+sexp:
+(for
+  (lvasgn i
+    nil)
+  (array
+    (int 1)
+    (int 2))
+  (lvar i))
+---
+case: case_when
+source: "case x; when 1; 2; else; 3; end"
+sexp:
+(case
+  (send :x
+    nil)
+  (when
+    (int 1)
+    (int 2))
+  (int 3))
+---
+case: and_op
+source: "a && b"
+sexp:
+(and
+  (send :a
+    nil)
+  (send :b
+    nil))
+---
+case: or_op
+source: "a || b"
+sexp:
+(or
+  (send :a
+    nil)
+  (send :b
+    nil))
+---
+case: not_kw
+source: "not x"
+sexp:
+(send :!
+  (send :x
+    nil))
+---
+case: return_kw
+source: "def f; return 1; end"
+sexp:
+(def :f
+  nil
+  (args)
+  (return
+    (int 1)))
+---
+case: break_kw
+source: "while x; break; end"
+sexp:
+(while post=false
+  (send :x
+    nil)
+  (break
+    nil))
+---
+case: next_kw
+source: "while x; next; end"
+sexp:
+(while post=false
+  (send :x
+    nil)
+  (next
+    nil))
+---
+case: retry_kw
+source: "begin; 1; rescue; retry; end"
+sexp:
+(begin
+  (rescue
+    (int 1)
+    (resbody
+      (exceptions)
+      nil
+      (retry))
+    nil))
+---
+case: redo_kw
+source: "while x; redo; end"
+sexp:
+(while post=false
+  (send :x
+    nil)
+  (unknown))
+---
+case: defined_kw
+source: "defined?(x)"
+sexp:
+(defined
+  (send :x
+    nil))
+---
+case: rescue_modifier
+source: "1 rescue 2"
+sexp:
+(rescue
+  (int 1)
+  (resbody
+    (exceptions)
+    nil
+    (int 2))
+  nil)
+---
+case: rescue_else_ensure
+source: "begin; 1; rescue; 2; else; 3; ensure; 4; end"
+sexp:
+(begin
+  (ensure
+    (rescue
+      (int 1)
+      (resbody
+        (exceptions)
+        nil
+        (int 2))
+      (int 3))
+    (int 4)))
+---
+case: def_simple
+source: "def foo(a); a; end"
+sexp:
+(def :foo
+  nil
+  (args
+    (arg a))
+  (lvar a))
+---
+case: defs_self
+source: "def self.foo; 1; end"
+sexp:
+(def :foo
+  (self)
+  (args)
+  (int 1))
+---
+case: class_simple
+source: "class Foo; end"
+sexp:
+(class
+  (const :Foo
+    nil)
+  nil
+  nil)
+---
+case: sclass
+source: "class << self; end"
+sexp:
+(sclass
+  (self)
+  nil)
+---
+case: module_simple
+source: "module M; end"
+sexp:
+(module
+  (const :M
+    nil)
+  nil)
+---
+case: alias_method
+source: "alias foo bar"
+sexp:
+(alias
+  (sym :foo)
+  (sym :bar))
+---
+case: alias_global
+source: "alias $foo $bar"
+sexp:
+(alias
+  (gvar $foo)
+  (gvar $bar))
+---
+case: undef_kw
+source: "undef foo"
+sexp:
+(undef
+  (sym :foo))
+---
+case: preexe
+source: "BEGIN { 1 }"
+sexp:
+(preexe
+  (int 1))
+---
+case: postexe
+source: "END { 1 }"
+sexp:
+(postexe
+  (int 1))
+---
+case: dstr
+source: "\"a#{b}c\""
+sexp:
+(dstr
+  (str "a")
+  (begin
+    (send :b
+      nil))
+  (str "c"))
+---
+case: dsym
+source: ":\"a#{b}\""
+sexp:
+(dsym
+  (str "a")
+  (begin
+    (send :b
+      nil)))
+---
+case: xstr
+source: "`cmd`"
+sexp:
+(xstr
+  (str "cmd"))
+---
+case: regexp_plain
+source: "/abc/"
+sexp:
+(regexp opts=""
+  (str "abc"))
+---
+case: regexp_interp_flags
+source: "/a#{b}/i"
+sexp:
+(regexp opts="i"
+  (str "a")
+  (begin
+    (send :b
+      nil)))
+---
+case: range_inclusive
+source: "1..10"
+sexp:
+(range exclusive=false
+  (int 1)
+  (int 10))
+---
+case: range_exclusive
+source: "1...10"
+sexp:
+(range exclusive=true
+  (int 1)
+  (int 10))
+---
+case: flip_flop
+source: "if a..b; 1; end"
+sexp:
+(if
+  (flip_flop exclusive=false
+    (send :a
+      nil)
+    (send :b
+      nil))
+  (int 1)
+  nil)
+---
+case: case_match
+source: "case x; in 1; 2; else; 3; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (int 1)
+    nil
+    (int 2))
+  (int 3))
+---
+case: in_guard_if
+source: "case x; in 1 if y; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (int 1)
+    (if_guard
+      (send :y
+        nil))
+    (int 2))
+  nil)
+---
+case: in_guard_unless
+source: "case x; in 1 unless y; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (int 1)
+    (unless_guard
+      (send :y
+        nil))
+    (int 2))
+  nil)
+---
+case: array_pattern
+source: "case x; in [1, 2]; 3; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (array_pattern
+      (int 1)
+      (int 2))
+    nil
+    (int 3))
+  nil)
+---
+case: hash_pattern
+source: "case x; in { a: 1 }; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (hash_pattern
+      (pair
+        (sym :a)
+        (int 1)))
+    nil
+    (int 2))
+  nil)
+---
+case: find_pattern
+source: "case x; in [*, 1, *]; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (find_pattern
+      (splat
+        nil)
+      (int 1)
+      (splat
+        nil))
+    nil
+    (int 2))
+  nil)
+---
+case: match_alt
+source: "case x; in 1 | 2; 3; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (match_alt
+      (int 1)
+      (int 2))
+    nil
+    (int 3))
+  nil)
+---
+case: match_rest
+source: "case x; in [1, *rest]; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (array_pattern
+      (int 1)
+      (match_rest
+        (match_var :rest)))
+    nil
+    (int 2))
+  nil)
+---
+case: match_nil_pattern
+source: "case x; in { a: 1, **nil }; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (hash_pattern
+      (pair
+        (sym :a)
+        (int 1))
+      (match_nil_pattern))
+    nil
+    (int 2))
+  nil)
+---
+case: match_pattern_p
+source: "x in [1, 2]"
+sexp:
+(match_pattern_p
+  (send :x
+    nil)
+  (array_pattern
+    (int 1)
+    (int 2)))
+---
+case: match_pattern
+source: "x => [1, 2]"
+sexp:
+(match_pattern
+  (send :x
+    nil)
+  (array_pattern
+    (int 1)
+    (int 2)))
+---
+case: match_as
+source: "case x; in [1] => y; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (match_as
+      (array_pattern
+        (int 1))
+      (match_var :y))
+    nil
+    (int 2))
+  nil)
+---
+case: const_pattern
+source: "case x; in Foo[1]; 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (const_pattern
+      (const :Foo
+        nil)
+      (array_pattern
+        (int 1)))
+    nil
+    (int 2))
+  nil)
+---
+case: pin_var
+source: "case x; in ^y; 1; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (pin
+      (lvar y))
+    nil
+    (int 1))
+  nil)
+---
+case: pin_expr
+source: "case x; in ^(1 + 2); 1; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (pin
+      (send :+
+        (int 1)
+        (int 2)))
+    nil
+    (int 1))
+  nil)
+---
+case: match_with_lvasgn
+source: "/(?<name>foo)/ =~ str"
+sexp:
+(match_with_lvasgn
+  (send :=~
+    (regexp opts=""
+      (str "(?<name>foo)"))
+    (send :str
+      nil))
+  (lvasgn name
+    nil))
+---
+case: parenthesized_pattern
+source: "case x; in (1); 2; end"
+sexp:
+(case_match
+  (send :x
+    nil)
+  (in_pattern
+    (begin
+      (int 1))
+    nil
+    (int 2))
+  nil)
+---
+case: shareable_constant
+source: "# shareable_constant_value: literal\nBlacklist = []\n"
+sexp:
+(casgn :Blacklist
+  nil
+  (array))
+---
+case: optarg
+source: "def f(a = 1); end"
+sexp:
+(def :f
+  nil
+  (args
+    (optarg a
+      (int 1)))
+  nil)
+---
+case: restarg
+source: "def f(*r); end"
+sexp:
+(def :f
+  nil
+  (args
+    (restarg "r"))
+  nil)
+---
+case: kwarg
+source: "def f(k:); end"
+sexp:
+(def :f
+  nil
+  (args
+    (kwarg k))
+  nil)
+---
+case: kwoptarg
+source: "def f(k: 1); end"
+sexp:
+(def :f
+  nil
+  (args
+    (kwoptarg k
+      (int 1)))
+  nil)
+---
+case: kwrestarg
+source: "def f(**o); end"
+sexp:
+(def :f
+  nil
+  (args
+    (kwrestarg "o"))
+  nil)
+---
+case: blockarg
+source: "def f(&b); end"
+sexp:
+(def :f
+  nil
+  (args
+    (blockarg "b"))
+  nil)
+---
+case: kwnilarg
+source: "def f(**nil); end"
+sexp:
+(def :f
+  nil
+  (args
+    (unknown))
+  nil)
+---
+case: forward_args_def
+source: "def f(...); end"
+sexp:
+(def :f
+  nil
+  (args
+    (forward_args))
+  nil)
+---
+case: forwarded_args_call
+source: "def f(...); g(...); end"
+sexp:
+(def :f
+  nil
+  (args
+    (forward_args))
+  (send :g
+    nil
+    (unknown)))
+---
+case: shadowarg
+source: "->(a; x) { x }"
+sexp:
+(block
+  (lambda)
+  (args
+    (arg a)
+    (shadowarg :x))
+  (lvar x))
+---
+case: source_file
+source: "__FILE__"
+sexp:
+(unknown)
+---
+case: source_line
+source: "__LINE__"
+sexp:
+(unknown)
+---
+case: source_encoding
+source: "__ENCODING__"
+sexp:
+(unknown)
+---
+case: match_last_line
+source: "if /re/; 1; end"
+sexp:
+(if
+  (unknown)
+  (int 1)
+  nil)
+---
+case: empty_program
+source: ""
+sexp:
+(nil)
