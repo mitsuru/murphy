@@ -2,29 +2,53 @@
   {
     "file": "./dirty.rb",
     "cop_name": "Lint/Debugger",
-    "range": { "start_offset": 31, "end_offset": 39 },
+    "range": {
+      "start_offset": 31,
+      "end_offset": 39
+    },
     "severity": "warning",
-    "message": "Remove debugger entry point `debugger`."
+    "message": "Remove debugger entry point `debugger`.",
+    "documentation_url": "https://murphy.dev/docs/cops/Lint/Debugger",
+    "rationale": "Lint/Debugger: Flag debugger calls and debugger requires. See the cop documentation for the rationale and fix guidance.",
+    "fix_example": "Bad: pattern flagged by Lint/Debugger.\nGood: corrected pattern per documentation.\nSee https://murphy.dev/docs/cops/Lint/Debugger for concrete before/after examples."
   },
   {
     "file": "./dirty.rb",
     "cop_name": "Lint/Debugger",
-    "range": { "start_offset": 40, "end_offset": 46 },
+    "range": {
+      "start_offset": 40,
+      "end_offset": 46
+    },
     "severity": "warning",
-    "message": "Remove debugger entry point `byebug`."
+    "message": "Remove debugger entry point `byebug`.",
+    "documentation_url": "https://murphy.dev/docs/cops/Lint/Debugger",
+    "rationale": "Lint/Debugger: Flag debugger calls and debugger requires. See the cop documentation for the rationale and fix guidance.",
+    "fix_example": "Bad: pattern flagged by Lint/Debugger.\nGood: corrected pattern per documentation.\nSee https://murphy.dev/docs/cops/Lint/Debugger for concrete before/after examples."
   },
   {
     "file": "./dirty.rb",
     "cop_name": "Lint/Debugger",
-    "range": { "start_offset": 47, "end_offset": 58 },
+    "range": {
+      "start_offset": 47,
+      "end_offset": 58
+    },
     "severity": "warning",
-    "message": "Remove debugger entry point `binding.pry`."
+    "message": "Remove debugger entry point `binding.pry`.",
+    "documentation_url": "https://murphy.dev/docs/cops/Lint/Debugger",
+    "rationale": "Lint/Debugger: Flag debugger calls and debugger requires. See the cop documentation for the rationale and fix guidance.",
+    "fix_example": "Bad: pattern flagged by Lint/Debugger.\nGood: corrected pattern per documentation.\nSee https://murphy.dev/docs/cops/Lint/Debugger for concrete before/after examples."
   },
   {
     "file": "./multibyte.rb",
     "cop_name": "Lint/Debugger",
-    "range": { "start_offset": 183, "end_offset": 191 },
+    "range": {
+      "start_offset": 183,
+      "end_offset": 191
+    },
     "severity": "warning",
-    "message": "Remove debugger entry point `debugger`."
+    "message": "Remove debugger entry point `debugger`.",
+    "documentation_url": "https://murphy.dev/docs/cops/Lint/Debugger",
+    "rationale": "Lint/Debugger: Flag debugger calls and debugger requires. See the cop documentation for the rationale and fix guidance.",
+    "fix_example": "Bad: pattern flagged by Lint/Debugger.\nGood: corrected pattern per documentation.\nSee https://murphy.dev/docs/cops/Lint/Debugger for concrete before/after examples."
   }
 ]
