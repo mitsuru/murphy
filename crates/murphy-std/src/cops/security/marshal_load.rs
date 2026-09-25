@@ -49,7 +49,20 @@
 //! `` Avoid using `Marshal.load`. `` / `` Avoid using `Marshal.restore`. ``
 //! (matches RuboCop).
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, def_node_matcher};
+
+// RuboCop parity: `Security/MarshalLoad` outer matcher is
+// `(send (const {nil? cbase} :Marshal) {:load :restore} ...)` (exact arity
+// is enforced by the hand-rolled single-arg check below, matching RuboCop's
+// no-`...` single-argument form). In Murphy `::Marshal` collapses to
+// `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+// The `Marshal.dump` negation stays hand-rolled to preserve exact
+// send/csend behavior (see `is_marshal_dump`).
+def_node_matcher!(
+    marshal_load_match,
+    "(send (const nil? :Marshal) {:load :restore} ...)"
+);
 
 #[derive(Default)]
 pub struct MarshalLoad;
@@ -64,18 +77,16 @@ pub struct MarshalLoad;
 impl MarshalLoad {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // `${:load :restore}` — restricted selectors.
+        // `(send (const nil? :Marshal) {:load :restore} ...)` — top-level
+        // `Marshal.load` / `Marshal.restore`.
+        if !marshal_load_match(node, cx) {
+            return;
+        }
+        // `${:load :restore}` — restricted selectors (matcher guarantees).
         let method = match cx.method_name(node) {
             Some(m @ ("load" | "restore")) => m,
             _ => return,
         };
-        // `(const {nil? cbase} :Marshal)` — `Marshal` / `::Marshal`.
-        let Some(receiver) = cx.call_receiver(node).get() else {
-            return;
-        };
-        if !cx.is_global_const(receiver, "Marshal") {
-            return;
-        }
         // The outer pattern has no trailing `...`, so it matches exactly one
         // argument. Zero-arg and multi-arg calls do NOT fire.
         let args = cx.call_arguments(node);
@@ -205,5 +216,25 @@ mod tests {
     #[test]
     fn accepts_non_restricted_method() {
         test::<MarshalLoad>().expect_no_offenses("Marshal.foo(data)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :Marshal) {:load :restore} ...)` /
+    // `(send (const nil? :Marshal) :dump ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_ignores_namespaced_marshal() {
+        // `Foo::Marshal` has a non-nil const scope, so it is not flagged.
+        test::<MarshalLoad>().expect_no_offenses("Foo::Marshal.load(data)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<MarshalLoad>().expect_no_offenses("Marshal&.load(data)\n");
     }
 }

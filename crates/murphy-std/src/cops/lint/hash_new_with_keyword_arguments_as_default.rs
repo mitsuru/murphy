@@ -14,7 +14,14 @@
 //!   and autocorrection by wrapping the braceless hash in `{}`.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Lint/HashNewWithKeywordArgumentsAsDefault` receiver is
+// `(const {nil? cbase} :Hash)`. In Murphy `::Hash` collapses to
+// `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+// Arity and hash-shape checks stay hand-rolled.
+def_node_matcher!(hash_new_recv, "(send (const nil? :Hash) :new ...)");
 
 const MSG: &str = "Use a hash literal instead of keyword arguments.";
 
@@ -40,12 +47,13 @@ impl HashNewWithKeywordArgumentsAsDefault {
 }
 
 fn deprecated_hash_new_default(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-        return None;
-    };
-    if !receiver.get().is_some_and(|receiver| cx.is_global_const(receiver, "Hash")) {
+    // `(send (const nil? :Hash) :new ...)` — top-level `Hash.new`.
+    if !hash_new_recv(node, cx) {
         return None;
     }
+    let NodeKind::Send { args, .. } = *cx.kind(node) else {
+        return None;
+    };
     let args = cx.list(args);
     let [first] = args else {
         return None;
@@ -119,5 +127,24 @@ mod tests {
             .expect_no_offenses("Hash.new\n")
             .expect_no_offenses("Foo.new(key: :value)\n")
             .expect_no_offenses("Hash.new(42)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :Hash) :new ...)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_ignores_namespaced_hash() {
+        // `Foo::Hash` has a non-nil const scope, so it is not flagged.
+        test::<HashNewWithKeywordArgumentsAsDefault>().expect_no_offenses("Foo::Hash.new(key: :value)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<HashNewWithKeywordArgumentsAsDefault>().expect_no_offenses("Hash&.new(key: :value)\n");
     }
 }

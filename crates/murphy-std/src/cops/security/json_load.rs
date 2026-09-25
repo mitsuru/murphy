@@ -45,7 +45,18 @@
 //!
 //! `` Prefer `JSON.parse` over `JSON.<method>`. `` (matches RuboCop).
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Security/JSONLoad` `insecure_json_load` matcher is
+// `(send (const {nil? cbase} :JSON) {:load :restore} ...)` plus a descendant
+// `` ` `` guard for `create_additions:`. In Murphy `::JSON` collapses to
+// `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `is_global_const` check.
+// The descendant guard stays hand-rolled (see `has_create_additions`).
+def_node_matcher!(
+    json_load_match,
+    "(send (const nil? :JSON) {:load :restore} ...)"
+);
 
 #[derive(Default)]
 pub struct JSONLoad;
@@ -60,21 +71,14 @@ pub struct JSONLoad;
 impl JSONLoad {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // `${:load :restore}` — gate on the selector first.
+        // `(send (const nil? :JSON) {:load :restore} ...)` — top-level
+        // `JSON.load` / `JSON.restore`.
+        if !json_load_match(node, cx) {
+            return;
+        }
         let Some(method) = cx.method_name(node) else {
             return;
         };
-        if method != "load" && method != "restore" {
-            return;
-        }
-        // `(const {nil? cbase} :JSON)` — top-level `JSON` or `::JSON`.
-        // `is_global_const` matches both and excludes `Foo::JSON`.
-        let Some(receiver) = cx.call_receiver(node).get() else {
-            return;
-        };
-        if !cx.is_global_const(receiver, "JSON") {
-            return;
-        }
         // `!`(pair (sym :create_additions) _)` — descendant search: any
         // `create_additions:` keyword pair anywhere below the call (with any
         // value) suppresses the offense.
@@ -174,5 +178,18 @@ mod tests {
     #[test]
     fn accepts_namespaced_json_const() {
         test::<JSONLoad>().expect_no_offenses("Foo::JSON.load('{}')\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :JSON) {:load :restore} ...)` refactor can be
+    // proven equivalent.
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<JSONLoad>().expect_no_offenses("JSON&.load('{}')\n");
     }
 }
