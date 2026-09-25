@@ -5,7 +5,7 @@
 //! upstream_cop: Naming/InclusiveLanguage
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-e7bz.41.1, murphy-e7bz.41.2, murphy-e7bz.41.3]
+//! gap_issues: [murphy-e7bz.41.1, murphy-e7bz.41.2]
 //! notes: >
 //!   Ports RuboCop's configurable FlaggedTerms, Check* switches, comments,
 //!   strings, symbols, identifiers, constants, variables, filepath scan,
@@ -18,8 +18,11 @@
 //!   tagged regexes and slash-delimited plain strings ambiguous. Filepath
 //!   offenses use `Range::NO_LOCATION` via `Cx::emit_file_offense` so no
 //!   fabricated range is serialized or rendered. Heredoc
-//!   strings use label-paired body ranges; ambiguous or incomplete delimiters
-//!   are skipped so corrections cannot touch the opener or terminator. AST
+//!   strings use label-paired body ranges (LIFO among same-label openers,
+//!   matching Prism; verified against RuboCop 1.87.0 for same-label siblings,
+//!   same-label nesting, indented, CRLF, and EOF terminators); incomplete or
+//!   label-mismatched delimiters are skipped so corrections cannot touch the
+//!   opener or terminator. AST
 //!   ranges are collected once per file because the cop macro cannot combine
 //!   file and node handlers.
 //! ```
@@ -1120,7 +1123,9 @@ fn sole_suggestion(suggestions: Option<&serde_json::Value>) -> Option<String> {
 mod tests {
     use super::{FlaggedTermOptions, InclusiveLanguage, Options, Range};
     use murphy_plugin_api::CopOptions;
-    use murphy_plugin_api::test_support::{indoc, run_cop, run_cop_with_options, test};
+    use murphy_plugin_api::test_support::{
+        indoc, run_cop, run_cop_with_options, run_cop_with_options_and_edits, test,
+    };
 
     fn category_options(identifiers: bool, strings: bool, symbols: bool) -> Options {
         Options {
@@ -1416,6 +1421,214 @@ mod tests {
         assert_eq!(offenses.len(), 2);
         assert_eq!(offenses[0].range.start as usize, source.find("whitelist").unwrap());
         assert_eq!(offenses[1].range.start as usize, source.find("blacklist").unwrap());
+    }
+
+    // --- murphy-e7bz.41.3: ambiguous nested heredoc ranges (oracle-backed) ---
+
+    fn single_suggestion_string_options() -> Options {
+        let mut options = category_options(false, true, false);
+        for (term, detail) in &mut options.flagged_terms {
+            if term == "whitelist" {
+                detail.suggestions = Some(serde_json::json!(["allowlist"]));
+            } else if term == "blacklist" {
+                detail.suggestions = Some(serde_json::json!(["denylist"]));
+            }
+        }
+        options
+    }
+
+    #[test]
+    fn check_strings_scans_same_label_nested_heredoc_bodies() {
+        // Oracle: RuboCop 1.87.0 reports 2 offenses for this shape —
+        // `3:5 blacklist` (inner body) and `5:3 whitelist` (outer tail).
+        // Prism pairs inner `<<~FOO` with the first `FOO` terminator (LIFO);
+        // Murphy must match by pairing the most-recent same-label opener.
+        let options = category_options(false, true, false);
+        let source = "x = <<~FOO\n  #{<<~FOO}\n    blacklist\n  FOO\n  whitelist\nFOO\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 2);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            source.find("blacklist").expect("inner body term")
+        );
+        assert_eq!(
+            offenses[1].range.start as usize,
+            source.find("whitelist").expect("outer tail term")
+        );
+        // Both ranges stay inside their bodies (never cover `<<~FOO` or `FOO`).
+        for offense in &offenses {
+            let snippet = &source[offense.range.start as usize..offense.range.end as usize];
+            assert!(snippet == "blacklist" || snippet == "whitelist");
+        }
+    }
+
+    #[test]
+    fn check_strings_scans_same_label_sibling_heredoc_bodies() {
+        // Oracle: RuboCop 1.87.0 reports `2:3 whitelist` and `4:3 blacklist`
+        // for `foo(<<~FOO, <<~FOO)` with sequential bodies.
+        let options = category_options(false, true, false);
+        let source = "foo(<<~FOO, <<~FOO)\n  whitelist\nFOO\n  blacklist\nFOO\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 2);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            source.find("whitelist").expect("first body term")
+        );
+        assert_eq!(
+            offenses[1].range.start as usize,
+            source.find("blacklist").expect("second body term")
+        );
+    }
+
+    #[test]
+    fn same_label_nested_heredoc_autocorrection_stays_inside_body() {
+        // Oracle: RuboCop 1.87.0 corrects both bodies to `denylist`/`allowlist`
+        // without touching `<<~FOO` openers or `FOO` terminators.
+        let options = single_suggestion_string_options();
+        let source = "x = <<~FOO\n  #{<<~FOO}\n    blacklist\n  FOO\n  whitelist\nFOO\n";
+        let run = run_cop_with_options_and_edits::<InclusiveLanguage>(source, &options);
+        assert_eq!(run.offenses.len(), 2);
+        assert_eq!(run.edits.len(), 2);
+        for edit in &run.edits {
+            let snippet = &source[edit.range.start as usize..edit.range.end as usize];
+            assert!(snippet == "blacklist" || snippet == "whitelist");
+            assert!(!source[..edit.range.start as usize].ends_with("<<~FOO"));
+        }
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(
+                indoc! {r#"
+                    x = <<~FOO
+                      #{<<~FOO}
+                        blacklist
+                        ^^^^^^^^^ Consider replacing 'blacklist' with 'denylist'.
+                      FOO
+                      whitelist
+                      ^^^^^^^^^ Consider replacing 'whitelist' with 'allowlist'.
+                    FOO
+                "#},
+                "x = <<~FOO\n  #{<<~FOO}\n    denylist\n  FOO\n  allowlist\nFOO\n",
+            );
+    }
+
+    #[test]
+    fn same_label_sibling_heredoc_autocorrection_stays_inside_body() {
+        // Oracle: RuboCop 1.87.0 corrects `whitelist`→`allowlist` (L2) and
+        // `blacklist`→`denylist` (L4), preserving both `FOO` terminators.
+        let options = single_suggestion_string_options();
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(
+                indoc! {r#"
+                    foo(<<~FOO, <<~FOO)
+                      whitelist
+                      ^^^^^^^^^ Consider replacing 'whitelist' with 'allowlist'.
+                    FOO
+                      blacklist
+                      ^^^^^^^^^ Consider replacing 'blacklist' with 'denylist'.
+                    FOO
+                "#},
+                "foo(<<~FOO, <<~FOO)\n  allowlist\nFOO\n  denylist\nFOO\n",
+            );
+    }
+
+    #[test]
+    fn malformed_heredoc_missing_terminator_reports_no_string_offense() {
+        // Oracle: RuboCop 1.87.0 reports only `Lint/Syntax: unterminated
+        // heredoc` for this source — no `Naming/InclusiveLanguage` offense.
+        // Murphy must not panic, must not flag the opener, and must not
+        // autocorrect the unterminated body.
+        let options = category_options(false, true, false);
+        let source = "text = <<~END\nwhitelist\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert!(offenses.is_empty());
+        let run = run_cop_with_options_and_edits::<InclusiveLanguage>(source, &options);
+        assert!(run.edits.is_empty());
+    }
+
+    #[test]
+    fn indented_terminator_keeps_heredoc_offense_inside_body() {
+        // Oracle: RuboCop 1.87.0 reports `3:5 whitelist` for an indented
+        // `<<~EOS` body with an indented `  EOS` terminator; the offense and
+        // edit stay inside the body (leading indent + label excluded).
+        let options = single_suggestion_string_options();
+        let source = "def m\n  x = <<~EOS\n    whitelist\n  EOS\nend\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            source.find("whitelist").expect("indented body term")
+        );
+        let run = run_cop_with_options_and_edits::<InclusiveLanguage>(source, &options);
+        assert_eq!(run.edits.len(), 1);
+        assert_eq!(
+            run.edits[0].range.start as usize,
+            source.find("whitelist").unwrap()
+        );
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(
+                indoc! {r#"
+                    def m
+                      x = <<~EOS
+                        whitelist
+                        ^^^^^^^^^ Consider replacing 'whitelist' with 'allowlist'.
+                      EOS
+                    end
+                "#},
+                "def m\n  x = <<~EOS\n    allowlist\n  EOS\nend\n",
+            );
+    }
+
+    #[test]
+    fn crlf_terminator_keeps_heredoc_offense_and_correction_inside_body() {
+        // Oracle: RuboCop 1.87.0 reports `2:1 whitelist` for CRLF bodies.
+        // Murphy keeps the offense inside the body and preserves CRLF line
+        // endings (RuboCop normalizes to LF on `--autocorrect`; Murphy keeps
+        // the original `\r\n` so the opener/terminator lines are untouched).
+        let options = single_suggestion_string_options();
+        let source = "text = <<~END\r\nwhitelist\r\nEND\r\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            source.find("whitelist").expect("crlf body term")
+        );
+        let run = run_cop_with_options_and_edits::<InclusiveLanguage>(source, &options);
+        assert_eq!(run.edits.len(), 1);
+        let edit = &run.edits[0];
+        assert_eq!(&source[edit.range.start as usize..edit.range.end as usize], "whitelist");
+        assert_eq!(edit.replacement, "allowlist");
+        // Applying the edit preserves CRLF and the terminator.
+        let mut corrected = source.to_string();
+        corrected.replace_range(
+            edit.range.start as usize..edit.range.end as usize,
+            &edit.replacement,
+        );
+        assert_eq!(corrected, "text = <<~END\r\nallowlist\r\nEND\r\n");
+    }
+
+    #[test]
+    fn eof_terminator_without_newline_keeps_heredoc_offense_inside_body() {
+        // Oracle: RuboCop 1.87.0 reports `2:1 whitelist` when the terminator
+        // `END` sits at EOF with no trailing newline.
+        let options = single_suggestion_string_options();
+        let source = "text = <<~END\nwhitelist\nEND";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            source.find("whitelist").expect("eof body term")
+        );
+        let run = run_cop_with_options_and_edits::<InclusiveLanguage>(source, &options);
+        assert_eq!(run.edits.len(), 1);
+        let mut corrected = source.to_string();
+        let edit = &run.edits[0];
+        corrected.replace_range(
+            edit.range.start as usize..edit.range.end as usize,
+            &edit.replacement,
+        );
+        assert_eq!(corrected, "text = <<~END\nallowlist\nEND");
     }
 
     #[test]
