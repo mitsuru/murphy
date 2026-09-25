@@ -1,0 +1,45 @@
+//! Smoke tests for {{project-name}}.
+//!
+//! Generated from `murphy-rs/plugin-template`. Proves the demo cop
+//! works through the public `test_support` harness and that the pack
+//! registers exactly the cop `murphy-plugin.toml` advertises. When the
+//! demo cop is replaced, update `[cops].provided` and these assertions
+//! together.
+
+use {{crate_name}}::NoTodo;
+use murphy_plugin_api::test_support::{indoc, test};
+
+#[test]
+fn no_todo_flags_bare_todo_call() {
+    test::<NoTodo>().expect_offense(indoc! {r#"
+        todo
+        ^^^^ Avoid `todo` placeholders: do the work or file an issue instead.
+    "#});
+}
+
+#[test]
+fn no_todo_flags_bare_todo_with_arguments() {
+    test::<NoTodo>().expect_offense(indoc! {r#"
+        todo("finish me")
+        ^^^^^^^^^^^^^^^^^ Avoid `todo` placeholders: do the work or file an issue instead.
+    "#});
+}
+
+#[test]
+fn no_todo_ignores_receiver_calls_and_plain_code() {
+    test::<NoTodo>().expect_no_offenses("puts \"done\"\n");
+    test::<NoTodo>().expect_no_offenses("obj.todo\n");
+}
+
+#[test]
+fn manifest_advertises_the_demo_cop() {
+    // Manifest side of the registration guard (the code side lives in
+    // `src/lib.rs`'s `registration_guard` unit test — `PACK_COPS` is
+    // `pub(crate)` in dynamic mode, so only the manifest is visible
+    // from an integration test). No TOML parser needed for one key.
+    let manifest = include_str!("../murphy-plugin.toml");
+    assert!(
+        manifest.contains(r#"provided = ["Example/NoTodo"]"#),
+        "murphy-plugin.toml `[cops].provided` must list the demo cop"
+    );
+}

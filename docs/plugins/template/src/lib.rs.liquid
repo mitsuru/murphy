@@ -1,0 +1,93 @@
+//! {{project-name}} — Murphy plugin pack.
+//!
+//! Generated from `murphy-rs/plugin-template`. Ships one demo cop,
+//! [`Example/NoTodo`](NoTodo), as a build-and-load smoke target:
+//! **delete it (and the matching `murphy-plugin.toml` entry) when
+//! starting a real pack**, then add cops following
+//! `docs/guides/plugin-cop-infrastructure.md`.
+//!
+//! ## Murphy catalog
+//!
+//! ```murphy-parity
+//! cop: Example/NoTodo
+//! status: custom
+//! notes: >
+//!   Template demo cop; delete or rename when starting a real pack.
+//! ```
+
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+
+/// Demo cop: flags bare `todo(...)` placeholders.
+///
+/// Matches exactly one shape — a receiver-less `send` node whose method
+/// name is `todo` (`todo`, `todo("finish me")`). Calls with an explicit
+/// receiver (`obj.todo`, `self.todo`) are skipped: they are typically
+/// domain methods, not the placeholder built-in this cop targets.
+///
+/// No autocorrect — mechanically rewriting a placeholder is unsafe.
+#[derive(Default)]
+pub struct NoTodo;
+
+#[cop(
+    name = "Example/NoTodo",
+    description = "Flag bare `todo` placeholders — finish the work or file an issue instead.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl NoTodo {
+    #[on_node(kind = "send")]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+        // Pattern-match defends against a future kind-aliasing accident.
+        let NodeKind::Send {
+            receiver, method, ..
+        } = *cx.kind(node)
+        else {
+            return;
+        };
+        if cx.symbol_str(method) != "todo" {
+            return;
+        }
+        if receiver != OptNodeId::NONE {
+            return;
+        }
+        cx.emit_offense(
+            cx.range(node),
+            "Avoid `todo` placeholders: do the work or file an issue instead.",
+            None,
+        );
+    }
+}
+
+murphy_plugin_api::submit_cop!(NoTodo);
+
+// Dynamic-pack registration: the host resolves the pack through `dlopen`
+// + `murphy-plugin.toml` (ADR 0046), never through Rust linkage.
+murphy_plugin_api::register_cops!(mode = dynamic);
+
+#[cfg(test)]
+mod registration_guard {
+    /// `PACK_COPS` must match `[cops].provided` in `murphy-plugin.toml`
+    /// (ADR 0046): the manifest is the `dlopen`-free catalogue, so a
+    /// rename on either side without the other silently desyncs them.
+    /// `PACK_COPS` is `pub(crate)` in dynamic mode, hence this guard
+    /// lives in-crate (same posture as `murphy-example-pack`'s
+    /// `option_key_guard`); `tests/smoke.rs` covers the manifest side.
+    #[test]
+    fn pack_cops_match_manifest_provided() {
+        let names: Vec<String> = crate::PACK_COPS
+            .iter()
+            .map(|cop| {
+                // SAFETY: cop names are `'static` UTF-8 emitted by `#[cop]`.
+                unsafe { std::str::from_utf8(cop.name.as_bytes()) }
+                    .expect("cop name is UTF-8")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Example/NoTodo".to_string()],
+            "PACK_COPS must match `[cops].provided` in murphy-plugin.toml"
+        );
+    }
+}

@@ -1,0 +1,9 @@
+# cargo-generate template config for `murphy-rs/plugin-template`.
+#
+# No custom placeholders: the template uses only cargo-generate built-ins —
+# `{{project-name}}` (from `--name`, e.g. `murphy-foo`), `{{crate_name}}`
+# (its snake_case form, e.g. `murphy_foo`, for `lib*.so` paths and `use`
+# statements), and `{{authors}}` (from `--authors` or git config, for
+# `Cargo.toml` / `murphy-plugin.toml`). Files ending in `.liquid` are
+# rendered and the extension stripped; `LICENSE` copies verbatim (update
+# the copyright holder line by hand after scaffolding).

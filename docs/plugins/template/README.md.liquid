@@ -1,0 +1,79 @@
+# {{project-name}}
+
+A [Murphy](https://github.com/murphy-rs/murphy) plugin pack — generated from
+[`murphy-rs/plugin-template`](https://github.com/murphy-rs/plugin-template).
+
+Ships one demo cop, `Example/NoTodo` (flags bare `todo(...)` placeholders).
+It exists only as a build-and-load smoke target: **delete it when starting
+a real pack** (remove `src/lib.rs`'s `NoTodo`, the `provided` entry in
+`murphy-plugin.toml`, and `tests/smoke.rs`'s demo assertions), then add real
+cops following Murphy's
+[plugin-cop-infrastructure guide](https://github.com/murphy-rs/murphy/blob/main/docs/guides/plugin-cop-infrastructure.md).
+
+## Prerequisites
+
+- Rust (stable) — the pack builds as a `cdylib`.
+- [`cargo-generate`](https://cargo-generate.github.io/cargo-generate/) — only
+  needed once, to scaffold (this pack is already scaffolded).
+- A Murphy checkout or release whose `MURPHY_PLUGIN_ABI_VERSION` matches
+  `murphy-api-version` in `murphy-plugin.toml` (currently `4`).
+
+> Until `murphy-plugin-api` is published to crates.io, point `Cargo.toml`'s
+> `murphy-plugin-api` entries at a git/path dependency on the Murphy repo's
+> `crates/murphy-plugin-api` (see the comment in `Cargo.toml`).
+
+## Build and test
+
+```sh
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+`cargo test` runs `tests/smoke.rs`: the demo cop fires on bare `todo` through
+the public `test_support` harness, and the pack-registration test asserts
+`PACK_COPS` matches `[cops].provided` in `murphy-plugin.toml`.
+
+## Load it in Murphy
+
+Build the shared library, then stage it as a pack directory (ADR 0046):
+
+```sh
+cargo build
+PACK={{project-name}}
+mkdir -p /tmp/murphy-packs/$PACK/lib/linux-x86_64
+cp -f target/debug/lib{{crate_name}}.so /tmp/murphy-packs/$PACK/lib/linux-x86_64/
+cp -f murphy-plugin.toml /tmp/murphy-packs/$PACK/
+```
+
+Point Murphy at the pack directory from `.murphy.yml`:
+
+```yaml
+plugins:
+  - name: {{project-name}}
+    path: /tmp/murphy-packs/{{project-name}}
+```
+
+then lint a fixture containing a bare `todo`:
+
+```sh
+printf 'todo("finish me")\n' > /tmp/todo_sample.rb
+murphy lint --format json /tmp/todo_sample.rb
+```
+
+Expect one `Example/NoTodo` offense. (A direct `.so` path also works for
+quick iteration; the pack directory is the distributable form.)
+
+## Writing real cops
+
+- Authoring surface (`#[cop]`, `#[on_node]`, options, testing): Murphy's
+  `docs/guides/plugin-cop-infrastructure.md`.
+- Pack format (manifest schema, `lib/<arch>/` layout, search-path rules):
+  ADR 0046 in the Murphy repo (`docs/decisions/0046-plugin-pack-format.md`).
+- Single-surface rule: runtime `[dependencies]` must stay exactly
+  `{murphy-plugin-api}` — reaching into `murphy-core` / `murphy-ast` etc.
+  breaks the plugin ABI boundary.
+
+## License
+
+MIT — see `LICENSE` (update the copyright holder line for your pack).
