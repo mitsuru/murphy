@@ -5,7 +5,7 @@
 //! upstream_cop: Naming/InclusiveLanguage
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-e7bz.41.1, murphy-e7bz.41.2]
+//! gap_issues: [murphy-e7bz.41.2]
 //! notes: >
 //!   Ports RuboCop's configurable FlaggedTerms, Check* switches, comments,
 //!   strings, symbols, identifiers, constants, variables, filepath scan,
@@ -13,18 +13,24 @@
 //!   partial term config with RuboCop defaults and distinguishes labels,
 //!   quoted/percent-array symbols, and alias/undef names. Nested `inherit_mode`
 //!   array merges apply recursively and preserve custom-term insertion order.
-//!   The cop is disabled by default. Remaining limits: Rust `regex` lacks Ruby
-//!   look-around/backreferences, and config JSON loses YAML Regexp tags, making
-//!   tagged regexes and slash-delimited plain strings ambiguous. Filepath
-//!   offenses use `Range::NO_LOCATION` via `Cx::emit_file_offense` so no
-//!   fabricated range is serialized or rendered. Heredoc
-//!   strings use label-paired body ranges (LIFO among same-label openers,
-//!   matching Prism; verified against RuboCop 1.87.0 for same-label siblings,
-//!   same-label nesting, indented, CRLF, and EOF terminators); incomplete or
-//!   label-mismatched delimiters are skipped so corrections cannot touch the
-//!   opener or terminator. AST
-//!   ranges are collected once per file because the cop macro cannot combine
-//!   file and node handlers.
+//!   The cop is disabled by default. YAML `!ruby/regexp` tags survive as
+//!   `{"__ruby_regexp__": raw}` through config inheritance (murphy-e7bz.41.1):
+//!   tagged `/source/flags` strips to `.source` with flags discarded
+//!   (`i/m/x/n` ignored, matching RuboCop's always-`IGNORECASE` re-wrap;
+//!   `e/s/u/o` rejected like Ruby 3.3 Psych load failures), while plain
+//!   strings stay literal (slash-delimited plain never matches bare words).
+//!   Ruby look-around/backreferences produce explicit config diagnostics
+//!   instead of silent fallback (RuboCop 1.87.0 crashes on look-around
+//!   matches); the common matching path stays on Rust `regex` with no
+//!   per-file overhead. Filepath offenses use `Range::NO_LOCATION` via
+//!   `Cx::emit_file_offense` so no fabricated range is serialized or
+//!   rendered. Heredoc strings use label-paired body ranges (LIFO among
+//!   same-label openers, matching Prism; verified against RuboCop 1.87.0 for
+//!   same-label siblings, same-label nesting, indented, CRLF, and EOF
+//!   terminators); incomplete or label-mismatched delimiters are skipped so
+//!   corrections cannot touch the opener or terminator. AST ranges are
+//!   collected once per file because the cop macro cannot combine file and
+//!   node handlers.
 //! ```
 //!
 //! The parser's `Str` leaves represent string content in plain, interpolated,
@@ -150,7 +156,21 @@ impl CopOptions for Options {
                     term_options.regex = match value {
                         serde_json::Value::Null => None,
                         serde_json::Value::String(source) => {
-                            Some(strip_ruby_regex_delimiters(source))
+                            // Plain strings are literal (RuboCop parity): `/white/`
+                            // matches only literal slashes, unlike tagged regexps.
+                            Some(source.clone())
+                        }
+                        serde_json::Value::Object(map) => {
+                            let raw = map.get(RUBY_REGEXP_JSON_KEY).and_then(|v| v.as_str()).ok_or_else(|| {
+                                ConfigError::type_mismatch(
+                                    format!("FlaggedTerms.{term}.Regex"),
+                                    "string regexp or null",
+                                )
+                            })?;
+                            Some(parse_tagged_ruby_regexp(
+                                raw,
+                                &format!("FlaggedTerms.{term}.Regex"),
+                            )?)
                         }
                         _ => {
                             return Err(ConfigError::type_mismatch(
@@ -275,79 +295,163 @@ fn parse_allowed_regex(
             if pattern.trim().is_empty() {
                 Ok(Vec::new())
             } else {
-                Ok(vec![strip_ruby_regex_delimiters(pattern)])
+                // Plain strings are literal (no delimiter stripping).
+                Ok(vec![pattern.clone()])
             }
         }
-        serde_json::Value::Array(patterns) => patterns
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| {
+        serde_json::Value::Object(map) => {
+            let raw = map.get(RUBY_REGEXP_JSON_KEY).and_then(|v| v.as_str()).ok_or_else(|| {
+                ConfigError::type_mismatch(field, "string or array of strings")
+            })?;
+            let source = parse_tagged_ruby_regexp(raw, field)?;
+            if source.trim().is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![source])
+            }
+        }
+        serde_json::Value::Array(patterns) => {
+            let mut out = Vec::new();
+            for (index, value) in patterns.iter().enumerate() {
                 if value.is_null() {
-                    return None;
+                    continue;
                 }
-                Some(
-                    value
-                        .as_str()
-                        .ok_or_else(|| {
-                            ConfigError::type_mismatch(
-                                format!("{field}[{index}]"),
-                                "string regexp",
-                            )
-                        })
-                        .map(strip_ruby_regex_delimiters),
-                )
-            })
-            .collect(),
+                let item_field = format!("{field}[{index}]");
+                match value {
+                    serde_json::Value::String(s) => {
+                        // Array blanks are kept for RuboCop zero-width parity
+                        // (`blank_allowed_regex_entries_*`): RuboCop's
+                        // `Array(blank).map` yields nil then `join('|')` keeps
+                        // an empty alternative matching everywhere.
+                        out.push(s.clone());
+                    }
+                    serde_json::Value::Object(map) => {
+                        let raw = map.get(RUBY_REGEXP_JSON_KEY).and_then(|v| v.as_str()).ok_or_else(|| {
+                            ConfigError::type_mismatch(item_field.clone(), "string regexp")
+                        })?;
+                        out.push(parse_tagged_ruby_regexp(raw, &item_field)?);
+                    }
+                    _ => {
+                        return Err(ConfigError::type_mismatch(item_field, "string regexp"));
+                    }
+                }
+            }
+            Ok(out)
+        }
         _ => Err(ConfigError::type_mismatch(field, "string or array of strings")),
     }
 }
 
-fn strip_ruby_regex_delimiters(source: &str) -> String {
-    let Some((closing, flags)) = source
-        .strip_prefix('/')
-        .and_then(|body| {
-            body.char_indices()
-                .rev()
-                .find(|(index, ch)| *ch == '/' && !is_escaped(body, *index))
-                .map(|(index, _)| (index + 1, &body[index + 1..]))
-        })
-        .filter(|(_, flags)| flags.chars().all(|flag| matches!(flag, 'i' | 'm' | 'x' | 'o' | 'n' | 'e' | 's' | 'u')))
-    else {
-        return source.to_string();
+/// JSON key preserving YAML `!ruby/regexp` tags (murphy-e7bz.41.1).
+/// Must match `murphy_core::config::RUBY_REGEXP_JSON_KEY`.
+const RUBY_REGEXP_JSON_KEY: &str = "__ruby_regexp__";
+
+/// Parse a tagged Ruby regexp literal (`/source/flags`) to its source,
+/// matching RuboCop's `Regexp#source` + always-`IGNORECASE` behaviour.
+///
+/// RuboCop's `ensure_regex_string` returns `regexp.source` (delimiters and
+/// flags discarded) then wraps with `Regexp::IGNORECASE`. Murphy therefore
+/// strips `/.../` and ignores `i/m/x/n/e/s/u/o` flags — notably `m` (dotall)
+/// and `x` (extended) are *discarded* like RuboCop, not translated to
+/// `(?s)`/`(?x)`. Encoding flags (`n/e/s/u`) and `o` (once) are likewise
+/// ignored, matching RuboCop's re-`Regexp.new(source, IGNORECASE)` which
+/// drops the original encoding. `i` is redundant (Murphy always builds with
+/// `case_insensitive(true)`).
+///
+/// Returns `ConfigError` for invalid literals (missing delimiters, non-letter
+/// flags, unknown flags) mirroring Ruby Psych/SyntaxError failures, so
+/// unsupported values produce an explicit diagnostic instead of silently
+/// falling back.
+fn parse_tagged_ruby_regexp(raw: &str, field: &str) -> Result<String, ConfigError> {
+    let invalid = || ConfigError::type_mismatch(field, "valid Ruby regexp literal");
+    let body = raw.strip_prefix('/').ok_or_else(invalid)?;
+    // Closing delimiter is the LAST `/` (greedy like Psych `/^\\/(.*)\\/([mixn]*)$/`).
+    let Some(close) = body.rfind('/') else {
+        return Err(invalid());
     };
-    let body = &source[1..closing];
-    let mut pattern = String::new();
-    if flags.contains('m') {
-        pattern.push_str("(?s)");
+    let source = &body[..close];
+    let flags = &body[close + 1..];
+    if !flags.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(invalid());
     }
-    if flags.contains('x') {
-        pattern.push_str("(?x)");
+    // Ruby 3.3 Psych accepts only `i/m/x/n` via `!ruby/regexp` (`mixn` options);
+    // `e/s/u/o` go through the removed 3-arg `Regexp.new(source, opts, lang)`
+    // and fail to load (`no implicit conversion of Integer into String`,
+    // verified on Ruby 3.3.5). Reject them here for parity so they produce an
+    // explicit config diagnostic instead of silently matching. `i/m/x` are
+    // discarded like RuboCop's `.source` re-wrap (always `IGNORECASE`); `n`
+    // (ASCII-8BIT) is likewise ignored, matching RuboCop's encoding drop.
+    for flag in flags.chars() {
+        if !matches!(flag, 'i' | 'm' | 'x' | 'n') {
+            return Err(invalid());
+        }
     }
-    pattern.push_str(body);
-    pattern
+    Ok(source.to_string())
 }
 
-fn is_escaped(source: &str, index: usize) -> bool {
-    source.as_bytes()[..index]
-        .iter()
-        .rev()
-        .take_while(|byte| **byte == b'\\')
-        .count()
-        % 2
-        == 1
+fn is_unsupported_ruby_syntax(pattern: &str) -> bool {
+    // Look-around (`(?<=`, `(?<!`, `(?=`, `(?!`) and backreferences
+    // (`\1`-`\9`, `\k<`, `\k'`, `\g<`) are valid Ruby/Onigmo but rejected
+    // by Rust `regex`. Scan textually so the diagnostic names the cause
+    // instead of surfacing a generic compile error. Named groups
+    // (`(?<name>`, `(?P<name>`) ARE supported by `regex` and excluded here.
+    pattern.contains("(?<=")
+        || pattern.contains("(?<!")
+        || pattern.contains("(?=")
+        || pattern.contains("(?!")
+        || pattern.contains("\\k<")
+        || pattern.contains("\\k'")
+        || pattern.contains("\\g<")
+        || has_numbered_backref(pattern)
+}
+
+fn has_numbered_backref(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            // A backslash is itself escaped when preceded by an odd run of
+            // backslashes; only unescaped `\\d` is a backreference.
+            let mut preceding = 0;
+            let mut k = i;
+            while k > 0 && bytes[k - 1] == b'\\' {
+                preceding += 1;
+                k -= 1;
+            }
+            if preceding % 2 == 0 && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 fn validate_term_regexes(term: &str, options: &FlaggedTermOptions) -> Result<(), ConfigError> {
     let source = options.regex.as_deref().unwrap_or(term);
     build_regex(source).map_err(|_| {
-        ConfigError::type_mismatch(format!("FlaggedTerms.{term}.Regex"), "valid regexp")
+        if is_unsupported_ruby_syntax(source) {
+            ConfigError::type_mismatch(
+                format!("FlaggedTerms.{term}.Regex"),
+                "supported Ruby regexp (look-around and backreferences are unsupported)",
+            )
+        } else {
+            ConfigError::type_mismatch(format!("FlaggedTerms.{term}.Regex"), "valid regexp")
+        }
     })?;
     for (index, source) in options.allowed_regex.iter().enumerate() {
         build_regex(source).map_err(|_| {
-            ConfigError::type_mismatch(
-                format!("FlaggedTerms.{term}.AllowedRegex[{index}]"),
-                "valid regexp",
-            )
+            if is_unsupported_ruby_syntax(source) {
+                ConfigError::type_mismatch(
+                    format!("FlaggedTerms.{term}.AllowedRegex[{index}]"),
+                    "supported Ruby regexp (look-around and backreferences are unsupported)",
+                )
+            } else {
+                ConfigError::type_mismatch(
+                    format!("FlaggedTerms.{term}.AllowedRegex[{index}]"),
+                    "valid regexp",
+                )
+            }
         })?;
     }
     Ok(())
@@ -1763,9 +1867,28 @@ mod tests {
 
     #[test]
     fn custom_regex_parses_slash_delimited_yaml_regexp_and_config_roundtrips() {
-        let config = br#"{"FlaggedTerms":{"white":{"Regex":"/white[-_\\s]?list/","Suggestions":["allowlist"]}}}"#;
-        let options = Options::from_config_json(config).expect("valid option JSON");
-        assert_eq!(options.flagged_terms.len(), 4);
+        // Plain strings are literal (RuboCop parity): `/white.../` matches
+        // only literal slashes, unlike tagged `!ruby/regexp /white.../`.
+        // Oracle: RuboCop 1.87.0 `ensure_regex_string` returns plain strings
+        // verbatim (`/white/` never matches `white`), while tagged
+        // `!ruby/regexp '/white[-_\\s]?list/'` uses `.source` (`white...`).
+        let plain =
+            br#"{"FlaggedTerms":{"white":{"Regex":"/white[-_\\s]?list/","Suggestions":["allowlist"]}}}"#;
+        let options = Options::from_config_json(plain).expect("valid option JSON");
+        let white = options
+            .flagged_terms
+            .iter()
+            .find(|(term, _)| term == "white")
+            .expect("custom term");
+        assert_eq!(
+            white.1.regex.as_deref(),
+            Some(r"/white[-_\s]?list/"),
+            "plain slash-delimited strings stay literal"
+        );
+        // Tagged `!ruby/regexp` (JSON `{"__ruby_regexp__": ...}`) strips
+        // delimiters and ignores flags like RuboCop's `.source`.
+        let tagged = br#"{"FlaggedTerms":{"white":{"Regex":{"__ruby_regexp__":"/white[-_\\s]?list/"},"Suggestions":["allowlist"]}}}"#;
+        let options = Options::from_config_json(tagged).expect("valid option JSON");
         let white = options
             .flagged_terms
             .iter()
@@ -1794,19 +1917,33 @@ mod tests {
     }
 
     #[test]
-    fn ruby_regexp_modifiers_are_translated_for_rust_regex() {
+    fn ruby_regexp_modifiers_are_discarded_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 `ensure_regex_string` returns `.source`,
+        // discarding `m`/`x`/`i` flags then re-wraps with `IGNORECASE` only.
+        // ` /a.b/m` does NOT match `"a\\nb"` in RuboCop (verified via
+        // `flag_probe.rb`), unlike Ruby `/a.b/m`. Murphy strips delimiters
+        // and ignores flags for tagged `!ruby/regexp` to match.
         assert_eq!(
-            super::strip_ruby_regex_delimiters(r"/foo\/bar/i"),
+            super::parse_tagged_ruby_regexp(r"/foo\/bar/i", "Test.Regex").unwrap(),
             r"foo\/bar"
         );
         assert_eq!(
-            super::strip_ruby_regex_delimiters("/foo.+/m"),
-            "(?s)foo.+"
+            super::parse_tagged_ruby_regexp("/foo.+/m", "Test.Regex").unwrap(),
+            "foo.+"
         );
         assert_eq!(
-            super::strip_ruby_regex_delimiters("/foo + bar/x"),
-            "(?x)foo + bar"
+            super::parse_tagged_ruby_regexp("/foo + bar/x", "Test.Regex").unwrap(),
+            "foo + bar"
         );
+        // Plain strings are literal (no stripping).
+        let config = br#"{"FlaggedTerms":{"t":{"Regex":"/foo.+/m"}}}"#;
+        let options = Options::from_config_json(config).expect("plain stays literal");
+        let term = options
+            .flagged_terms
+            .iter()
+            .find(|(term, _)| term == "t")
+            .expect("custom term");
+        assert_eq!(term.1.regex.as_deref(), Some("/foo.+/m"));
     }
 
     #[test]
@@ -2004,5 +2141,264 @@ mod tests {
         assert!(!offenses[0].has_location());
         assert_eq!(offenses[0].location(), None);
         assert!(offenses[0].message.contains("in file path"));
+    }
+
+    // --- murphy-e7bz.41.1: Ruby Regexp semantics (oracle-backed vs RuboCop 1.87.0) ---
+
+    fn identifiers_only_options() -> Options {
+        Options {
+            check_identifiers: true,
+            check_constants: false,
+            check_variables: false,
+            check_strings: false,
+            check_symbols: false,
+            check_comments: false,
+            check_filepaths: false,
+            flagged_terms: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tagged_regexp_matches_bare_word_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 reports `1:1 mycustom` for
+        // `Regex: !ruby/regexp /mycustom/` on `mycustom = 1`.
+        let config = br#"{"CheckIdentifiers":true,"CheckConstants":false,"CheckVariables":false,"CheckStrings":false,"CheckSymbols":false,"CheckComments":false,"CheckFilepaths":false,"FlaggedTerms":{"mycustom":{"Regex":{"__ruby_regexp__":"/mycustom/"},"Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(config).expect("tagged regexp parses");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("mycustom = 1\n", &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 8 });
+        assert_eq!(offenses[0].message, "Consider replacing 'mycustom' with 'x'.");
+    }
+
+    #[test]
+    fn plain_string_matches_literally_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 reports `1:1 mycustom` for
+        // `Regex: 'mycustom'` (plain) on `mycustom = 1`.
+        let config = br#"{"FlaggedTerms":{"mycustom":{"Regex":"mycustom","Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(config).expect("plain parses");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("mycustom = 1\n", &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 8 });
+    }
+
+    #[test]
+    fn plain_slash_delimited_does_not_match_bare_word_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 reports NO offense for
+        // `Regex: '/mycustom/'` (plain, literal slashes) on `mycustom = 1`.
+        // Murphy must not strip delimiters for plain strings.
+        let config = br#"{"CheckIdentifiers":true,"CheckConstants":false,"CheckVariables":false,"CheckStrings":false,"CheckSymbols":false,"CheckComments":false,"CheckFilepaths":false,"FlaggedTerms":{"mycustom":{"Regex":"/mycustom/","Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(config).expect("plain slash parses literally");
+        assert_eq!(
+            options
+                .flagged_terms
+                .iter()
+                .find(|(t, _)| t == "mycustom")
+                .unwrap()
+                .1
+                .regex
+                .as_deref(),
+            Some("/mycustom/")
+        );
+        // Direct: custom literal requires slashes in source. Identifiers cannot
+        // contain `/`, so exercise via comments (RuboCop scans `tCOMMENT`).
+        let only_custom = Options {
+            check_identifiers: false,
+            check_constants: false,
+            check_variables: false,
+            check_strings: false,
+            check_symbols: false,
+            check_comments: true,
+            check_filepaths: false,
+            flagged_terms: vec![(
+                "mycustom".to_string(),
+                FlaggedTermOptions {
+                    regex: Some("/mycustom/".to_string()),
+                    suggestions: Some(serde_json::json!(["x"])),
+                    ..FlaggedTermOptions::default()
+                },
+            )],
+        };
+        assert!(run_cop_with_options::<InclusiveLanguage>("# mycustom\n", &only_custom).is_empty());
+        let offenses = run_cop_with_options::<InclusiveLanguage>("# /mycustom/\n", &only_custom);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, "Consider replacing '/mycustom/' with 'x'.");
+    }
+
+    #[test]
+    fn tagged_slash_delimited_matches_bare_word_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 reports `1:1 mycustom` for
+        // `Regex: !ruby/regexp '/mycustom/'` on `mycustom = 1`.
+        let config = br#"{"CheckIdentifiers":true,"CheckConstants":false,"CheckVariables":false,"CheckStrings":false,"CheckSymbols":false,"CheckComments":false,"CheckFilepaths":false,"FlaggedTerms":{"mycustom":{"Regex":{"__ruby_regexp__":"/mycustom/"},"Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(config).expect("tagged slash parses");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("mycustom = 1\n", &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 8 });
+    }
+
+    #[test]
+    fn ruby_flags_imx_are_discarded_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 `ensure_regex_string` uses `.source`, so
+        // `/MYCUSTOM/i` matches `mycustom` (via always-IGNORECASE, redundant),
+        // `/a.b/m` matches `aXb` (dot, no newline in token), and
+        // `'/foo #bar/x'` matches NOTHING on `foo` (spaces/comment kept
+        // literally since `x` is discarded — verified: `flag-x-comment: []`).
+        let tagged_i = br#"{"FlaggedTerms":{"mycustom":{"Regex":{"__ruby_regexp__":"/MYCUSTOM/i"},"Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(tagged_i).expect("i flag parses");
+        assert_eq!(run_cop_with_options::<InclusiveLanguage>("mycustom = 1\n", &options).len(), 1);
+
+        let tagged_m = br#"{"FlaggedTerms":{"mycustom":{"Regex":{"__ruby_regexp__":"/a.b/m"},"Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(tagged_m).expect("m flag parses");
+        assert_eq!(run_cop_with_options::<InclusiveLanguage>("aXb = 1\n", &options).len(), 1);
+
+        let tagged_x = br#"{"FlaggedTerms":{"mycustom":{"Regex":{"__ruby_regexp__":"/foo #bar/x"},"Suggestions":["x"]}}}"#;
+        Options::from_config_json(tagged_x).expect("x flag parses");
+        let mut only_custom = identifiers_only_options();
+        only_custom.flagged_terms.push((
+            "mycustom".to_string(),
+            FlaggedTermOptions {
+                regex: Some("foo #bar".to_string()),
+                suggestions: Some(serde_json::json!(["x"])),
+                ..FlaggedTermOptions::default()
+            },
+        ));
+        assert!(run_cop_with_options::<InclusiveLanguage>("foo = 1\n", &only_custom).is_empty());
+    }
+
+    #[test]
+    fn encoding_flag_n_is_ignored_like_rubocop() {
+        // Oracle: RuboCop 1.87.0 reports `1:1 mycustom` for
+        // `!ruby/regexp /mycustom/n` (ASCII-8BIT) on `mycustom = 1`.
+        // Murphy ignores `n` like RuboCop's re-`Regexp.new(source, IGNORECASE)`.
+        let config = br#"{"FlaggedTerms":{"mycustom":{"Regex":{"__ruby_regexp__":"/mycustom/n"},"Suggestions":["x"]}}}"#;
+        let options = Options::from_config_json(config).expect("n flag parses");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("mycustom = 1\n", &options);
+        assert_eq!(offenses.len(), 1);
+    }
+
+    #[test]
+    fn encoding_flags_esuo_are_rejected_like_ruby_load_failure() {
+        // Oracle: Ruby 3.3.5 Psych fails `!ruby/regexp /foo/u|e|s|o` with
+        // `no implicit conversion of Integer into String` (3-arg
+        // `Regexp.new` removed). Murphy produces an explicit config
+        // diagnostic instead of silently matching.
+        for raw in ["/foo/u", "/foo/e", "/foo/s", "/foo/o", "/foo/q"] {
+            let config = serde_json::json!({
+                "FlaggedTerms": { "t": { "Regex": { "__ruby_regexp__": raw } } }
+            });
+            let bytes = serde_json::to_vec(&config).expect("encode");
+            let err = Options::from_config_json(&bytes).expect_err("must reject");
+            assert_eq!(
+                err.to_string(),
+                "option `FlaggedTerms.t.Regex` must be a valid Ruby regexp literal",
+                "raw={raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_tagged_format_is_rejected_explicitly() {
+        // `!ruby/regexp foo` (no delimiters) fails Ruby Psych with
+        // `no implicit conversion`; Murphy diagnoses explicitly.
+        for raw in ["foo", "foo/i", "/foo", "foo/", "/foo/bar/baz/qux/q"] {
+            let config = serde_json::json!({
+                "FlaggedTerms": { "t": { "Regex": { "__ruby_regexp__": raw } } }
+            });
+            let bytes = serde_json::to_vec(&config).expect("encode");
+            assert!(Options::from_config_json(&bytes).is_err(), "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn lookaround_produces_explicit_diagnostic_not_silent_fallback() {
+        // Oracle: RuboCop 1.87.0 CRASHES for `/foo(?=bar)/` on `foobar`
+        // (`undefined method '[]' for nil` in `create_message` because the
+        // isolated-word lookup `find_flagged_term('foo')` misses). Murphy
+        // must not silently skip or crash: explicit config diagnostic.
+        for pattern in ["foo(?=bar)", "foo(?!bar)", "(?<=foo)bar", "(?<!foo)bar"] {
+            let tagged = serde_json::json!({
+                "FlaggedTerms": { "t": { "Regex": { "__ruby_regexp__": format!("/{pattern}/") } } }
+            });
+            let bytes = serde_json::to_vec(&tagged).expect("encode");
+            let err = Options::from_config_json(&bytes).expect_err("look-around must error");
+            assert!(
+                err.to_string().contains("look-around and backreferences are unsupported"),
+                "pattern={pattern} err={err}"
+            );
+            let plain = serde_json::json!({
+                "FlaggedTerms": { "t": { "Regex": pattern } }
+            });
+            let bytes = serde_json::to_vec(&plain).expect("encode");
+            let err = Options::from_config_json(&bytes).expect_err("plain look-around must error");
+            assert!(err.to_string().contains("unsupported"), "pattern={pattern}");
+        }
+    }
+
+    #[test]
+    fn backreferences_produce_explicit_diagnostic_not_silent_fallback() {
+        // Oracle: Ruby `/ (foo)\\1/` matches `foofoo`, but Murphy uses Rust
+        // `regex` (no backrefs) for the common fast path. Diagnose explicitly.
+        for pattern in [r"(foo)\1", r"(?<name>foo)\k<name>", r"(foo)\g<1>"] {
+            let config = serde_json::json!({
+                "FlaggedTerms": { "t": { "Regex": pattern } }
+            });
+            let bytes = serde_json::to_vec(&config).expect("encode");
+            let err = Options::from_config_json(&bytes).expect_err("backref must error");
+            assert!(
+                err.to_string().contains("unsupported"),
+                "pattern={pattern} err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_regex_tagged_vs_plain_matches_rubocop() {
+        // Oracle: RuboCop masks `master's degree` via
+        // `AllowedRegex: "master's degree"` (plain). Tagged
+        // `!ruby/regexp /master's degree/` masks identically (source same).
+        // Plain slash-literal does NOT mask bare words.
+        let plain_mask = serde_json::json!({
+            "CheckComments": true, "CheckIdentifiers": false, "CheckConstants": false,
+            "CheckVariables": false, "CheckStrings": false, "CheckSymbols": false,
+            "CheckFilepaths": false,
+            "FlaggedTerms": { "master": { "AllowedRegex": "master's degree" } }
+        });
+        let bytes = serde_json::to_vec(&plain_mask).expect("encode");
+        let options = Options::from_config_json(&bytes).expect("plain allowed parses");
+        assert!(run_cop_with_options::<InclusiveLanguage>("# master's degree\n", &options).is_empty());
+
+        let tagged_mask = serde_json::json!({
+            "CheckComments": true, "CheckIdentifiers": false, "CheckConstants": false,
+            "CheckVariables": false, "CheckStrings": false, "CheckSymbols": false,
+            "CheckFilepaths": false,
+            "FlaggedTerms": { "master": { "AllowedRegex": { "__ruby_regexp__": "/master's degree/" } } }
+        });
+        let bytes = serde_json::to_vec(&tagged_mask).expect("encode");
+        let options = Options::from_config_json(&bytes).expect("tagged allowed parses");
+        assert!(run_cop_with_options::<InclusiveLanguage>("# master's degree\n", &options).is_empty());
+
+        // Plain slash-literal must NOT mask (needs slashes in source).
+        let slash_literal = serde_json::json!({
+            "CheckComments": true, "CheckIdentifiers": false, "CheckConstants": false,
+            "CheckVariables": false, "CheckStrings": false, "CheckSymbols": false,
+            "CheckFilepaths": false,
+            "FlaggedTerms": { "master": { "AllowedRegex": "/master/" } }
+        });
+        let bytes = serde_json::to_vec(&slash_literal).expect("encode");
+        let options = Options::from_config_json(&bytes).expect("slash literal parses");
+        assert_eq!(
+            run_cop_with_options::<InclusiveLanguage>("# master\n", &options).len(),
+            1,
+            "plain /master/ must not mask bare master"
+        );
+    }
+
+    #[test]
+    fn allowed_regex_lookaround_is_rejected_explicitly() {
+        let config = serde_json::json!({
+            "FlaggedTerms": { "t": { "AllowedRegex": ["(?<=foo)bar"] } }
+        });
+        let bytes = serde_json::to_vec(&config).expect("encode");
+        let err = Options::from_config_json(&bytes).expect_err("allowed look-around must error");
+        assert!(err.to_string().contains("unsupported"));
     }
 }
