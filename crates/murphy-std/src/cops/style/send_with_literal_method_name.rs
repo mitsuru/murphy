@@ -10,6 +10,13 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the `public_send`/`send`/`__send__` call head
+//!   `(call _ {:public_send :send :__send__} ...)` (murphy-s1yc.7):
+//!   `call` = `{send csend}` covers safe-navigation (`obj&.public_send`),
+//!   mirroring RuboCop's `alias on_csend on_send`; the `_` receiver binds an
+//!   absent (receiverless `public_send(:foo)`) or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list (upstream's first-arg guard and
+//!   the AllowSend filter apply separately).
 //!   AllowSend: true (default) — only `public_send` is flagged by default.
 //!   When AllowSend: false, `send` and `__send__` are also flagged.
 //!   Writer methods ending in `=` are always allowed (their behavior
@@ -20,7 +27,6 @@
 //!   Autocorrect: single-arg → replace selector-to-end with method name;
 //!   multi-arg → rename selector + remove first-arg range up to second arg
 //!   (only for parenthesized single-line calls; otherwise offense-only).
-//!   Both send and csend (safe-navigation) are handled.
 //!   This cop is marked Safe: false upstream (cannot detect private method calls).
 //! ```
 //!
@@ -43,7 +49,19 @@
 //! obj.public_send(:if)   # reserved word
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the `public_send`/`send`/`__send__` call head
+// (murphy-s1yc.7):
+// `(call _ {:public_send :send :__send__} ...)` — `call` =
+// `{send csend}` covers safe-navigation (`obj&.public_send`); the `_`
+// receiver binds an absent (receiverless `public_send(:foo)`) or present
+// receiver; trailing `...` absorbs any argument list, so the AllowSend
+// filter and first-arg guards below apply separately.
+def_node_matcher!(
+    send_with_literal_method_name_call,
+    "(call _ {:public_send :send :__send__} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -106,21 +124,26 @@ pub struct SendWithLiteralMethodNameOptions {
     options = SendWithLiteralMethodNameOptions,
 )]
 impl SendWithLiteralMethodName {
-    #[on_node(kind = "send", methods = ["public_send", "send", "__send__"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let method = cx.method_name(node);
-        if matches!(method, Some("public_send" | "send" | "__send__")) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:public_send :send :__send__} ...)` head:
+    // filters to the three send-family calls on either `send` or `csend`
+    // (safe-navigation), with any receiver (absent or present). Trailing
+    // `...` matches any arg list, so the AllowSend filter and the first-arg
+    // guards below apply separately.
+    if !send_with_literal_method_name_call(node, cx) {
+        return;
+    }
     let opts = cx.options_or_default::<SendWithLiteralMethodNameOptions>();
     let method_name = cx.method_name(node).unwrap_or("");
 
@@ -373,6 +396,45 @@ mod tests {
             "#},
             "obj&.foo(bar, baz)\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.7): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // `(call _ {:public_send :send :__send__} ...)` port can be proven
+    // byte-identical. `call` = `{send csend}` covers safe-navigation; `_`
+    // binds the absent (receiverless) slot per if9y; trailing `...` absorbs
+    // any arg list (the AllowSend filter and arg guards below apply
+    // separately, mirroring upstream's `alias on_csend on_send`).
+
+    #[test]
+    fn s1yc7_flags_bare_public_send_corrects_to_foo() {
+        // Bare `public_send(:foo)` matches: `_` binds the nil-filled receiver.
+        test::<SendWithLiteralMethodName>().expect_correction(
+            indoc! {r#"
+                public_send(:foo)
+                ^^^^^^^^^^^^^^^^^ Use `foo` method call directly instead.
+            "#},
+            "foo\n",
+        );
+    }
+
+    #[test]
+    fn s1yc7_accepts_bare_send_in_default_mode() {
+        // Bare `send(:foo)` in default mode: matcher matches, AllowSend filter rejects.
+        test::<SendWithLiteralMethodName>().expect_no_offenses("send(:foo)\n");
+    }
+
+    #[test]
+    fn s1yc7_accepts_bare_public_send_without_args() {
+        // No-arg bare `public_send`: matcher `...` matches zero args,
+        // the first-arg guard rejects.
+        test::<SendWithLiteralMethodName>().expect_no_offenses("public_send\n");
+    }
+
+    #[test]
+    fn s1yc7_accepts_unrelated_method() {
+        // `obj.foo(:foo)`: matcher rejects non-union method.
+        test::<SendWithLiteralMethodName>().expect_no_offenses("obj.foo(:foo)\n");
     }
 }
 murphy_plugin_api::submit_cop!(SendWithLiteralMethodName);
