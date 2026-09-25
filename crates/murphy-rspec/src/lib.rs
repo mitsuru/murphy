@@ -108,6 +108,11 @@
 //! - `RSpec/StubbedMock` — message expectations must not configure a response (murphy-4gd.3.21).
 //! - `RSpec/SubjectStub` — do not stub methods of the object under test (murphy-4gd.3.21).
 //! - `RSpec/UndescriptiveLiteralsDescription` — descriptions must be descriptive (murphy-4gd.3.21).
+//! - `RSpec/UnspecifiedException` — specify the exception being captured (murphy-4gd.3.22).
+//! - `RSpec/VariableDefinition` — memoized helper names are symbols or strings (murphy-4gd.3.22).
+//! - `RSpec/VariableName` — memoized helper names use the configured style (murphy-4gd.3.22).
+//! - `RSpec/VerifiedDoubleReference` — constant references for verified doubles (murphy-4gd.3.22).
+//! - `RSpec/Yield` — call the block with `.and_yield` (murphy-4gd.3.22).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
