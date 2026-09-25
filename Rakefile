@@ -1,10 +1,11 @@
+# murphy:disable Naming/FileName
 # frozen_string_literal: true
 
-require "rake/testtask"
+require 'rake/testtask'
 
 Rake::TestTask.new(:test) do |t|
-  t.libs << "lib" << "test"
-  t.test_files = FileList["test/test_*.rb"]
+  t.libs << 'lib' << 'test'
+  t.test_files = FileList['test/test_*.rb']
 end
 
 task default: :test
