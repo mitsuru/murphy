@@ -179,6 +179,8 @@ enum LintOutputFormatArg {
     Github,
     Gnu,
     Tap,
+    Html,
+    Markdown,
 }
 
 impl From<LintOutputFormatArg> for OutputFormat {
@@ -193,6 +195,8 @@ impl From<LintOutputFormatArg> for OutputFormat {
             LintOutputFormatArg::Github => OutputFormat::Github,
             LintOutputFormatArg::Gnu => OutputFormat::Gnu,
             LintOutputFormatArg::Tap => OutputFormat::Tap,
+            LintOutputFormatArg::Html => OutputFormat::Html,
+            LintOutputFormatArg::Markdown => OutputFormat::Markdown,
         }
     }
 }
