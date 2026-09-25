@@ -882,6 +882,7 @@ name = "murphy-cache"
 version = "0.1.0"
 dependencies = [
  "murphy-ast",
+ "serde_json",
  "sha2",
 ]
 
@@ -891,6 +892,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "murphy-ast",
  "murphy-cache",
  "murphy-core",
  "murphy-example-pack",

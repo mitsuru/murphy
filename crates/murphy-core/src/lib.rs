@@ -27,6 +27,7 @@ mod config;
 mod discovery;
 pub mod dispatch;
 pub mod explain;
+mod fingerprint;
 #[cfg(feature = "mruby-user-cops")]
 mod mruby;
 mod offense;
@@ -52,6 +53,7 @@ pub use explain::{
     CopExplain, DOCUMENTATION_BASE_URL, SYNTAX_COP_DESCRIPTION, documentation_url_for_cop,
     enrich_offense, explain_for_cop, fix_example_for_cop, rationale_for_cop,
 };
+pub use fingerprint::lint_fingerprint;
 #[cfg(feature = "mruby-user-cops")]
 pub use mruby::proxy::{
     MrubyCopProxy, build_mruby_cop, current_mruby_proxies_drain, current_mruby_proxies_populate,

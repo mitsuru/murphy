@@ -34,12 +34,13 @@ mod profile;
 mod since;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use murphy_cache::Cache;
+use murphy_ast::content_hash;
+use murphy_cache::{Cache, ResultCache};
 #[cfg(feature = "mruby-user-cops")]
 use murphy_core::{AstContext, run_mruby_cop_isolated};
 use murphy_core::{
     Baseline, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
-    aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
+    aggregate_with_config, ast_to_sexp, discover_with_config, dispatch, lint_fingerprint,
     migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
 use murphy_plugin_api::{
@@ -149,6 +150,8 @@ enum CliCommand {
     Plugins(PluginsArgs),
     /// Scaffold git-hook configs (lefthook / pre-commit / overcommit).
     Install(InstallArgs),
+    /// Inspect or maintain the on-disk lint cache (A5).
+    Cache(CacheArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -162,7 +165,7 @@ struct LintArgs {
     /// Print developer timing and pipeline diagnostics to stderr.
     #[arg(long)]
     debug: bool,
-    /// Disable the arena AST binary cache for this run.
+    /// Disable both on-disk caches (arena AST + lint results) for this run.
     #[arg(long)]
     no_cache: bool,
     /// Output format.
@@ -404,6 +407,20 @@ impl From<InstallToolArg> for install::HookTool {
             InstallToolArg::All => install::HookTool::All,
         }
     }
+}
+
+#[derive(Debug, clap::Args)]
+struct CacheArgs {
+    #[command(subcommand)]
+    command: CacheCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// Show cache location, entry counts and total bytes.
+    Stat,
+    /// Remove all cached AST and result entries.
+    Clean,
 }
 
 #[cfg_attr(not(feature = "mruby-user-cops"), allow(dead_code))]
@@ -1096,12 +1113,28 @@ struct FileDebugInfo {
 /// Memoized lint over a batch of files. Identical source content is
 /// linted exactly once; results are fanned out per path with `Offense.file`
 /// rewritten to each contributor path (preserves ADR 0007 determinism).
+///
+/// A5 persistent result cache (`murphy-fmw.1.1`): when `result_cache` is
+/// `Some` — i.e. no `--no-cache`, no mruby user cops, no `--fix`
+/// intermediate pass — each file first probes the on-disk result cache
+/// (keyed by `content_hash` + file path + cop-pack + config
+/// fingerprint). A hit skips prism parse *and* cop dispatch entirely;
+/// a miss lints once per content group and populates each miss path's
+/// entry. All failures (missing file, corrupt JSON, oversize payload,
+/// deserialize error) degrade to a miss — the cache never changes lint
+/// output, only speed.
+///
+/// Per-path keys (not pure content keys) so identical content at
+/// different paths — which can yield different offenses under per-cop
+/// `Include`/`Exclude` scopes, including pack-bundled defaults — never
+/// shares an entry.
 fn lint_files_memoized(
     sources: &[(String, String)],
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     cache: Option<&Cache>,
+    result_cache: Option<&ResultCache>,
 ) -> Vec<Offense> {
     if config.has_cop_path_scopes() {
         return sources
@@ -1125,14 +1158,56 @@ fn lint_files_memoized(
     let mut out: Vec<Offense> = groups_vec
         .par_iter()
         .flat_map_iter(|(content, paths)| {
-            // Lint once against the representative path. Then for every
-            // additional path sharing the same content, clone the offense
-            // list with `file` rewritten.
-            let representative = paths[0];
+            // Fast path: persistent result cache (cross-run skip,
+            // per-path keys). Probe every path; hits deserialize
+            // directly (`file` is already correct in the entry).
+            let mut all: Vec<Offense> = Vec::new();
+            let mut misses: Vec<&str> = Vec::new();
+            if let Some(rc) = result_cache {
+                let hash = content_hash(content.as_bytes());
+                for &path in paths {
+                    match rc.lookup(&hash, path) {
+                        Some(bytes) => match serde_json::from_slice::<Vec<Offense>>(&bytes) {
+                            Ok(cached) => all.extend(cached),
+                            // Corrupt JSON ⇒ miss (re-lint below).
+                            Err(_) => misses.push(path),
+                        },
+                        None => misses.push(path),
+                    }
+                }
+                if misses.is_empty() {
+                    return all;
+                }
+            } else {
+                misses.extend(paths.iter().copied());
+            }
+            // Misses (or no result cache): lint once against the first
+            // miss path, fan out with `file` rewritten, and populate
+            // each miss path's own entry (pre-aggregate, pre-B4).
+            let representative = misses[0];
             let base = lint_source(content, representative, cops, mruby_cops, config, cache);
-            let mut all: Vec<Offense> = Vec::with_capacity(base.len() * paths.len());
-            all.extend(base.iter().cloned());
-            for &other in &paths[1..] {
+            if let Some(rc) = result_cache {
+                let hash = content_hash(content.as_bytes());
+                for &path in &misses {
+                    let owned: Vec<Offense> = base
+                        .iter()
+                        .map(|o| {
+                            let mut c = o.clone();
+                            c.file = path.to_string();
+                            c
+                        })
+                        .collect();
+                    if let Ok(bytes) = serde_json::to_vec(&owned) {
+                        rc.put(&hash, path, &bytes);
+                    }
+                }
+            }
+            // `base` carries the representative's `file`; rewrite per
+            // miss path (representative itself needs no rewrite).
+            for o in &base {
+                all.push(o.clone());
+            }
+            for &other in &misses[1..] {
                 for o in &base {
                     let mut cloned = o.clone();
                     cloned.file = other.to_string();
@@ -1479,6 +1554,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         CliCommand::TestCop(test_cop_args) => test_cop_command(&test_cop_args.spec_files),
         CliCommand::Plugins(plugins_args) => run_plugins(&plugins_args),
         CliCommand::Install(install_args) => run_install(&install_args),
+        CliCommand::Cache(cache_args) => run_cache(&cache_args),
     }
 }
 
@@ -1518,6 +1594,43 @@ fn run_install(args: &InstallArgs) -> Result<u8, AppError> {
         tool: args.tool.into(),
         force: args.force,
     })
+}
+
+/// `murphy cache stat| clean` (A5, murphy-fmw.1.1).
+///
+/// Both operate on the default cache root
+/// (`$XDG_CACHE_HOME/murphy/v1`, else `$HOME/.cache/murphy/v1`).
+/// `stat` prints entry counts; `clean` removes the whole tree.
+/// Neither fails when the root is missing (clean is a no-op, stat
+/// reports zeros) and neither consults `MURPHY_NO_CACHE`: an operator
+/// asking to inspect or wipe the cache always means it.
+fn run_cache(args: &CacheArgs) -> Result<u8, AppError> {
+    match &args.command {
+        CacheCommand::Stat => {
+            let Some(root) = murphy_cache::default_cache_root() else {
+                println!("cache: <no cache root (HOME unset)>");
+                return Ok(EXIT_OK);
+            };
+            let (ast, results, bytes) = murphy_cache::cache_stats(&root);
+            println!("cache root: {}", root.display());
+            println!("ast entries: {ast}");
+            println!("result entries: {results}");
+            println!("total bytes: {bytes}");
+            Ok(EXIT_OK)
+        }
+        CacheCommand::Clean => {
+            let Some(root) = murphy_cache::default_cache_root() else {
+                return Ok(EXIT_OK);
+            };
+            if root.exists() {
+                std::fs::remove_dir_all(&root).map_err(|e| {
+                    AppError::setup(format!("cannot clean {}: {e}", root.display()))
+                })?;
+            }
+            println!("cache cleaned: {}", root.display());
+            Ok(EXIT_OK)
+        }
+    }
 }
 
 fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
@@ -1703,20 +1816,37 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     let mruby_cop_sources = load_mruby_cop_sources(&[])?;
     let mruby_cops: &[MrubyCopSource] = &mruby_cop_sources;
 
-    // ── arena binary cache (murphy-9cr.26) ─────────────────────────────────
-    // `Cache::open` consults `MURPHY_NO_CACHE` itself; `--no-cache` is the
-    // CLI-side opt-out. Either path collapses to `Option::None`, which
-    // `parse_with_cache` understands as "no caching".
+    // ── arena binary cache (murphy-9cr.26) + persistent result cache (A5) ─
+    // `Cache::open` / `ResultCache::open` consult `MURPHY_NO_CACHE`
+    // themselves; `--no-cache` is the CLI-side opt-out. Either path
+    // collapses to `Option::None`, which `parse_with_cache` understands
+    // as "no caching" and `lint_files_memoized` as "no result skip".
+    //
+    // The result cache is per-path (content + path + cop-pack +
+    // config), so per-cop path scopes are safe. It stays disabled for
+    // mruby user cops (their sources live outside the fingerprint) and
+    // `--fix` (intermediate fixpoint sources must not poison the
+    // final-result entries). Otherwise the run falls back to the AST
+    // cache — same output, just slower.
     let cache: Option<Cache> = if no_cache {
         None
     } else {
         Cache::open(murphy_translate::LAYER_VERSION)
     };
     let cache_ref = cache.as_ref();
+    let result_cache: Option<ResultCache> =
+        if no_cache || fix_mode.is_some() || !mruby_cops.is_empty() {
+            None
+        } else {
+            let extra = lint_fingerprint(&registry, &config);
+            ResultCache::open(&extra, murphy_translate::LAYER_VERSION)
+        };
+    let result_cache_ref = result_cache.as_ref();
     if debug {
         eprintln!(
-            "murphy: debug: cache active={} (--no-cache={} MURPHY_NO_CACHE={})",
+            "murphy: debug: cache active={} result_cache active={} (--no-cache={} MURPHY_NO_CACHE={})",
             cache_ref.is_some(),
+            result_cache_ref.is_some(),
             no_cache,
             std::env::var_os("MURPHY_NO_CACHE").is_some()
         );
@@ -1804,7 +1934,14 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         }
         offenses
     } else {
-        lint_files_memoized(&sources_for_lint, cops, mruby_cops, &config, cache_ref)
+        lint_files_memoized(
+            &sources_for_lint,
+            cops,
+            mruby_cops,
+            &config,
+            cache_ref,
+            result_cache_ref,
+        )
     };
     let mut offenses = aggregate_with_config(flat_offenses, &config);
     // B4 enrichment (murphy-fmw.2.4): attach fixed-template

@@ -19,8 +19,11 @@ eliminate RuboCop's slowness with a native Rust core.
 - Linting runs **file-level parallel across all cores** (rayon); output is
   deterministic regardless of thread or argument order.
 - Within a single run, files with byte-identical content are parsed and
-  linted once (**in-run memoization only — no persistent cache**); output is
-  identical to the non-memoized result.
+  linted once (in-run memoization); across runs, unchanged files skip
+  parse **and** cop dispatch via the persistent AST + lint-result caches
+  (`$XDG_CACHE_HOME/murphy/v1`, keyed by content + path + cop pack + config —
+  see ADR 0047 and `docs/guides/cache.md`); output is identical whether
+  the run hits or misses.
 - Standard built-ins from ADR 0018 are enabled by default across `Murphy`, `Lint`,
   `Style`, and limited `Layout` namespaces.
 - `.murphy.yml` also supports `AllCops.CopsPath` (user-cop path), per-cop
@@ -97,8 +100,7 @@ Not yet production-ready. Murphy is described as a "linter/formatter", but
 **only the lint path exists today**. Autocorrect (`murphy lint --fix`/`-a`)
 applies fix blocks to source with conflict-safe descending-offset apply, a
 reparse-rerun fixpoint loop, and idempotency guarantees (ADR 0013). There is
-**no** `murphy format` subcommand or formatter, **no** persistent cache (in-run
-memoization only), **no** LSP, and **no** node-pattern DSL. `.gitignore` is
+**no** `murphy format` subcommand or formatter, **no** node-pattern DSL. `.gitignore` is
 intentionally **not** consulted. Full RuboCop parity, formatter `murphy format`,
 and sandboxing remain later. Phase 6 adds local quality/perf scripts:
 `scripts/perf/phase6_hyperfine.sh` and `scripts/diff/phase6_rubocop_diff.sh`.
