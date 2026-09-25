@@ -94,7 +94,7 @@ uses `category: murphy`):
 - run: murphy lint --format sarif --since origin/main > murphy.sarif
 - uses: github/codeql-action/upload-sarif@v3
   with:
-    sarif_path: murphy.sarif
+    sarif_file: murphy.sarif
     category: murphy
 ```
 
