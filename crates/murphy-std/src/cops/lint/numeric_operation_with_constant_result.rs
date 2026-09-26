@@ -32,7 +32,21 @@
 //! - `x **= 0` → `x = 1`
 //! - `x /= x` → `x = 1`
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, OptNodeId, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.42):
+// `(call _ {:* :/ :**} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`x&.*(0)`) at the pattern level, but the cop stays
+// send-only per upstream `return if node.csend_type?` (aliased on_csend
+// immediately rejects). The `_` receiver binds an absent or present
+// receiver per murphy-if9y while the variable-receiver guard below still
+// requires a present lvar/bare-call receiver; trailing `...` absorbs any
+// argument list while the single-arg guard below still rejects multi-arg
+// calls.
+def_node_matcher!(
+    numeric_operation_with_constant_result_call,
+    "(call _ {:* :/ :**} ...)"
+);
 
 #[derive(Default)]
 pub struct NumericOperationWithConstantResult;
@@ -45,8 +59,23 @@ pub struct NumericOperationWithConstantResult;
     options = NoOptions
 )]
 impl NumericOperationWithConstantResult {
-    #[on_node(kind = "send", methods = ["*", "/", "**"])]
+    /// Send path: `x * 0` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:* :/ :**} ...)` head filters to the constant-result
+    /// operators. Stays send-only per upstream `return if node.csend_type?`
+    /// (safe-navigation is never an offense).
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+        // Verbatim `(call _ {:* :/ :**} ...)` head: filters to the operator
+        // methods on either send or csend (safe-navigation) at the pattern
+        // level, with any receiver (absent or present). The cop stays
+        // send-only so csend never reaches here per upstream. Without this,
+        // an unrelated call with a variable receiver (e.g. `x % 0`) would
+        // run the checks below instead of being rejected by the method set
+        // up front.
+        if !numeric_operation_with_constant_result_call(node, cx) {
+            return;
+        }
         let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
             return;
         };
@@ -284,6 +313,63 @@ mod tests {
         test::<NumericOperationWithConstantResult>()
             .expect_no_offenses("x * 2\n")
             .expect_no_offenses("x * y\n");
+    }
+
+    // --- Characterization (murphy-s1yc.42): pin the exact node set the
+    // send dispatch with hand-rolled methods=["*", "/", "**"] matches, so
+    // the verbatim `(call _ {:* :/ :**} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation at the pattern level,
+    // but the cop stays send-only per upstream `return if node.csend_type?`
+    // (aliased on_csend immediately rejects); the `_` receiver binds an
+    // absent or present receiver per murphy-if9y while the
+    // variable-receiver guard below still requires a present lvar/bare-call
+    // receiver; trailing `...` absorbs any argument list while the
+    // single-arg guard below still rejects multi-arg calls.
+
+    #[test]
+    fn s1yc42_accepts_csend() {
+        // Safe-navigation: the verbatim head `(call _ ...)` matches csend at
+        // the pattern level, but the cop stays send-only per upstream
+        // `return if node.csend_type?` -- pinned here (overlaps
+        // does_not_flag_safe_navigation at the head boundary).
+        // Verified vs standalone NodePattern: `(call _ {:* :/ :**} ...)`
+        // matches `x&.*(0)` csend.
+        test::<NumericOperationWithConstantResult>().expect_no_offenses("x&.*(0)\n");
+    }
+
+    #[test]
+    fn s1yc42_flags_dot_power() {
+        // Dot-call power form: the verbatim head matches explicit dot-calls
+        // with a variable receiver and single int arg -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:* :/ :**} ...)`
+        // matches `x.**(0)` send.
+        test::<NumericOperationWithConstantResult>().expect_correction(
+            indoc! {r#"
+                x.**(0)
+                ^^^^^^^ Numeric operation with a constant result detected.
+            "#},
+            "1\n",
+        );
+    }
+
+    #[test]
+    fn s1yc42_accepts_with_extra_call_arg() {
+        // Extra call args: trailing `...` absorbs any argument list at the
+        // pattern level, but the single-arg guard below rejects
+        // `x.*(0, 1)` -- pinned here (pre-port ignores extra args via the
+        // len check and accepts; verbatim keeps it).
+        // Verified vs standalone NodePattern: `(call _ {:* :/ :**} ...)`
+        // matches multi-arg call.
+        test::<NumericOperationWithConstantResult>().expect_no_offenses("x.*(0, 1)\n");
+    }
+
+    #[test]
+    fn s1yc42_accepts_unrelated() {
+        // Unrelated `%` is not in the head method set, so the verbatim head
+        // rejects it up front -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:* :/ :**} ...)`
+        // does not match `x % 0`.
+        test::<NumericOperationWithConstantResult>().expect_no_offenses("x % 0\n");
     }
 }
 
