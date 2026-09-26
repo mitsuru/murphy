@@ -51,7 +51,7 @@
 //!       only known divergence.
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop, regex::Regex};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher, regex::Regex};
 
 #[derive(Default)]
 pub struct FileName;
@@ -334,18 +334,45 @@ fn constructor_call(value: NodeId, cx: &Cx<'_>) -> NodeId {
     }
 }
 
+// RuboCop parity: rubocop-ast `defined_module0` `casgn` arms are
+// `(casgn $_ $_ (send #global_const?({:Class :Module}) :new ...))` (+ block
+// form), and `Naming/FileName` `struct_definition` adds the `Struct` arms
+// (`(send (const {nil? cbase} :Struct) :new ...)` + block form), all send-only
+// upstream (rubocop 1.91.0 / rubocop-ast 1.50.0).
+// Verbatim inners as `call` to preserve Murphy's node set: Murphy merges both
+// shapes into `is_definition_constructor` with generic `method_name` +
+// `call_receiver` dispatch over `constructor_call` (all of
+// `Block`/`Numblock`/`Itblock`, both `Send` + `Csend`), so `call` covers
+// exactly the nodes the hand-rolled guard matches (per DuplicateRequire /
+// TallyMethod precedent: equivalence-preserving vs hand-rolled, not a RuboCop
+// parity fix). The `allowed` parameter still narrows: `Struct` only counts
+// when the caller allows it (`ancestor_defined_module` passes
+// `["Class", "Module"]`, so a `Foo = Struct.new` ancestor still contributes no
+// namespace). In Murphy `::Class` etc. collapse to `Const{scope:None}`: `nil?`
+// covers bare + `::` (pinned by `boundary_accepts_cbase_*`). Namespaced
+// `Foo::Class` still flags (pinned by `boundary_flags_namespaced_*`).
+def_node_matcher!(
+    is_class_module_new_call,
+    "(call (const nil? {:Class :Module}) :new ...)"
+);
+def_node_matcher!(
+    is_struct_new_call,
+    "(call (const nil? :Struct) :new ...)"
+);
+
 /// Whether `value` is `Class.new`/`Module.new`/`Struct.new` (any args, with or
 /// without a block wrapper). Mirrors the `casgn` arms of rubocop-ast's
 /// `defined_module0` plus `FileName#defined_struct`.
 fn is_definition_constructor(value: NodeId, cx: &Cx<'_>, allowed: &[&str]) -> bool {
     let call = constructor_call(value, cx);
-    if cx.method_name(call) != Some("new") {
-        return false;
+    // `(call (const nil? {:Class :Module :Struct}) :new ...)` (`Class` /
+    // `::Class`, etc, top-level only), narrowed by `allowed`. `call` covers
+    // `Send` + `Csend`.
+    if allowed.contains(&"Struct") {
+        is_class_module_new_call(call, cx) || is_struct_new_call(call, cx)
+    } else {
+        is_class_module_new_call(call, cx)
     }
-    let Some(recv) = cx.call_receiver(call).get() else {
-        return false;
-    };
-    allowed.iter().any(|name| cx.is_global_const(recv, name))
 }
 
 /// `find_definition`: `node.defined_module || defined_struct(node)`.
@@ -919,6 +946,72 @@ mod tests {
             })
             .with_file_path("good_name.rb")
             .expect_offense("x = 1\n^ `good_name.rb` should match `([`.\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.12): pin the exact node set
+    // the hand-rolled `is_global_const` guard matches, so the verbatim
+    // `(call (const nil? {:Class :Module :Struct}) :new ...)` refactor can be
+    // proven equivalent. `::Struct` / `::Class` collapse to
+    // `Const{scope:None}` in Murphy: `nil?` covers bare + `::` (bare
+    // `Struct.new` / `Class.new` pinned by pre-existing
+    // `accepts_struct_definition` / `accepts_class_new_definition`).
+    // Namespaced `Foo::Struct` / `Foo::Class` still flag (missing
+    // definition). `call` covers `Send` + `Csend`, matching the generic
+    // `method_name`+`call_receiver` dispatch via `constructor_call` (per
+    // DuplicateRequire / TallyMethod precedent).
+
+    fn definition_opts() -> Options {
+        Options {
+            expect_matching_definition: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_struct_new_definition() {
+        test::<FileName>()
+            .with_options(&definition_opts())
+            .with_file_path("foo_bar.rb")
+            .expect_no_offenses("FooBar = ::Struct.new(:x)\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_struct_new_definition() {
+        test::<FileName>()
+            .with_options(&definition_opts())
+            .with_file_path("foo_bar.rb")
+            .expect_offense(
+                "FooBar = Foo::Struct.new(:x)\n\
+                 ^ `foo_bar.rb` should define a class or module called `FooBar`.\n",
+            );
+    }
+
+    #[test]
+    fn boundary_accepts_csend_struct_new_definition() {
+        // `&.` is a `csend` node; `call` covers `Send` + `Csend`.
+        test::<FileName>()
+            .with_options(&definition_opts())
+            .with_file_path("foo_bar.rb")
+            .expect_no_offenses("FooBar = Struct&.new(:x)\n");
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_class_new_definition() {
+        test::<FileName>()
+            .with_options(&definition_opts())
+            .with_file_path("foo_bar.rb")
+            .expect_no_offenses("FooBar = ::Class.new\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_class_new_definition() {
+        test::<FileName>()
+            .with_options(&definition_opts())
+            .with_file_path("foo_bar.rb")
+            .expect_offense(
+                "FooBar = Foo::Class.new\n\
+                 ^ `foo_bar.rb` should define a class or module called `FooBar`.\n",
+            );
     }
 }
 murphy_plugin_api::submit_cop!(FileName);
