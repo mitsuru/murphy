@@ -10,6 +10,16 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the call head `(call _ {:find :detect} ...)`
+//!   (murphy-s1yc.22): `call` = `{send csend}` covers safe-navigation
+//!   (`array.reverse&.find`, `array&.reverse.find`), mirroring RuboCop
+//!   `alias on_csend on_send` plus `RESTRICT_ON_SEND [find detect]`; the
+//!   wildcard receiver binds an absent or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list. The receiver plus inner
+//!   `reverse` shape and `&:sym`-only arg guards below apply separately
+//!   (upstream outer is `(call (call _ {:reverse :reverse_each})
+//!   {:find :detect} (block_pass sym)?)` in `reverse_find?`).
+//!
 //!   Detection mirrors RuboCop's `reverse_find?` matcher:
 //!     (call (call _ {:reverse :reverse_each}) {:find :detect} (block_pass sym)?)
 //!   Dispatch is on the outer `find`/`detect` send (and csend, matching
@@ -67,7 +77,21 @@
 //! array.find { |item| item.even? }                 # no reverse
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.22):
+// `(call _ {:find :detect} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`array.reverse&.find`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND [find detect]`. The `_`
+// receiver binds an absent or present receiver per murphy-if9y; trailing
+// `...` absorbs any argument list, so the receiver plus inner-`reverse`
+// shape and `&:sym`-only arg guards below apply separately (upstream outer
+// is `(call (call _ {:reverse :reverse_each}) {:find :detect}
+// (block_pass sym)?)`).
+def_node_matcher!(
+    reverse_find_call,
+    "(call _ {:find :detect} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -84,20 +108,28 @@ const MSG: &str = "Use `rfind` instead.";
     options = NoOptions,
 )]
 impl ReverseFind {
-    #[on_node(kind = "send", methods = ["find", "detect"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if matches!(cx.method_name(node), Some("find" | "detect")) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:find :detect} ...)` head: filters to `find` /
+    // `detect` calls on either send or csend (safe-navigation), with any
+    // receiver (absent or present). Without this, an unrelated call on a
+    // reverse receiver (e.g. `array.reverse.map`) would run check on every
+    // call node instead of being rejected by the method set up front.
+    if !reverse_find_call(node, cx) {
+        return;
+    }
+    // Must have a receiver. Mirrors the pre-port hand-rolled guard;
+    // `_` binds an absent receiver, so bare `find` is accepted here.
     // The find/detect call must take either no positional argument or a
     // single `&:sym` block-pass. (A literal block is the wrapping `Block`
     // node, not an argument, so block-form callers reach here with no args.)
@@ -297,6 +329,70 @@ mod tests {
         // Block node, not a bare `reverse_each` call.
         test::<ReverseFind>()
             .expect_no_offenses("array.reverse_each { |x| x }.find { |y| y }\n");
+    }
+
+    // --- Characterization (murphy-s1yc.22): pin the exact node set the
+    // dual send (methods = ["find", "detect"]) + manual-csend-filter dispatch
+    // matches, so the verbatim `(call _ {:find :detect} ...)` port can be
+    // proven byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send` plus `RESTRICT_ON_SEND [find detect]`);
+    // trailing `...` absorbs any argument list, so the receiver plus inner
+    // `reverse` shape and `&:sym`-only arg guards below apply separately.
+
+    #[test]
+    fn s1yc22_flags_csend_block_corrects() {
+        // Safe navigation on both levels: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        // (Pre-port the `csend` handler filters `find`/`detect` manually
+        // because `methods = [...]` is only valid for `kind = "send"`; the
+        // verbatim head collapses the workaround.)
+        test::<ReverseFind>().expect_correction(
+            indoc! {r#"
+                array&.reverse&.find { |item| item.even? }
+                       ^^^^^^^^^^^^^ Use `rfind` instead.
+            "#},
+            "array&.rfind { |item| item.even? }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc22_flags_outer_csend_corrects() {
+        // Outer `find` is csend, inner `reverse` is plain send.
+        test::<ReverseFind>().expect_correction(
+            indoc! {r#"
+                array.reverse&.find { |item| item.even? }
+                      ^^^^^^^^^^^^^ Use `rfind` instead.
+            "#},
+            "array.rfind { |item| item.even? }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc22_flags_bare_reverse_find() {
+        // Bare inner receiver: `_` in `(call _ {:reverse :reverse_each})`
+        // binds an absent receiver per murphy-if9y, so `reverse.find`
+        // (implicit self) flags. The verbatim outer head matches and the
+        // complementary inner-shape guard flags.
+        test::<ReverseFind>().expect_offense(indoc! {r#"
+            reverse.find { |item| item.even? }
+            ^^^^^^^^^^^^ Use `rfind` instead.
+        "#});
+    }
+
+    #[test]
+    fn s1yc22_accepts_positional_arg() {
+        // Outer `find(ifnone)`: trailing `...` absorbs the argument list so
+        // the head matches, and the complementary `&:sym`-only arg guard
+        // accepts (upstream `(block_pass sym)?`).
+        test::<ReverseFind>()
+            .expect_no_offenses("array.reverse.find(ifnone) { |item| item.even? }\n");
+    }
+
+    #[test]
+    fn s1yc22_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<ReverseFind>()
+            .expect_no_offenses("array.reverse.map { |item| item.even? }\n");
     }
 
     // ---- registration / gate ----
