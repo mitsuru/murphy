@@ -16,11 +16,15 @@
 //!   default (Enabled: false in RuboCop) because `[0]` and `[-1]` on a Hash
 //!   return the value for that key, while `.first`/`.last` return the first/last
 //!   tuple; also String has no `first`/`last`.
+//!   Verbatim port of the call head `(call _ :[] ...)` (murphy-s1yc.18):
+//!   `call` = `{send csend}` covers safe-navigation (`arr&.[](0)`),
+//!   mirroring RuboCop `alias on_csend on_send` plus `RESTRICT_ON_SEND [[]]`;
+//!   the wildcard receiver binds an absent or present receiver per
+//!   murphy-if9y; trailing `...` absorbs any argument list. The one-arg plus
+//!   int 0/-1 plus chain guards below apply separately.
 //!   Chain guard: nested bracket chains like `arr[0][-2]` are not flagged —
 //!   this mirrors `innermost_braces_node` + `brace_method?` from RuboCop.
 //!   Assignment form `arr[0] = x` is `[]=` and is never dispatched to this cop.
-//!   Both plain send (`arr[0]`) and csend (`arr&.[](0)`) are handled, mirroring
-//!   RuboCop's `alias on_csend on_send`.
 //! ```
 //!
 //! ## Matched shapes
@@ -44,7 +48,15 @@
 //! range, matching RuboCop's `loc.selector` for bracket-notation calls.
 //! For the explicit dot form (`arr.[](0)`), the offense starts at the dot.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.18):
+// `(call _ :[] ...)` — `call` = `{send csend}` covers safe-navigation
+// (`arr&.[](0)`), mirroring RuboCop `alias on_csend on_send` plus
+// `RESTRICT_ON_SEND [[]]`. The `_` receiver binds an absent or present
+// receiver per murphy-if9y; trailing `...` absorbs any argument list, so the
+// one-arg plus int 0/-1 plus chain guards below apply separately.
+def_node_matcher!(array_first_last_call, "(call _ :[] ...)");
 
 #[derive(Default)]
 pub struct ArrayFirstLast;
@@ -57,23 +69,23 @@ pub struct ArrayFirstLast;
     options = NoOptions,
 )]
 impl ArrayFirstLast {
-    #[on_node(kind = "send", methods = ["[]"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) == Some("[]") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 /// Returns `true` if `node` is a plain `Send` call to `[]` or `[]=`.
 fn is_brace_method(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.kind(node), NodeKind::Send { .. } | NodeKind::Csend { .. })
-        && matches!(cx.method_name(node), Some("[]") | Some("[]="))
+    matches!(
+        cx.kind(node),
+        NodeKind::Send { .. } | NodeKind::Csend { .. }
+    ) && matches!(cx.method_name(node), Some("[]") | Some("[]="))
 }
 
 /// Walk up the receiver chain: while the current node's receiver is itself a
@@ -82,8 +94,10 @@ fn is_brace_method(node: NodeId, cx: &Cx<'_>) -> bool {
 fn innermost_braces_node(node: NodeId, cx: &Cx<'_>) -> NodeId {
     let mut current = node;
     while let Some(recv) = cx.call_receiver(current).get() {
-        if matches!(cx.kind(recv), NodeKind::Send { .. } | NodeKind::Csend { .. })
-            && cx.method_name(recv) == Some("[]")
+        if matches!(
+            cx.kind(recv),
+            NodeKind::Send { .. } | NodeKind::Csend { .. }
+        ) && cx.method_name(recv) == Some("[]")
         {
             current = recv;
         } else {
@@ -94,7 +108,16 @@ fn innermost_braces_node(node: NodeId, cx: &Cx<'_>) -> NodeId {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // Must have exactly one argument.
+    // Verbatim `(call _ :[] ...)` head: filters to `[]` calls on either
+    // send or csend (safe-navigation), with any receiver (absent or
+    // present). Without this, an unrelated call (e.g. `arr.fetch(0)`)
+    // would run check on every call node instead of being rejected by the
+    // method set up front.
+    if !array_first_last_call(node, cx) {
+        return;
+    }
+    // Must have exactly one argument (the verbatim head's trailing `...`
+    // absorbs any argument list, so this applies separately).
     let args = cx.call_arguments(node);
     if args.len() != 1 {
         return;
@@ -113,7 +136,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let inner = innermost_braces_node(node, cx);
 
     // If the inner node's parent is a brace method (`[]` or `[]=`), skip.
-    if cx.parent(inner).get().is_some_and(|p| is_brace_method(p, cx)) {
+    if cx
+        .parent(inner)
+        .get()
+        .is_some_and(|p| is_brace_method(p, cx))
+    {
         return;
     }
 
@@ -277,6 +304,49 @@ mod tests {
             "#},
             "foo.bar.first\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.18): pin the exact node set the
+    // dual send (methods = ["[]"]) + manual-csend-filter dispatch matches,
+    // so the verbatim `(call _ :[] ...)` port can be proven byte-identical.
+    // `call` covers safe-navigation (mirroring upstream `alias on_csend
+    // on_send` plus `RESTRICT_ON_SEND [[]]`); trailing `...` absorbs any
+    // argument list, so the one-arg plus int 0/-1 plus chain guards below
+    // apply separately.
+
+    #[test]
+    fn s1yc18_flags_csend_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. (Pre-port the `csend` handler
+        // filters `[]` manually because `methods = [...]` is only valid for
+        // `kind = "send"`; the verbatim head collapses the workaround.)
+        test::<ArrayFirstLast>().expect_correction(
+            indoc! {r#"
+                arr&.[](0)
+                     ^^^^^ Use `first`.
+            "#},
+            "arr&.first\n",
+        );
+    }
+
+    #[test]
+    fn s1yc18_accepts_no_arg() {
+        // No arguments: trailing `...` absorbs the empty argument list so
+        // the head matches, and the complementary one-arg guard accepts.
+        test::<ArrayFirstLast>().expect_no_offenses("arr[]\n");
+    }
+
+    #[test]
+    fn s1yc18_accepts_multi_arg() {
+        // Multiple arguments: trailing `...` absorbs the rest so the head
+        // matches, and the complementary exactly-one-arg guard accepts.
+        test::<ArrayFirstLast>().expect_no_offenses("arr[0, 1]\n");
+    }
+
+    #[test]
+    fn s1yc18_accepts_unrelated_method() {
+        // `fetch` is outside the verbatim method set, so the head rejects.
+        test::<ArrayFirstLast>().expect_no_offenses("arr.fetch(0)\n");
     }
 
     // --- default_enabled: false ---
