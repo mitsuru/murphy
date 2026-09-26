@@ -70,6 +70,17 @@ use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_ma
 // diggable head with key arg and nil-hash-Hash.new default).
 def_node_matcher!(fetch_chain_call, "(call _ :fetch ...)");
 
+// RuboCop parity: `Style/HashFetchChain` Hash.new default is
+// `(send (const {nil? cbase} :Hash) :new)` (zero args, send-only).
+// In Murphy `::Hash` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `flags_chain_with_global_hash_new_intermediate`),
+// namespaced Foo::Hash still rejects (pinned by
+// `boundary_ignores_namespaced_hash_new_intermediate`), csend rejects
+// (pinned by `boundary_ignores_csend_hash_new_intermediate`), with-args
+// rejects (pinned by `boundary_ignores_hash_new_with_args_intermediate`).
+// Nil/empty-hash defaults stay hand-rolled below.
+def_node_matcher!(hash_new_default, "(send (const nil? :Hash) :new)");
+
 #[derive(Default)]
 pub struct HashFetchChain;
 
@@ -111,16 +122,8 @@ fn is_acceptable_default(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Nil => true,
         NodeKind::Hash(list) => cx.list(list).is_empty(),
-        NodeKind::Send { method, args, .. } => {
-            cx.symbol_str(method) == "new"
-                && cx.list(args).is_empty()
-                && cx
-                    .call_receiver(node)
-                    .get()
-                    .and_then(|r| cx.const_name(r))
-                    .as_deref()
-                    == Some("Hash")
-        }
+        // `(send (const nil? :Hash) :new)` zero-args, Send only.
+        NodeKind::Send { .. } => hash_new_default(node, cx),
         _ => false,
     }
 }
@@ -353,6 +356,28 @@ mod tests {
     fn s1yc10_accepts_unrelated_method() {
         // h.foo: matcher rejects non-fetch method.
         test::<HashFetchChain>().expect_no_offenses("h.foo('bar', nil)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_hash_new_intermediate() {
+        // `Foo::Hash` const_name is "Foo::Hash", not "Hash", so not an
+        // acceptable default; verbatim `(const nil? :Hash)` must preserve.
+        test::<HashFetchChain>()
+            .expect_no_offenses("h.fetch('foo', Foo::Hash.new).fetch('bar', nil)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_hash_new_intermediate() {
+        // `&.` is csend, not send; is_acceptable_default matches Send only.
+        test::<HashFetchChain>()
+            .expect_no_offenses("h.fetch('foo', Hash&.new).fetch('bar', nil)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_hash_new_with_args_intermediate() {
+        // `Hash.new(0)` has args; zero-arg guard rejects.
+        test::<HashFetchChain>()
+            .expect_no_offenses("h.fetch('foo', Hash.new(0)).fetch('bar', nil)\n");
     }
 }
 murphy_plugin_api::submit_cop!(HashFetchChain);
