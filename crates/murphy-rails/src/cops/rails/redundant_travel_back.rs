@@ -63,15 +63,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 fn in_teardown_or_after(cx: &Cx<'_>, node: NodeId) -> bool {
     for anc in cx.ancestors(node) {
         match *cx.kind(anc) {
-            NodeKind::Def { name, .. } => {
-                if cx.symbol_str(name) == "teardown" {
-                    return true;
-                }
+            NodeKind::Def { name, .. } if cx.symbol_str(name) == "teardown" => {
+                return true;
             }
-            NodeKind::Block { call, .. } => {
-                if cx.method_name(call) == Some("after") {
-                    return true;
-                }
+            NodeKind::Block { call, .. } if cx.method_name(call) == Some("after") => {
+                return true;
             }
             _ => {}
         }

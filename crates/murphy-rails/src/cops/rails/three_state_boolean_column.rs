@@ -162,10 +162,8 @@ fn required_options(cx: &Cx<'_>, id: NodeId) -> bool {
             continue;
         };
         match cx.symbol_str(sym) {
-            "default" => {
-                if !matches!(*cx.kind(value), NodeKind::Nil) {
-                    has_default = true;
-                }
+            "default" if !matches!(*cx.kind(value), NodeKind::Nil) => {
+                has_default = true;
             }
             "null" => {
                 if matches!(*cx.kind(value), NodeKind::False_) {

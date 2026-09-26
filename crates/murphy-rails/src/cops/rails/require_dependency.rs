@@ -49,13 +49,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
     // Upstream pattern `(send {nil? (const {nil? cbase} :Kernel)} :require_dependency _)`.
     // Exactly: no receiver, or `Kernel` / `::Kernel`; at least one arg.
-    match cx.call_receiver(node).get() {
-        None => {}
-        Some(recv) => {
-            if cx.const_name(recv).as_deref() != Some("Kernel") {
-                return;
-            }
-        }
+    if let Some(recv) = cx.call_receiver(node).get()
+        && cx.const_name(recv).as_deref() != Some("Kernel")
+    {
+        return;
     }
     if cx.call_arguments(node).is_empty() {
         return;

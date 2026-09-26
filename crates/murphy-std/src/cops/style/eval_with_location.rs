@@ -102,14 +102,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let arg_list = cx.list(args);
 
     match method_str {
-        "eval" => {
+        "eval" if is_bare_eval(node, cx) || is_kernel_eval(node, cx) => {
             // `(send nil? :eval ...)` (bare) or
             // `(send (const nil? :Kernel) :eval ...)` (`Kernel` / `::Kernel`,
             // top-level only); not `binding.eval`, `Foo::Kernel.eval`, etc.
             // `send` covers `Send` only (not `Csend`).
-            if is_bare_eval(node, cx) || is_kernel_eval(node, cx) {
-                check_eval(node, arg_list, cx);
-            }
+            check_eval(node, arg_list, cx);
         }
         "instance_eval" | "class_eval" | "module_eval" => {
             check_instance_eval(node, method_str, arg_list, cx);
