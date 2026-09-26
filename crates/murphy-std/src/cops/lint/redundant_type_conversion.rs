@@ -35,6 +35,26 @@ use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_ma
 // Predicate-only, no captures, byte-identical offense emission.
 def_node_matcher!(is_string_new_call, "(call (const nil? :String) :new ...)");
 
+// RuboCop parity: `Lint/RedundantTypeConversion` `array_constructor?`,
+// `hash_constructor?`, and `set_constructor?` const inners are
+// `(send (const {cbase nil?} :Array) {:new :[]} ...)`,
+// `(send (const {cbase nil?} :Hash) {:new :[]} ...)` (block + Kernel forms
+// stay hand-rolled), and `(send (const {cbase nil?} :Set) {:new :[]} ...)`
+// (top-level only).
+// In Murphy `::X` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned per arm by `boundary_flags_cbase_*`), namespaced `Foo::X`
+// still rejects (pinned per arm by `boundary_ignores_namespaced_*`).
+// `call` covers Send+Csend, matching the generic `method_name`+
+// `call_receiver` dispatch via both `check_send`+`check_csend` (csend inners
+// flag, pinned per arm by `boundary_flags_csend_*`), per the
+// `Lint/DuplicateRequire` precedent. Equivalence-preserving vs hand-rolled,
+// not a RuboCop parity fix: Kernel arms, `exception: false` suppression,
+// parenthesized unwrap, and block suppression stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_array_ctor_call, "(call (const nil? :Array) {:new :[]} ...)");
+def_node_matcher!(is_hash_ctor_call, "(call (const nil? :Hash) {:new :[]} ...)");
+def_node_matcher!(is_set_ctor_call, "(call (const nil? :Set) {:new :[]} ...)");
+
 #[derive(Default)]
 pub struct RedundantTypeConversion;
 
@@ -124,9 +144,6 @@ fn literal_receiver(method: &str, node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn constructor_receiver(method: &str, node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(name) = cx.method_name(node) else {
-        return false;
-    };
     match method {
         "to_s" => {
             // `(call (const nil? :String) :new ...)` top-level only; preserves
@@ -140,16 +157,21 @@ fn constructor_receiver(method: &str, node: NodeId, cx: &Cx<'_>) -> bool {
         "to_r" => kernel_constructor(node, "Rational", cx),
         "to_c" => kernel_constructor(node, "Complex", cx),
         "to_a" => {
-            name == "new" && call_receiver_const(node, "Array", cx)
-                || name == "[]" && call_receiver_const(node, "Array", cx)
-                || kernel_constructor(node, "Array", cx)
+            // `(call (const nil? :Array) {:new :[]} ...)` top-level only;
+            // preserves `::Array` via scope-None collapse. Bare `Array` +
+            // `::` flag, `Foo::Array` silent, csend flags via `call`.
+            is_array_ctor_call(node, cx) || kernel_constructor(node, "Array", cx)
         }
         "to_h" => {
-            name == "new" && call_receiver_const(node, "Hash", cx)
-                || name == "[]" && call_receiver_const(node, "Hash", cx)
-                || kernel_constructor(node, "Hash", cx)
+            // `(call (const nil? :Hash) {:new :[]} ...)` top-level only;
+            // preserves `::Hash` via scope-None collapse. Bare `Hash` +
+            // `::` flag, `Foo::Hash` silent, csend flags via `call`.
+            is_hash_ctor_call(node, cx) || kernel_constructor(node, "Hash", cx)
         }
-        "to_set" => (name == "new" || name == "[]") && call_receiver_const(node, "Set", cx),
+        // `(call (const nil? :Set) {:new :[]} ...)` top-level only;
+        // preserves `::Set` via scope-None collapse. Bare `Set` + `::`
+        // flag, `Foo::Set` silent, csend flags via `call`.
+        "to_set" => is_set_ctor_call(node, cx),
         _ => false,
     }
 }
@@ -162,12 +184,6 @@ fn kernel_constructor(node: NodeId, constructor: &str, cx: &Cx<'_>) -> bool {
         None => true,
         Some(receiver) => cx.is_global_const(receiver, "Kernel"),
     }
-}
-
-fn call_receiver_const(node: NodeId, name: &str, cx: &Cx<'_>) -> bool {
-    cx.call_receiver(node)
-        .get()
-        .is_some_and(|receiver| cx.is_global_const(receiver, name))
 }
 
 fn chained_conversion(method: &str, receiver: NodeId, cx: &Cx<'_>) -> bool {
@@ -314,6 +330,176 @@ mod tests {
                                  ^^^^ Redundant `to_s` detected.
             "#},
             "String.new(\"x\")\n",
+        );
+    }
+
+    // --- Boundary characterization (murphy-ft88.21): pin the exact node set
+    // the hand-rolled `call_receiver_const(Array/Hash/Set)` guards match, so
+    // the verbatim `(call (const nil? :X) {:new :[]} ...)` refactors can be
+    // proven equivalent. `::X` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::`. Namespaced `Foo::X` is rejected by
+    // `is_global_const`; `call` covers Send+Csend per the String precedent
+    // (murphy-ft88.20) since `call_receiver` handles both.
+
+    #[test]
+    fn boundary_flags_array_new_to_a() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Array.new.to_a
+                          ^^^^ Redundant `to_a` detected.
+            "#},
+            "Array.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_array_brackets_to_a() {
+        // `{:new :[]}` alternation: `Array[]` flags like `Array.new`.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Array[].to_a
+                        ^^^^ Redundant `to_a` detected.
+            "#},
+            "Array[]\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_array_new_to_a() {
+        // `::Array` collapses to Const scope None, so `nil?` flags it.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                ::Array.new.to_a
+                            ^^^^ Redundant `to_a` detected.
+            "#},
+            "::Array.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_array_new_to_a() {
+        // `Foo::Array` has non-nil scope, so `nil?` rejects.
+        test::<RedundantTypeConversion>()
+            .expect_no_offenses("Foo::Array.new.to_a\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_array_new_to_a() {
+        // Inner `&.` is csend; `call` covers Send+Csend.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Array&.new.to_a
+                           ^^^^ Redundant `to_a` detected.
+            "#},
+            "Array&.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_hash_new_to_h() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Hash.new.to_h
+                         ^^^^ Redundant `to_h` detected.
+            "#},
+            "Hash.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_hash_brackets_to_h() {
+        // `{:new :[]}` alternation: `Hash[]` flags like `Hash.new`.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Hash[].to_h
+                       ^^^^ Redundant `to_h` detected.
+            "#},
+            "Hash[]\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_hash_new_to_h() {
+        // `::Hash` collapses to Const scope None, so `nil?` flags it.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                ::Hash.new.to_h
+                           ^^^^ Redundant `to_h` detected.
+            "#},
+            "::Hash.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_hash_new_to_h() {
+        // `Foo::Hash` has non-nil scope, so `nil?` rejects.
+        test::<RedundantTypeConversion>()
+            .expect_no_offenses("Foo::Hash.new.to_h\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_hash_new_to_h() {
+        // Inner `&.` is csend; `call` covers Send+Csend.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Hash&.new.to_h
+                          ^^^^ Redundant `to_h` detected.
+            "#},
+            "Hash&.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_set_new_to_set() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Set.new.to_set
+                        ^^^^^^ Redundant `to_set` detected.
+            "#},
+            "Set.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_set_brackets_to_set() {
+        // `{:new :[]}` alternation: `Set[]` flags like `Set.new`.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Set[].to_set
+                      ^^^^^^ Redundant `to_set` detected.
+            "#},
+            "Set[]\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_set_new_to_set() {
+        // `::Set` collapses to Const scope None, so `nil?` flags it.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                ::Set.new.to_set
+                          ^^^^^^ Redundant `to_set` detected.
+            "#},
+            "::Set.new\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_set_new_to_set() {
+        // `Foo::Set` has non-nil scope, so `nil?` rejects.
+        test::<RedundantTypeConversion>()
+            .expect_no_offenses("Foo::Set.new.to_set\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_set_new_to_set() {
+        // Inner `&.` is csend; `call` covers Send+Csend.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Set&.new.to_set
+                         ^^^^^^ Redundant `to_set` detected.
+            "#},
+            "Set&.new\n",
         );
     }
 }
