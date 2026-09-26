@@ -141,6 +141,10 @@ Rails/ActiveRecordOverride:
   Include:
     - '**/app/models/**/*.rb'
 
+Rails/AddColumnIndex:
+  Include:
+    - 'db/**/*.rb'
+
 Rails/ApplicationRecord:
   Exclude:
     - 'db/**/*.rb'
