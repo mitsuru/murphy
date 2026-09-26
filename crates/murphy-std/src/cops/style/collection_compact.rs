@@ -93,6 +93,16 @@ def_node_matcher!(
     "(call _ {:reject :reject! :select :select! :filter :filter! :grep_v} ...)"
 );
 
+// RuboCop parity: `Style/CollectionCompact` `grep_v_with_nil?` NilClass arg is
+// `(const {nil? cbase} :NilClass)` (top-level only; `nil` arg stays
+// hand-rolled). In Murphy `::NilClass` collapses to `Const{scope:None}`:
+// `nil?` covers bare + `::` (both flag, pinned by `flags_grep_v_nil_class` +
+// `flags_grep_v_root_nil_class`). Namespaced `Foo::NilClass` still accepts
+// (pinned by `accepts_grep_v_other_const`). The 1-arg + `Nil` guards stay
+// hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_nil_class_const, "(const nil? :NilClass)");
+
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct CollectionCompact;
@@ -255,11 +265,10 @@ fn is_grep_v_nil(node: NodeId, cx: &Cx<'_>) -> bool {
     let arg = args[0];
     match *cx.kind(arg) {
         NodeKind::Nil => true,
-        NodeKind::Const { scope, name } => {
-            // Match `NilClass` and `::NilClass` (both have scope=None in Murphy's AST;
-            // `Foo::NilClass` has a Const scope and is intentionally skipped).
-            scope.get().is_none() && cx.symbol_str(name) == "NilClass"
-        }
+        // `(const nil? :NilClass)` — top-level `NilClass` / `::NilClass` only;
+        // `nil?` covers bare + `::` (`::` collapses to `Const{scope:None}`).
+        // Namespaced `Foo::NilClass` still accepts.
+        NodeKind::Const { .. } => is_nil_class_const(arg, cx),
         _ => false,
     }
 }
@@ -806,6 +815,21 @@ mod tests {
     #[test]
     fn accepts_grep_v_other_const() {
         test::<CollectionCompact>().expect_no_offenses("array.grep_v(Foo::NilClass)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.24): pin the csend shape for
+    // the verbatim `(const nil? :NilClass)` refactor. The const predicate is
+    // on the `grep_v` argument (dispatch-agnostic), so `&.` still flags via
+    // `check_csend` (bare + `::` flag per `flags_grep_v_nil_class` +
+    // `flags_grep_v_root_nil_class`, namespaced silent per
+    // `accepts_grep_v_other_const`).
+
+    #[test]
+    fn boundary_flags_csend_grep_v_nil_class() {
+        test::<CollectionCompact>().expect_offense(indoc! {r#"
+            array&.grep_v(NilClass)
+                   ^^^^^^^^^^^^^^^^ Use `compact` instead of `grep_v(NilClass)`.
+        "#});
     }
 
     // negative: grep_v without argument
