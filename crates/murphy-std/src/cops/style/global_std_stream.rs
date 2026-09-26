@@ -45,7 +45,24 @@
 //! Replaces the entire const node (including any leading `::`) with the
 //! lowercased global variable form: `$stdout`, `$stderr`, or `$stdin`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/GlobalStdStream` flags top-level `STDIN`/`STDOUT`/
+// `STDERR` (`namespaced?` false for bare + `::`, true for `Foo::STDOUT`).
+// Verbatim as `(const nil? {:STDIN :STDOUT :STDERR})`.
+// In Murphy `::STDOUT` etc collapse to `Const{scope:None}`: `nil?` covers
+// bare + `::` (pinned by `flags_cbase_stdout_and_corrects` +
+// `boundary_flags_cbase_stderr_and_corrects` +
+// `boundary_flags_cbase_stdin_and_corrects`). Namespaced `Foo::STDOUT` /
+// `Foo::STDERR` / `Foo::STDIN` still accept (pinned by
+// `accepts_namespaced_stdout` + `accepts_namespaced_stderr` +
+// `boundary_accepts_namespaced_stdin`). The `STDIN`/`STDOUT`/`STDERR` name
+// -> `$stdin`/`$stdout`/`$stderr` mapping + gvar-assignment exception stay
+// hand-rolled below.
+def_node_matcher!(
+    is_std_stream_const,
+    "(const nil? {:STDIN :STDOUT :STDERR})"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -80,9 +97,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         _ => return,
     };
 
-    // Must be a global (unscoped or cbase-scoped) constant.
-    // cx.is_global_const handles both `STDOUT` (nil scope) and `::STDOUT` (cbase scope).
-    if !cx.is_global_const(node, const_name) {
+    // Must be a global (unscoped or cbase-scoped) constant:
+    // `(const nil? {:STDIN :STDOUT :STDERR})` (`STDOUT` / `::STDOUT`, etc,
+    // top-level only). `nil?` covers bare + `::` (`::` collapses to
+    // `Const{scope:None}` in Murphy).
+    if !is_std_stream_const(node, cx) {
         return;
     }
 
@@ -248,6 +267,40 @@ mod tests {
     #[test]
     fn accepts_unrelated_constant() {
         test::<GlobalStdStream>().expect_no_offenses("File.open('foo')\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.10): pin the exact node set
+    // the hand-rolled `is_global_const` guards match, so the verbatim
+    // `(const nil? {:STDIN :STDOUT :STDERR})` refactor can be proven
+    // equivalent. `::STDIN` / `::STDERR` collapse to `Const{scope:None}`:
+    // `nil?` covers bare + `::` (cbase STDOUT pins pre-existed).
+    // Namespaced `Foo::STDIN` still accepts.
+
+    #[test]
+    fn boundary_flags_cbase_stderr_and_corrects() {
+        test::<GlobalStdStream>().expect_correction(
+            indoc! {r#"
+                ::STDERR.puts('hello')
+                ^^^^^^^^ Use `$stderr` instead of `STDERR`.
+            "#},
+            "$stderr.puts('hello')\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_stdin_and_corrects() {
+        test::<GlobalStdStream>().expect_correction(
+            indoc! {r#"
+                ::STDIN.gets
+                ^^^^^^^ Use `$stdin` instead of `STDIN`.
+            "#},
+            "$stdin.gets\n",
+        );
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_stdin() {
+        test::<GlobalStdStream>().expect_no_offenses("Foo::STDIN.gets\n");
     }
 }
 murphy_plugin_api::submit_cop!(GlobalStdStream);
