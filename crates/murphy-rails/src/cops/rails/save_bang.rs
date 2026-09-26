@@ -226,10 +226,7 @@ fn allowed_receiver(cx: &Cx<'_>, node: NodeId) -> bool {
 /// Upstream `assignable_node`: `block_node || node`, climbing hash/array parents.
 fn assignable_node(cx: &Cx<'_>, node: NodeId) -> NodeId {
     let mut assignable = cx.block_node(node).get().unwrap_or(node);
-    loop {
-        let Some(parent) = cx.parent(assignable).get() else {
-            break;
-        };
+    while let Some(parent) = cx.parent(assignable).get() {
         match *cx.kind(parent) {
             NodeKind::Hash(_) | NodeKind::Array(_) => {
                 assignable = parent;
