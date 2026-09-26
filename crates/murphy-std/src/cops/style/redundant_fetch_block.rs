@@ -48,7 +48,20 @@
 //! hash.fetch(:key) { |k| k.to_s }  # block with params
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RedundantFetchBlock` `rails_cache?` is
+// `(send (const _ :Rails) :cache)` (any scope, no args). In Murphy
+// `::Rails` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+// (both skip, pinned by `boundary_accepts_cbase_rails_cache`). Namespaced
+// `Foo::Rails` still flags (pinned by
+// `boundary_flags_namespaced_rails_cache`, preserving the current gap vs
+// upstream `_` which would skip). `Send`-only inner matches the `Send`
+// check below (csend `Rails&.cache` still flags, pinned by
+// `boundary_flags_csend_rails_cache`). The `:cache` method + empty-args
+// guards stay hand-rolled below. Predicate-only, no captures,
+// byte-identical suppression.
+def_node_matcher!(is_rails_const, "(const nil? :Rails)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -203,7 +216,8 @@ fn is_basic_literal(kind: &NodeKind) -> bool {
 /// True if `node` is `Rails.cache` — the well-known Rails lazy-cache receiver
 /// that should not be converted (it relies on block-lazy evaluation).
 fn is_rails_cache(node: NodeId, cx: &Cx<'_>) -> bool {
-    // Shape: send :cache on (const :Rails nil)
+    // `(const nil? :Rails)` — top-level only (`::` collapses to
+    // `Const{scope:None}`). Namespaced still flags.
     let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
         return false;
     };
@@ -216,11 +230,7 @@ fn is_rails_cache(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(recv) = receiver.get() else {
         return false;
     };
-    matches!(
-        *cx.kind(recv),
-        NodeKind::Const { name, scope, .. }
-            if cx.symbol_str(name) == "Rails" && scope.get().is_none()
-    )
+    is_rails_const(recv, cx)
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +440,39 @@ mod tests {
         // Rails.cache.fetch should not be flagged.
         test::<RedundantFetchBlock>()
             .expect_no_offenses("Rails.cache.fetch(:key) { 'value' }\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.28): pin the exact node set
+    // the hand-rolled `is_rails_cache` (`Send` :cache on `Const Rails`
+    // nil-only) matches, so the verbatim `(const nil? :Rails)` inner refactor
+    // can be proven equivalent. `::Rails` collapses to `Const{scope:None}`:
+    // `nil?` covers bare + `::` (both skip, pinned by
+    // `boundary_accepts_cbase_rails_cache`). Namespaced `Foo::Rails` still
+    // flags (pinned by `boundary_flags_namespaced_rails_cache`, preserving
+    // the current gap vs upstream `(const _ :Rails)` which would skip).
+    // `Send`-only inner matches `is_rails_cache` `Send` check (csend
+    // `Rails&.cache` still flags, pinned by `boundary_flags_csend_rails_cache`).
+
+    #[test]
+    fn boundary_accepts_cbase_rails_cache() {
+        test::<RedundantFetchBlock>()
+            .expect_no_offenses("::Rails.cache.fetch(:key) { 5 }\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_rails_cache() {
+        test::<RedundantFetchBlock>().expect_offense(indoc! {r#"
+            Foo::Rails.cache.fetch(:key) { 5 }
+                             ^^^^^^^^^^^^^^^^^ Use `fetch(:key, 5)` instead of `fetch(:key) { 5 }`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_rails_cache() {
+        test::<RedundantFetchBlock>().expect_offense(indoc! {r#"
+            Rails&.cache.fetch(:key) { 5 }
+                         ^^^^^^^^^^^^^^^^^ Use `fetch(:key, 5)` instead of `fetch(:key) { 5 }`.
+        "#});
     }
 
     #[test]
