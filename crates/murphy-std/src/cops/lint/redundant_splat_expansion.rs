@@ -17,7 +17,25 @@
 //!   `Array.new` offenses are not autocorrected.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Lint/RedundantSplatExpansion` `array_new?` inner is
+// `(send (const {nil? cbase} :Array) :new ...)` (send-only upstream, plus a
+// block form we exclude to preserve equivalence).
+// In Murphy `::Array` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_array_new_splat`). Namespaced
+// `Foo::Array` still accepts (pinned by
+// `boundary_accepts_namespaced_array_new_splat`). `call` covers `Send` +
+// `Csend`, matching the generic `method_name`+`call_receiver` dispatch
+// (pinned by `boundary_flags_csend_array_new_splat` per DuplicateRequire /
+// TallyMethod precedent). The block form
+// `(block (send (const {nil? cbase} :Array) :new ...) ...)` stays out:
+// `is_array_new` is send-only in Murphy (equivalence-preserving, not a
+// parity fix).
+def_node_matcher!(
+    is_array_new_matcher,
+    "(call (const nil? :Array) :new ...)"
+);
 
 const MSG: &str = "Replace splat expansion with comma separated values.";
 const ARRAY_PARAM_MSG: &str = "Pass array contents as separate arguments.";
@@ -140,11 +158,9 @@ fn assignment_value_is(node: NodeId, value: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn is_array_new(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.method_name(node), Some("new"))
-        && cx
-            .call_receiver(node)
-            .get()
-            .is_some_and(|recv| cx.is_global_const(recv, "Array"))
+    // `(call (const nil? :Array) :new ...)` (`Array` / `::Array`,
+    // top-level only). `call` covers `Send` + `Csend`.
+    is_array_new_matcher(node, cx)
 }
 
 murphy_plugin_api::submit_cop!(RedundantSplatExpansion);
@@ -186,5 +202,35 @@ mod tests {
     #[test]
     fn does_not_correct_array_new_splat_in_call() {
         test::<RedundantSplatExpansion>().expect_no_corrections("do_something(*Array.new)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.9): pin the exact node set
+    // the hand-rolled `is_global_const` guard matches, so the verbatim
+    // `(call (const nil? :Array) :new ...)` refactor can be proven
+    // equivalent. `::Array` collapses to `Const{scope:None}` in Murphy: `nil?`
+    // covers bare + `::`. Namespaced `Foo::Array` still accepts; `call`
+    // covers `Send` + `Csend` (generic `method_name`+`call_receiver`
+    // dispatch, not `#[on_node(kind="send")]`).
+
+    #[test]
+    fn boundary_flags_cbase_array_new_splat() {
+        test::<RedundantSplatExpansion>().expect_offense(indoc! {r#"
+            do_something(*::Array.new)
+                         ^^^^^^^^^^^^ Replace splat expansion with comma separated values.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_array_new_splat() {
+        test::<RedundantSplatExpansion>().expect_no_offenses("do_something(*Foo::Array.new)\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_array_new_splat() {
+        // `&.` is a `csend` node; `call` covers `Send` + `Csend`.
+        test::<RedundantSplatExpansion>().expect_offense(indoc! {r#"
+            do_something(*Array&.new)
+                         ^^^^^^^^^^^ Replace splat expansion with comma separated values.
+        "#});
     }
 }
