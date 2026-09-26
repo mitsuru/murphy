@@ -46,7 +46,7 @@
 //! rand(1..6)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop, def_node_matcher};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -104,6 +104,18 @@ fn extract_rand_call(node: NodeId, cx: &Cx<'_>) -> Option<RandCall> {
     Some(RandCall { node, left, right })
 }
 
+// RuboCop parity: `Style/RandomWithOffset` rand-call receiver inner is
+// `{nil? (const {nil? cbase} :Random) (const {nil? cbase} :Kernel)}`
+// (top-level only). In Murphy `::Random` / `::Kernel` collapse to Const scope
+// None, so `nil?` covers bare + `::` (pinned by
+// `boundary_flags_cbase_random_rand_plus_int` /
+// `boundary_flags_cbase_kernel_rand_plus_int`), namespaced `My::Random` still
+// rejects (pinned by `accepts_namespaced_random_rand`). The bare (`nil`)
+// receiver arm stays hand-rolled; the inner rand call stays Send-only, so
+// `&.` inners stay silent (pinned by `boundary_ignores_csend_inner_rand`).
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_rand_const, "(const nil? {:Random :Kernel})");
+
 /// Check whether an optional receiver is nil, or a top-level `Random`/`Kernel` constant.
 ///
 /// `My::Random` (scope is `Some`) is excluded because it may not implement the
@@ -112,18 +124,7 @@ fn extract_rand_call(node: NodeId, cx: &Cx<'_>) -> Option<RandCall> {
 fn is_rand_receiver(recv: OptNodeId, cx: &Cx<'_>) -> bool {
     match recv.get() {
         None => true,
-        Some(r) => match cx.kind(r) {
-            NodeKind::Const { name, scope } => {
-                // Only allow bare Random/Kernel (scope == None).
-                // My::Random has scope == Some(_) and is excluded.
-                if scope.get().is_some() {
-                    return false;
-                }
-                let s = cx.symbol_str(*name);
-                s == "Random" || s == "Kernel"
-            }
-            _ => false,
-        },
+        Some(r) => is_rand_const(r, cx),
     }
 }
 
@@ -448,6 +449,41 @@ mod tests {
     fn accepts_namespaced_random_rand() {
         // My::Random is not stdlib Random; do not flag it.
         test::<RandomWithOffset>().expect_no_offenses("My::Random.rand(6) + 1\n");
+    }
+
+    // --- Boundary characterization (murphy-pz9l): pin the exact node set
+    // the hand-rolled `is_rand_receiver` (nil receiver, or bare `Random` /
+    // `Kernel` const with nil scope) matches, so the verbatim
+    // `(const nil? {:Random :Kernel})` refactor can be proven equivalent.
+    // `::Random` / `::Kernel` collapse to Const scope None, so they flag;
+    // the inner rand call is Send-only, so `&.` inners stay silent.
+
+    #[test]
+    fn boundary_flags_cbase_random_rand_plus_int() {
+        test::<RandomWithOffset>().expect_correction(
+            indoc! {"
+                ::Random.rand(6) + 1
+                ^^^^^^^^^^^^^^^^^^^^ Prefer ranges when generating random numbers instead of integers with offsets.
+            "},
+            "::Random.rand(1..6)\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_kernel_rand_plus_int() {
+        test::<RandomWithOffset>().expect_correction(
+            indoc! {"
+                ::Kernel.rand(6) + 1
+                ^^^^^^^^^^^^^^^^^^^^ Prefer ranges when generating random numbers instead of integers with offsets.
+            "},
+            "::Kernel.rand(1..6)\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_csend_inner_rand() {
+        // Inner `&.` is csend; `extract_rand_call` requires Send.
+        test::<RandomWithOffset>().expect_no_offenses("Random&.rand(6) + 1\n");
     }
 }
 murphy_plugin_api::submit_cop!(RandomWithOffset);
