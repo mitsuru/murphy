@@ -50,7 +50,24 @@
 //!   (RuboCop's `return unless metadata.hash_type?`) is flagged but NOT corrected.
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop, def_node_matcher};
+
+// RuboCop parity: `GemspecHelp` `gem_specification?` is
+// `(block (send (const (const {cbase nil?} :Gem) :Specification) :new)
+// (args (arg $_)) ...)`. Murphy splits the block/args walk
+// (`gem_specification_block_var`) from the call check, so the verbatim port
+// covers the call part only:
+// `(call (const (const nil? :Gem) :Specification) :new ...)`.
+// In Murphy `::Gem` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both flag, pinned by `boundary_flags_cbase_gem_specification`).
+// Namespaced `Foo::Gem` is not top-level, so no block var → silent (pinned by
+// `boundary_ignores_namespaced_gem_specification`). `call` covers `Send` +
+// `Csend`, matching the generic `method_name`+`call_receiver` dispatch
+// (pinned by `boundary_flags_csend_gem_specification`).
+def_node_matcher!(
+    gem_specification_new,
+    "(call (const (const nil? :Gem) :Specification) :new ...)"
+);
 
 #[derive(Default)]
 pub struct RequireMFA;
@@ -135,11 +152,10 @@ fn gem_specification_block_var<'a>(block: NodeId, cx: &Cx<'a>) -> Option<&'a str
         return None;
     }
     let call = cx.block_call(block).get()?;
-    if cx.method_name(call) != Some("new") {
-        return None;
-    }
-    let receiver = cx.call_receiver(call).get()?;
-    if cx.const_name(receiver).as_deref() != Some("Gem::Specification") {
+    // `(call (const (const nil? :Gem) :Specification) :new ...)`
+    // (`Gem::Specification` / `::Gem::Specification`, top-level only).
+    // `call` covers `Send` + `Csend`.
+    if !gem_specification_new(call, cx) {
         return None;
     }
     let args = cx.block_arguments(block).get()?;
@@ -632,6 +648,41 @@ mod tests {
         test::<RequireMFA>().expect_no_corrections(indoc! {r#"
             Gem::Specification.new do |spec|
             spec.metadata['rubygems_mfa_required'] = 'true'
+            end
+        "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.15): pin the exact node set
+    // the hand-rolled `gem_specification_block_var` (`const_name(Gem::Specification)`
+    // + method `new`) matches, so the verbatim
+    // `(call (const (const nil? :Gem) :Specification) :new ...)` refactor can
+    // be proven equivalent. `::Gem` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both flag). Namespaced `Foo::Gem` is not top-level,
+    // so no block handling → silent. `call` covers `Send` + `Csend`, matching
+    // the generic `method_name`+`call_receiver` dispatch.
+
+    #[test]
+    fn boundary_flags_cbase_gem_specification() {
+        test::<RequireMFA>().expect_offense(indoc! {r#"
+            ::Gem::Specification.new do |spec|
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `metadata['rubygems_mfa_required']` must be set to `'true'`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_gem_specification() {
+        test::<RequireMFA>().expect_no_offenses(indoc! {r#"
+            Foo::Gem::Specification.new do |spec|
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_gem_specification() {
+        test::<RequireMFA>().expect_offense(indoc! {r#"
+            Gem::Specification&.new do |spec|
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `metadata['rubygems_mfa_required']` must be set to `'true'`.
             end
         "#});
     }
