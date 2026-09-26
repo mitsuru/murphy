@@ -10,6 +10,16 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the call head `(call _ {:any? :empty? :none? :one?} ...)`
+//!   (murphy-s1yc.21): `call` = `{send csend}` covers safe-navigation
+//!   (`arr.select { }&.any?`), mirroring RuboCop
+//!   `alias on_csend on_send` plus `RESTRICT_ON_SEND [any? empty? none?
+//!   one?]`; the wildcard receiver binds an absent or present receiver per
+//!   murphy-if9y; trailing `...` absorbs any argument list. The receiver
+//!   plus inner `select`/`filter`/`find_all` shape guards below apply
+//!   separately (upstream outer is `(call ... {:any? :empty? ...})` in
+//!   `select_predicate?`).
+//!
 //!   Covered patterns:
 //!     - `select { block }.any?` → `any? { block }`
 //!     - `select { block }.empty?` → `none? { block }`
@@ -44,7 +54,20 @@
 //! arr.select { |x| x > 1 }.any?(&:odd?)  # predicate has args
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.21):
+// `(call _ {:any? :empty? :none? :one?} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`arr.select { }&.any?`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND [any? empty? none?
+// one?]`. The `_` receiver binds an absent or present receiver per
+// murphy-if9y; trailing `...` absorbs any argument list, so the receiver
+// plus inner-`select` shape guards below apply separately (upstream outer
+// is `(call ... {:any? :empty? ...})` in `select_predicate?`).
+def_node_matcher!(
+    redundant_filter_chain_call,
+    "(call _ {:any? :empty? :none? :one?} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -79,24 +102,29 @@ fn replacement_for(predicate: &str) -> &'static str {
     safe_autocorrect = false,
 )]
 impl RedundantFilterChain {
-    #[on_node(kind = "send", methods = ["any?", "empty?", "none?", "one?"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if !matches!(cx.symbol_str(method), "any?" | "empty?" | "none?" | "one?") {
-            return;
-        }
         check(node, cx);
     }
 }
 
 fn check(predicate_node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:any? :empty? :none? :one?} ...)` head: filters to
+    // `any?` / `empty?` / `none?` / `one?` calls on either send or csend
+    // (safe-navigation), with any receiver (absent or present). Without
+    // this, an unrelated call on a select receiver (e.g.
+    // `arr.select(&:odd?).to_s`) would run check on every call node instead
+    // of being rejected by the method set up front.
+    if !redundant_filter_chain_call(predicate_node, cx) {
+        return;
+    }
+    // Must have a receiver. Mirrors the pre-port hand-rolled guard;
+    // `_` binds an absent receiver, so bare `any?` is accepted here.
     // Predicate must have no arguments.
     let pred_args = cx.call_arguments(predicate_node);
     if !pred_args.is_empty() {
@@ -180,7 +208,10 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
     match *cx.kind(receiver) {
         // Shape 1: block wrapping a select call (send or csend inside the block).
         NodeKind::Block { call, .. } => {
-            if cx.method_name(call).is_some_and(|n| FILTER_METHODS.contains(&n)) {
+            if cx
+                .method_name(call)
+                .is_some_and(|n| FILTER_METHODS.contains(&n))
+            {
                 Some((call, true))
             } else {
                 None
@@ -188,7 +219,10 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
         }
         // Shape 1b: numblock wrapping a select call.
         NodeKind::Numblock { send: call, .. } => {
-            if cx.method_name(call).is_some_and(|n| FILTER_METHODS.contains(&n)) {
+            if cx
+                .method_name(call)
+                .is_some_and(|n| FILTER_METHODS.contains(&n))
+            {
                 Some((call, true))
             } else {
                 None
@@ -196,7 +230,10 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
         }
         // Shape 1c: itblock wrapping a select call.
         NodeKind::Itblock { send: call, .. } => {
-            if cx.method_name(call).is_some_and(|n| FILTER_METHODS.contains(&n)) {
+            if cx
+                .method_name(call)
+                .is_some_and(|n| FILTER_METHODS.contains(&n))
+            {
                 Some((call, true))
             } else {
                 None
@@ -212,7 +249,9 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
             // One block-pass arg: `arr.select(&:foo).any?` — recognized.
             if args_list.len() == 1
                 && matches!(cx.kind(args_list[0]), NodeKind::BlockPass(_))
-                && cx.method_name(receiver).is_some_and(|n| FILTER_METHODS.contains(&n))
+                && cx
+                    .method_name(receiver)
+                    .is_some_and(|n| FILTER_METHODS.contains(&n))
             {
                 Some((receiver, false))
             } else {
@@ -446,6 +485,53 @@ mod tests {
             "},
             "arr.any? { _1 > 1 }\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.21): pin the exact node set the
+    // dual send (methods = ["any?", "empty?", "none?", "one?"]) +
+    // manual-csend-filter dispatch matches, so the verbatim
+    // `(call _ {:any? :empty? :none? :one?} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send` plus `RESTRICT_ON_SEND [any? empty? none?
+    // one?]`); trailing `...` absorbs any argument list, so the receiver
+    // plus inner-`select` shape guards below apply separately.
+
+    #[test]
+    fn s1yc21_flags_csend_block_corrects() {
+        // Safe navigation on outer `any?`: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        // (Pre-port the `csend` handler filters `any?` manually because
+        // `methods = [...]` is only valid for `kind = "send"`; the verbatim
+        // head collapses the workaround.)
+        test::<RedundantFilterChain>().expect_correction(
+            indoc! {r#"
+                arr.select { |x| x > 1 }&.any?
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `any?` instead of `select.any?`.
+            "#},
+            "arr.any? { |x| x > 1 }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc21_accepts_bare_any() {
+        // Bare receiver: `_` binds an absent receiver per murphy-if9y, so
+        // the head matches and the complementary receiver guard accepts.
+        test::<RedundantFilterChain>().expect_no_offenses("any?\n");
+    }
+
+    #[test]
+    fn s1yc21_accepts_no_block_inner_select() {
+        // Inner `select` without block or block-pass: trailing `...`
+        // absorbs the outer argument list so the head matches, and the
+        // complementary inner-shape guard accepts (upstream inner requires
+        // a block or block-pass).
+        test::<RedundantFilterChain>().expect_no_offenses("arr.select.any?\n");
+    }
+
+    #[test]
+    fn s1yc21_accepts_unrelated_method() {
+        // `to_s` is outside the verbatim method set, so the head rejects.
+        test::<RedundantFilterChain>().expect_no_offenses("arr.select(&:odd?).to_s\n");
     }
 }
 
