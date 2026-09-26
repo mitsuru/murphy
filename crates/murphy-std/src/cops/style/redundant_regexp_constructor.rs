@@ -30,7 +30,21 @@
 //! 2. Delete the closing `)` — the bytes from the inner literal's end to the
 //!    send's end.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RedundantRegexpConstructor` `redundant_regexp_constructor`
+// is `(send (const {nil? cbase} :Regexp) {:new :compile} $(regexp ...))`.
+// In Murphy `::Regexp` collapses to `Const{scope:None}`, so a single `nil?`
+// scope covers bare and `::`-prefixed forms — equivalent to the prior
+// hand-rolled const-scope check. All upstream matchers are `send`-only; the
+// explicit `Send` guard plus `#[on_node(kind = "send")]` never dispatches on
+// `csend` (pinned by `boundary_ignores_csend_regexp_new` +
+// `boundary_ignores_csend_regexp_compile`). The `$(regexp ...)` capture stays
+// hand-rolled below (single regexp-literal arg); cbase + namespaced pre-existed.
+def_node_matcher!(
+    regexp_new_or_compile,
+    "(send (const nil? :Regexp) {:new :compile} ...)"
+);
 
 const MSG: &str = "Remove the redundant `Regexp.%<method>s`.";
 
@@ -53,31 +67,16 @@ impl RedundantRegexpConstructor {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
+    let NodeKind::Send { method, args, .. } = *cx.kind(node) else {
         return;
     };
 
-    // Receiver must be `Regexp` constant with nil or cbase scope.
-    let Some(recv_id) = receiver.get() else {
-        return;
-    };
-    let NodeKind::Const { scope, name } = *cx.kind(recv_id) else {
-        return;
-    };
-    if cx.symbol_str(name) != "Regexp" {
+    // `(send (const nil? :Regexp) {:new :compile} ...)`
+    // (`Regexp.new` / `Regexp.compile` / `::Regexp`, top-level only, send-only).
+    // The `$(regexp ...)` capture stays hand-rolled below.
+    if !regexp_new_or_compile(node, cx) {
         return;
     }
-    // Allow nil scope (bare `Regexp`) and cbase scope (`::Regexp`), but reject
-    // namespaced constants like `Foo::Regexp`.
-    if let Some(scope_id) = scope.get()
-        && !matches!(cx.kind(scope_id), NodeKind::Cbase) {
-            return;
-        }
 
     // Exactly one argument that is a regexp literal.
     let arg_list = cx.list(args);
@@ -210,6 +209,25 @@ mod tests {
     #[test]
     fn accepts_regexp_compile_with_string() {
         test::<RedundantRegexpConstructor>().expect_no_offenses("Regexp.compile('regexp')\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.16): pin the exact node set
+    // the hand-rolled `Regexp` const check (nil/cbase scope, reject namespaced)
+    // + method `new`/`compile` matches, so the verbatim
+    // `(send (const nil? :Regexp) {:new :compile} ...)` refactor can be proven
+    // equivalent. `::Regexp` collapses to `Const{scope:None}`: `nil?` covers
+    // bare + `::` (both flag, cbase + namespaced pre-existed). `send` covers
+    // `Send` only, matching the `Send`-only dispatch (no `csend` handler, so
+    // `&.` is silent).
+
+    #[test]
+    fn boundary_ignores_csend_regexp_new() {
+        test::<RedundantRegexpConstructor>().expect_no_offenses("Regexp&.new(/re/)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_regexp_compile() {
+        test::<RedundantRegexpConstructor>().expect_no_offenses("Regexp&.compile(/re/)\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantRegexpConstructor);

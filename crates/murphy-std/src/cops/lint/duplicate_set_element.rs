@@ -26,7 +26,28 @@
 
 use std::collections::HashSet;
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// RuboCop parity: `Lint/DuplicateSetElement` `set_init_elements` is
+// `{(send (const {nil? cbase} {:Set :SortedSet}) :[] ...) (send (const {nil? cbase} {:Set :SortedSet}) :new (array ...)) (call (array ...) :to_set)}`.
+// Murphy splits the const-receiver arms (`Set.new`/`Set[]`/`SortedSet`) from the
+// array-receiver `to_set` arm, so the verbatim port covers the const part only:
+// `(call (const nil? {:Set :SortedSet}) {:new :[]} ...)`.
+// In Murphy `::Set` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both flag, pinned by `boundary_flags_cbase_set_bracket` +
+// `boundary_flags_cbase_set_new`). Namespaced `Foo::Set` is not top-level, so
+// silent (pinned by `boundary_ignores_namespaced_set_bracket` +
+// `boundary_ignores_namespaced_set_new`). `call` covers `Send` + `Csend`,
+// matching the generic `method_name`+`call_receiver` dispatch via both
+// `check_send`+`check_csend` (csend flags, pinned by
+// `boundary_flags_csend_set_new` + `boundary_flags_csend_set_bracket`), per the
+// `Lint/DuplicateRequire` precedent. The `(array ...)` unwrap for `new` and the
+// `to_set` branch stay hand-rolled below; `set_class_name` now only extracts
+// the `Set`/`SortedSet` name for the message.
+def_node_matcher!(
+    set_new_or_index,
+    "(call (const nil? {:Set :SortedSet}) {:new :[]} ...)"
+);
 
 #[derive(Default)]
 pub struct DuplicateSetElement;
@@ -62,16 +83,25 @@ impl DuplicateSetElement {
 fn set_construction<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a [NodeId], &'static str)> {
     let method = cx.method_name(node)?;
     match method {
-        // `Set[a, b, a]` / `SortedSet[a, b, a]` — receiver is the const,
-        // args are the elements.
+        // `(call (const nil? {:Set :SortedSet}) {:new :[]} ...)`
+        // (`Set[...]` / `SortedSet[...]` / `::`, top-level only, send+csend).
+        // The element list is the call args; `set_class_name` extracts the
+        // name for the message.
         "[]" => {
+            if !set_new_or_index(node, cx) {
+                return None;
+            }
             let receiver = cx.call_receiver(node).get()?;
             let class_name = set_class_name(receiver, cx)?;
             Some((cx.call_arguments(node), class_name))
         }
-        // `Set.new([a, b, a])` / `SortedSet.new([…])` — receiver is the const,
-        // the single argument is an array literal of elements.
+        // `(call (const nil? {:Set :SortedSet}) {:new :[]} ...)` `new` arm
+        // (`Set.new([...])` / `SortedSet.new([...])` / `::`, top-level only,
+        // send+csend). The single `(array ...)` unwrap stays hand-rolled below.
         "new" => {
+            if !set_new_or_index(node, cx) {
+                return None;
+            }
             let receiver = cx.call_receiver(node).get()?;
             let class_name = set_class_name(receiver, cx)?;
             let [arg] = cx.call_arguments(node) else {
@@ -243,5 +273,57 @@ mod tests {
     #[test]
     fn ignores_unrelated_constant_bracket() {
         test::<DuplicateSetElement>().expect_no_offenses("Other[:foo, :foo]\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.16): pin the exact node set
+    // the hand-rolled `set_class_name` (`is_global_const(Set/SortedSet)` +
+    // method `new`/`[]`) matches, so the verbatim
+    // `(call (const nil? {:Set :SortedSet}) {:new :[]} ...)` refactor can be
+    // proven equivalent. `::Set` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both flag). Namespaced `Foo::Set` is not top-level,
+    // so silent. `call` covers `Send` + `Csend`, matching the generic
+    // `method_name`+`call_receiver` dispatch via both `check_send`+`check_csend`
+    // (csend flags). The `to_set` branch (array receiver) stays hand-rolled.
+
+    #[test]
+    fn boundary_flags_cbase_set_bracket() {
+        test::<DuplicateSetElement>().expect_offense(indoc! {r#"
+            ::Set[:foo, :bar, :foo]
+                              ^^^^ Remove the duplicate element in Set.
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_cbase_set_new() {
+        test::<DuplicateSetElement>().expect_offense(indoc! {r#"
+            ::Set.new([:foo, :bar, :foo])
+                                   ^^^^ Remove the duplicate element in Set.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_set_bracket() {
+        test::<DuplicateSetElement>().expect_no_offenses("Foo::Set[:foo, :bar, :foo]\n");
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_set_new() {
+        test::<DuplicateSetElement>().expect_no_offenses("Foo::Set.new([:foo, :bar, :foo])\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_set_new() {
+        test::<DuplicateSetElement>().expect_offense(indoc! {r#"
+            Set&.new([:foo, :bar, :foo])
+                                  ^^^^ Remove the duplicate element in Set.
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_set_bracket() {
+        test::<DuplicateSetElement>().expect_offense(indoc! {r#"
+            Set&.[](:foo, :bar, :foo)
+                                ^^^^ Remove the duplicate element in Set.
+        "#});
     }
 }
