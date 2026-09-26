@@ -53,7 +53,17 @@
 //! Replaces `ENV['X']` with `ENV.fetch('X', nil)` (DefaultToNil: true)
 //! or `ENV.fetch('X')` (DefaultToNil: false).
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/FetchEnvVar` `env_with_bracket?` is
+// `(send (const nil? :ENV) :[] $_)` (nil-only; `::ENV` is NOT matched in
+// RuboCop). In Murphy `::ENV` collapses to `Const{scope:None}`: `nil?` covers
+// bare + `::` (both flag, pinned by `boundary_flags_cbase_env_bracket`).
+// Namespaced `Foo::ENV` still accepts (pinned by
+// `boundary_ignores_namespaced_env_bracket`). The `:[]` method + 1-arg +
+// `AllowedVars` + allowable-use guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_env_const_matcher, "(const nil? :ENV)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -134,11 +144,10 @@ impl FetchEnvVar {
 }
 
 /// Returns true if the node is `ENV` (nil-scoped only).
+/// Verbatim `(const nil? :ENV)` (nil-only); `::` collapses to
+/// `Const{scope:None}` so `nil?` covers bare + `::`.
 fn is_env_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { name, scope } = *cx.kind(node) else {
-        return false;
-    };
-    cx.symbol_str(name) == "ENV" && scope.get().is_none()
+    is_env_const_matcher(node, cx)
 }
 
 /// Returns true if this `ENV['X']` use is allowable (no offense).
@@ -272,6 +281,35 @@ mod tests {
     #[test]
     fn accepts_env_fetch() {
         test::<FetchEnvVar>().expect_no_offenses("ENV.fetch('X', nil)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.25): pin the exact node set
+    // the hand-rolled `is_env_const` (nil scope only) matches, so the verbatim
+    // `(const nil? :ENV)` refactor can be proven equivalent. `::ENV` collapses
+    // to `Const{scope:None}` in Murphy: `nil?` covers bare + `::` (both flag).
+    // Namespaced `Foo::ENV` is not top-level, so silent. `send` covers `Send`
+    // only, matching the `Send`-only dispatch (no `csend` handler, so `&.` is
+    // silent).
+
+    #[test]
+    fn boundary_flags_cbase_env_bracket() {
+        test::<FetchEnvVar>().expect_correction(
+            indoc! {r#"
+                ::ENV['X']
+                ^^^^^^^^^^ Use `ENV.fetch('X', nil)` instead of `ENV['X']`.
+            "#},
+            "ENV.fetch('X', nil)\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_env_bracket() {
+        test::<FetchEnvVar>().expect_no_offenses("Foo::ENV['X']\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_env_bracket() {
+        test::<FetchEnvVar>().expect_no_offenses("ENV&.[]('X')\n");
     }
 }
 murphy_plugin_api::submit_cop!(FetchEnvVar);

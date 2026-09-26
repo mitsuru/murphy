@@ -48,7 +48,16 @@
 //! array.grep_v(/regexp/)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Style/SelectByRegexp` `creates_hash?` Hash head is
+// `(const _ :Hash)` (any scope). In Murphy `_` covers bare + `::` +
+// namespaced (all suppress, pinned by `boundary_accepts_cbase_hash_new` +
+// `boundary_accepts_namespaced_hash_new`). The `:new` method guard stays
+// hand-rolled (`Hash[]` still flags, pinned by `boundary_flags_hash_bracket`,
+// preserving the current gap vs upstream `{:new :[]}`).
+// Predicate-only, no captures, byte-identical suppression.
+def_node_matcher!(is_hash_const, "(const _ :Hash)");
 
 const MSG: &str = "Prefer `%<replacement>s` to `%<original_method>s` with a regexp match.";
 
@@ -155,27 +164,28 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
         // ENV constant
         NodeKind::Const { name, .. } => cx.symbol_str(name) == "ENV",
         // Send: to_h / to_hash chain, or Hash.new
+        // `(const _ :Hash)` — any scope (bare + `::` + namespaced suppress).
+        // `:new`-only guard stays hand-rolled (`Hash[]` still flags).
         NodeKind::Send { receiver: inner_recv, method, .. } => {
             let mname = cx.symbol_str(method);
             if matches!(mname, "to_h" | "to_hash") {
                 return true;
             }
             if mname == "new"
-                && inner_recv.get().is_some_and(|inner_r| {
-                    matches!(*cx.kind(inner_r), NodeKind::Const { name, .. } if cx.symbol_str(name) == "Hash")
-                })
+                && inner_recv.get().is_some_and(|inner_r| is_hash_const(inner_r, cx))
             {
                 return true;
             }
             false
         }
         // Csend: same checks (receiver is always NodeId for csend)
+        // `(const _ :Hash)` — any scope; `:new`-only guard stays hand-rolled.
         NodeKind::Csend { receiver: inner_recv, method, .. } => {
             let mname = cx.symbol_str(method);
             if matches!(mname, "to_h" | "to_hash") {
                 return true;
             }
-            if mname == "new" && matches!(*cx.kind(inner_recv), NodeKind::Const { name, .. } if cx.symbol_str(name) == "Hash") {
+            if mname == "new" && is_hash_const(inner_recv, cx) {
                 return true;
             }
             false
@@ -546,6 +556,36 @@ mod tests {
     fn accepts_env_constant() {
         test::<SelectByRegexp>()
             .expect_no_offenses("ENV.select { |x| x.match? /regexp/ }\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.25): pin the exact node set
+    // the hand-rolled `Hash` const guards (any scope, no scope check) match,
+    // so the verbatim `(const _ :Hash)` refactor can be proven equivalent.
+    // `_` covers any scope: bare + `::` + namespaced all suppress (no
+    // offense). The `:new` method guard stays hand-rolled (`Hash[]` is NOT
+    // suppressed, preserving the current gap vs upstream `creates_hash?`).
+
+    #[test]
+    fn boundary_accepts_cbase_hash_new() {
+        test::<SelectByRegexp>()
+            .expect_no_offenses("::Hash.new.select { |x| x.match? /regexp/ }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_hash_new() {
+        test::<SelectByRegexp>()
+            .expect_no_offenses("Foo::Hash.new.select { |x| x.match? /regexp/ }\n");
+    }
+
+    #[test]
+    fn boundary_flags_hash_bracket() {
+        // `Hash[]` is NOT suppressed (current gap vs upstream which suppresses
+        // `Hash[]` via `creates_hash?` `{:new :[]}`); predicate-only refactor
+        // preserves the `:new`-only guard, so this still flags.
+        test::<SelectByRegexp>().expect_offense(indoc! {r#"
+            Hash[].select { |x| x.match?(/regexp/) }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+        "#});
     }
 
     #[test]
