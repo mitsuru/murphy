@@ -61,7 +61,27 @@
 //!   is accepted instead.
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RubyVersion, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RubyVersion, cop, def_node_matcher};
+
+// RuboCop parity: `Gemspec/RequiredRubyVersion` `defined_ruby_version` includes
+// `(send (const (const nil? :Gem) :Requirement) :new $str+)` (send-only
+// upstream). Murphy's `extract_ruby_version` matches only `NodeKind::Send` for
+// this arm, so the verbatim port uses `send` to preserve the current node set
+// (per `Lint/DeprecatedOpenSSLConstant` precedent: equivalence-preserving vs
+// hand-rolled, not a RuboCop parity fix).
+// In Murphy `::Gem` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both recognized, cbase clean when matching, pinned by
+// `boundary_cbase_gem_requirement_matching_is_clean` + `gem_requirement_new_*`).
+// Namespaced `Foo::Gem` is not top-level, so unrecognized → `None` → mismatch
+// flags even when matching (pinned by
+// `boundary_flags_namespaced_gem_requirement_even_when_matching`). `send`
+// covers `Send` only, matching the `NodeKind::Send` guard (csend still flags
+// as mismatch even when matching, pinned by
+// `boundary_flags_csend_gem_requirement_even_when_matching`).
+def_node_matcher!(
+    gem_requirement_new,
+    "(send (const (const nil? :Gem) :Requirement) :new ...)"
+);
 
 #[derive(Default)]
 pub struct RequiredRubyVersion;
@@ -201,12 +221,11 @@ fn extract_ruby_version(version_def: NodeId, cx: &Cx<'_>) -> Option<String> {
             detect_constraint_str(elems, cx)?
         }
         NodeKind::Send { .. } => {
-            // `Gem::Requirement.new(str+)`: method `:new`, receiver
-            // `Gem::Requirement`, one or more str arguments.
-            if cx.method_name(version_def)? != "new" {
-                return None;
-            }
-            if !is_gem_requirement_receiver(version_def, cx) {
+            // `(send (const (const nil? :Gem) :Requirement) :new ...)`
+            // (`Gem::Requirement` / `::Gem::Requirement`, top-level only,
+            // send-only). The `$str+` capture stays hand-rolled below (args
+            // must all be `str`); this is predicate-only.
+            if !gem_requirement_new(version_def, cx) {
                 return None;
             }
             let args = cx.call_arguments(version_def);
@@ -233,17 +252,6 @@ fn detect_constraint_str(elems: &[NodeId], cx: &Cx<'_>) -> Option<NodeId> {
         };
         cx.string_str(id).chars().any(|c| c == '>' || c == '=')
     })
-}
-
-/// True iff `node`'s receiver is the `Gem::Requirement` const — RuboCop's
-/// `(const (const nil? :Gem) :Requirement)`. `is_global_const` only matches
-/// single-segment names, so resolve the full path via `const_name` (which
-/// treats a `cbase` root the same as RuboCop's `nil?`).
-fn is_gem_requirement_receiver(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(recv) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    cx.const_name(recv).as_deref() == Some("Gem::Requirement")
 }
 
 /// RuboCop's `str_content.scan(/\d/).first(2).join('.')`: collect the first two
@@ -491,5 +499,51 @@ mod tests {
                                            ^^^^^^^^^^ `required_ruby_version` and `TargetRubyVersion` (3.1, which may be specified in .rubocop.yml) should be equal.
             end
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.15): pin the exact node set
+    // the hand-rolled `is_gem_requirement_receiver` (`const_name(Gem::Requirement)`
+    // + method `new` + Send-only) matches, so the verbatim
+    // `(send (const (const nil? :Gem) :Requirement) :new ...)` refactor can be
+    // proven equivalent. `::Gem` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both recognized, cbase clean when the version
+    // matches the target). Namespaced `Foo::Gem` is not top-level, so the
+    // `Gem::Requirement.new` shape is unrecognized → `None` → mismatch flags
+    // even when the version matches. `send` covers `Send` only, matching the
+    // `NodeKind::Send` guard (csend still flags as mismatch even when matching).
+
+    #[test]
+    fn boundary_cbase_gem_requirement_matching_is_clean() {
+        test::<RequiredRubyVersion>()
+            .with_target_ruby_version(2, 5)
+            .expect_no_offenses(indoc! {r#"
+                Gem::Specification.new do |spec|
+                  spec.required_ruby_version = ::Gem::Requirement.new('>= 2.5.0')
+                end
+            "#});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_gem_requirement_even_when_matching() {
+        test::<RequiredRubyVersion>()
+            .with_target_ruby_version(2, 5)
+            .expect_offense(indoc! {r#"
+                Gem::Specification.new do |spec|
+                  spec.required_ruby_version = Foo::Gem::Requirement.new('>= 2.5.0')
+                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `required_ruby_version` and `TargetRubyVersion` (2.5, which may be specified in .rubocop.yml) should be equal.
+                end
+            "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_gem_requirement_even_when_matching() {
+        test::<RequiredRubyVersion>()
+            .with_target_ruby_version(2, 5)
+            .expect_offense(indoc! {r#"
+                Gem::Specification.new do |spec|
+                  spec.required_ruby_version = Gem::Requirement&.new('>= 2.5.0')
+                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `required_ruby_version` and `TargetRubyVersion` (2.5, which may be specified in .rubocop.yml) should be equal.
+                end
+            "#});
     }
 }
