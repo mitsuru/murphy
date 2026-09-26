@@ -87,7 +87,24 @@
 //!   `(send (lvar ...) ...)` pattern does not match either.
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `GemspecHelp` `gem_specification?` is
+// `(block (send (const (const {cbase nil?} :Gem) :Specification) :new)
+// (args (arg $_)) ...)`. Murphy splits the block/args walk (`gem_specification_block_var`)
+// from the call check (`is_gem_specification_call`), so the verbatim port
+// covers the call part only:
+// `(call (const (const nil? :Gem) :Specification) :new ...)`.
+// In Murphy `::Gem` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `flags_with_cbase_gem_specification`). Namespaced
+// `Foo::Gem` still yields no block var (pinned by
+// `boundary_ignores_namespaced_gem_specification`). `call` covers `Send` +
+// `Csend`, matching the generic `method_name`+`call_receiver` dispatch
+// (pinned by `boundary_flags_csend_gem_specification`).
+def_node_matcher!(
+    gem_specification_new,
+    "(call (const (const nil? :Gem) :Specification) :new ...)"
+);
 
 #[derive(Default)]
 pub struct DependencyVersion;
@@ -293,28 +310,10 @@ fn is_gem_specification_call(call: Option<NodeId>, cx: &Cx<'_>) -> bool {
     let Some(call) = call else {
         return false;
     };
-    if cx.method_name(call) != Some("new") {
-        return false;
-    }
-    let Some(receiver) = cx.call_receiver(call).get() else {
-        return false;
-    };
-    is_gem_specification_const(receiver, cx)
-}
-
-/// True when `node` is the const `Gem::Specification` or `::Gem::Specification`,
-/// mirroring RuboCop's `(const (const {cbase nil?} :Gem) :Specification)`.
-fn is_gem_specification_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { scope, name } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.symbol_str(name) != "Specification" {
-        return false;
-    }
-    let Some(scope) = scope.get() else {
-        return false;
-    };
-    cx.is_global_const(scope, "Gem")
+    // `(call (const (const nil? :Gem) :Specification) :new ...)`
+    // (`Gem::Specification` / `::Gem::Specification`, top-level only).
+    // `call` covers `Send` + `Csend`.
+    gem_specification_new(call, cx)
 }
 
 murphy_plugin_api::submit_cop!(DependencyVersion);
@@ -585,5 +584,34 @@ mod tests {
                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Dependency version specification is required.
                 end
             "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.14): pin the exact node set
+    // the hand-rolled `is_gem_specification_call` (`is_global_const(Gem)` +
+    // method `new`) matches, so the verbatim
+    // `(call (const (const nil? :Gem) :Specification) :new ...)` refactor can
+    // be proven equivalent. `::Gem` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both flag, cbase pinned by
+    // `flags_with_cbase_gem_specification`). Namespaced `Foo::Gem` is not
+    // top-level, so no block var → silent. `call` covers `Send` + `Csend`,
+    // matching the generic `method_name`+`call_receiver` dispatch.
+
+    #[test]
+    fn boundary_ignores_namespaced_gem_specification() {
+        test::<DependencyVersion>().expect_no_offenses(indoc! {r#"
+            Foo::Gem::Specification.new do |spec|
+              spec.add_dependency 'rake'
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_gem_specification() {
+        test::<DependencyVersion>().expect_offense(indoc! {r#"
+            Gem::Specification&.new do |spec|
+              spec.add_dependency 'rake'
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^ Dependency version specification is required.
+            end
+        "#});
     }
 }
