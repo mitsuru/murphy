@@ -14,6 +14,15 @@
 //!   an Enumerable. Murphy does not have a Safe/SafeAutoCorrect cop-level
 //!   attribute yet; the unsafe nature is documented here only.
 //!
+//!   Verbatim port of the call head `(call _ :to_h ...)`
+//!   (murphy-s1yc.19): `call` = `{send csend}` covers safe-navigation
+//!   (`something.map { }&.to_h`), mirroring RuboCop
+//!   `alias on_csend on_send` plus `RESTRICT_ON_SEND [to_h]`; the wildcard
+//!   receiver binds an absent or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list. The receiver plus inner
+//!   `map`/`collect` shape guards below apply separately (upstream outer is
+//!   `(call ... :to_h)` in `map_to_h`).
+//!
 //!   Handled patterns (mirrors RuboCop's node matcher):
 //!     1. Block form:      `something.map { |v| [v, v * 2] }.to_h`
 //!     2. Block-pass form: `something.map(&:foo).to_h`
@@ -64,7 +73,16 @@
 //! 2. (If map has a dot) Replace that dot with the to_h dot source.
 //! 3. Rename `map`/`collect` selector to `to_h`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.19):
+// `(call _ :to_h ...)` — `call` = `{send csend}` covers safe-navigation
+// (`something.map { }&.to_h`), mirroring RuboCop `alias on_csend on_send`
+// plus `RESTRICT_ON_SEND [to_h]`. The `_` receiver binds an absent or
+// present receiver per murphy-if9y; trailing `...` absorbs any argument
+// list, so the receiver plus inner-`map` shape guards below apply
+// separately (upstream outer is `(call ... :to_h)` in `map_to_h`).
+def_node_matcher!(map_to_hash_call, "(call _ :to_h ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -79,16 +97,14 @@ pub struct MapToHash;
     options = NoOptions,
 )]
 impl MapToHash {
-    #[on_node(kind = "send", methods = ["to_h"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) == Some("to_h") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -137,6 +153,17 @@ fn match_map_to_hash(to_h_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
 }
 
 fn check(to_h_node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ :to_h ...)` head: filters to `to_h` calls on
+    // either send or csend (safe-navigation), with any receiver
+    // (absent or present). Without this, an unrelated call on a map
+    // receiver (e.g. `something.map(&:foo).to_s`) would run check
+    // on every call node instead of being rejected by the method set
+    // up front.
+    if !map_to_hash_call(to_h_node, cx) {
+        return;
+    }
+    // Must have a receiver. Mirrors the pre-port hand-rolled guard;
+    // `_` binds an absent receiver, so bare `to_h` is accepted here.
     // Guard: skip if to_h already has a block attached.
     if let Some(parent) = cx.parent(to_h_node).get()
         && let NodeKind::Block { call, .. } = *cx.kind(parent)
@@ -309,6 +336,52 @@ mod tests {
             "#},
             "something&.to_h { |v| [v, v] }\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.19): pin the exact node set the
+    // dual send (methods = ["to_h"]) + manual-csend-filter dispatch matches,
+    // so the verbatim `(call _ :to_h ...)` port can be proven byte-identical.
+    // `call` covers safe-navigation (mirroring upstream `alias on_csend
+    // on_send` plus `RESTRICT_ON_SEND [to_h]`); trailing `...` absorbs any
+    // argument list, so the receiver plus inner-`map` shape guards below
+    // apply separately.
+
+    #[test]
+    fn s1yc19_flags_csend_block_pass_corrects() {
+        // Safe navigation on outer `to_h`: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        // (Pre-port the `csend` handler filters `to_h` manually because
+        // `methods = [...]` is only valid for `kind = "send"`; the verbatim
+        // head collapses the workaround.)
+        test::<MapToHash>().expect_correction(
+            indoc! {r#"
+                something.map(&:foo)&.to_h
+                          ^^^ Pass a block to `to_h` instead of calling `map&.to_h`.
+            "#},
+            "something&.to_h(&:foo)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc19_accepts_bare_to_h() {
+        // Bare receiver: `_` binds an absent receiver per murphy-if9y, so
+        // the head matches and the complementary receiver guard accepts.
+        test::<MapToHash>().expect_no_offenses("to_h\n");
+    }
+
+    #[test]
+    fn s1yc19_accepts_no_arg_inner_map() {
+        // Inner `map` without arguments: trailing `...` absorbs the outer
+        // argument list so the head matches, and the complementary
+        // one-`block_pass`-arg guard accepts (upstream inner requires
+        // exactly `(block_pass sym)`).
+        test::<MapToHash>().expect_no_offenses("something.map.to_h\n");
+    }
+
+    #[test]
+    fn s1yc19_accepts_unrelated_method() {
+        // `to_s` is outside the verbatim method set, so the head rejects.
+        test::<MapToHash>().expect_no_offenses("something.map(&:foo).to_s\n");
     }
 
     #[test]
