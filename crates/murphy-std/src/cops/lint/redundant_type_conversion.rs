@@ -55,6 +55,17 @@ def_node_matcher!(is_array_ctor_call, "(call (const nil? :Array) {:new :[]} ...)
 def_node_matcher!(is_hash_ctor_call, "(call (const nil? :Hash) {:new :[]} ...)");
 def_node_matcher!(is_set_ctor_call, "(call (const nil? :Set) {:new :[]} ...)");
 
+// RuboCop parity: `Lint/RedundantTypeConversion` `type_constructor?` const
+// inner is `(const {cbase nil?} :Kernel)` (top-level only, bare-nil arm
+// stays hand-rolled). In Murphy `::Kernel` collapses to Const scope None, so
+// `nil?` covers bare + `::` (pinned by `boundary_flags_cbase_kernel_*`);
+// namespaced `Foo::Kernel` still rejects (pinned by
+// `boundary_ignores_namespaced_kernel_string_to_s`). The bare (`nil`)
+// receiver arm + `%1` method dispatch stay hand-rolled in
+// `kernel_constructor` below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_kernel_const, "(const nil? :Kernel)");
+
 #[derive(Default)]
 pub struct RedundantTypeConversion;
 
@@ -182,7 +193,7 @@ fn kernel_constructor(node: NodeId, constructor: &str, cx: &Cx<'_>) -> bool {
     }
     match cx.call_receiver(node).get() {
         None => true,
-        Some(receiver) => cx.is_global_const(receiver, "Kernel"),
+        Some(receiver) => is_kernel_const(receiver, cx),
     }
 }
 
@@ -500,6 +511,52 @@ mod tests {
                          ^^^^^^ Redundant `to_set` detected.
             "#},
             "Set&.new\n",
+        );
+    }
+
+    // --- Boundary characterization (murphy-ft88.22): pin the exact node set
+    // the hand-rolled `kernel_constructor` const arm (`is_global_const(Kernel)`
+    // + bare-nil arm) matches, so the verbatim `(const nil? :Kernel)`
+    // refactor can be proven equivalent. `::Kernel` collapses to Const scope
+    // None, so `nil?` covers bare + `::`; namespaced `Foo::Kernel` still
+    // rejects; the bare (`nil`) receiver arm stays hand-rolled.
+
+    #[test]
+    fn boundary_flags_kernel_string_to_s() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Kernel.String("x").to_s
+                                   ^^^^ Redundant `to_s` detected.
+            "#},
+            "Kernel.String(\"x\")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_kernel_string_to_s() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                ::Kernel.String("x").to_s
+                                     ^^^^ Redundant `to_s` detected.
+            "#},
+            "::Kernel.String(\"x\")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_kernel_string_to_s() {
+        test::<RedundantTypeConversion>()
+            .expect_no_offenses("Foo::Kernel.String(\"x\").to_s\n");
+    }
+
+    #[test]
+    fn boundary_flags_kernel_integer_to_i() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                Kernel.Integer(value).to_i
+                                      ^^^^ Redundant `to_i` detected.
+            "#},
+            "Kernel.Integer(value)\n",
         );
     }
 }

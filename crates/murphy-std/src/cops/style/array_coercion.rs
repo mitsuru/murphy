@@ -51,7 +51,7 @@
 //! Shape 1: replaces the whole array literal `[*var]` with `Array(var_source)`.
 //! Shape 2: replaces the whole `unless` expression with `var = Array(var)`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Symbol, cop, def_node_matcher};
 
 #[derive(Default)]
 pub struct ArrayCoercion;
@@ -74,6 +74,15 @@ impl ArrayCoercion {
         check_unless_array(node, cx);
     }
 }
+
+// RuboCop parity: `Style/ArrayCoercion` `unless_array?` const inner is
+// `(const nil? :Array)` (top-level only). In Murphy `::Array` collapses to
+// Const scope None, so `nil?` covers bare + `::` (pinned by
+// `boundary_flags_cbase_array_in_is_a`); namespaced `Foo::Array` still rejects
+// (pinned by `boundary_ignores_namespaced_array_in_is_a`). The lvar captures
+// + same-name guard stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_array_const, "(const nil? :Array)");
 
 /// Shape 1: `[*arg]` -> `Array(arg)`.
 fn check_array_splat(node: NodeId, cx: &Cx<'_>) {
@@ -178,16 +187,9 @@ fn match_is_a_array_cond(cond: NodeId, cx: &Cx<'_>) -> Option<Symbol> {
         return None;
     }
 
-    // The argument must be `(const nil? :Array)`.
+    // The argument must be `(const nil? :Array)` (top-level only).
     let arg = arg_list[0];
-    let NodeKind::Const { scope, name } = *cx.kind(arg) else {
-        return None;
-    };
-    // scope must be absent (nil?) -- top-level `Array`.
-    if scope != OptNodeId::NONE {
-        return None;
-    }
-    if cx.symbol_str(name) != "Array" {
+    if !is_array_const(arg, cx) {
         return None;
     }
 
@@ -313,5 +315,29 @@ mod tests {
     #[test]
     fn accepts_array_coerce_already() {
         test::<ArrayCoercion>().expect_no_offenses("Array(paths)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.22): pin the exact node set
+    // the hand-rolled `(const nil? :Array)` check in `match_is_a_array_cond`
+    // (scope None + name Array) matches, so the verbatim
+    // `(const nil? :Array)` refactor can be proven equivalent.
+    // `::Array` collapses to Const scope None, so `nil?` covers bare + `::`;
+    // namespaced `Foo::Array` still rejects.
+
+    #[test]
+    fn boundary_flags_cbase_array_in_is_a() {
+        test::<ArrayCoercion>().expect_correction(
+            indoc! {r#"
+                paths = [paths] unless paths.is_a?(::Array)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Array(paths)` instead of explicit `Array` check.
+            "#},
+            "paths = Array(paths)\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_array_in_is_a() {
+        test::<ArrayCoercion>()
+            .expect_no_offenses("paths = [paths] unless paths.is_a?(Foo::Array)\n");
     }
 }
