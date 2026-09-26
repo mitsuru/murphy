@@ -52,7 +52,25 @@
 //! module_eval('code', __FILE__, __LINE__)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/EvalWithLocation` `valid_eval_receiver?` is
+// `{ nil? (const {nil? cbase} :Kernel) }` for `eval` (bare or top-level
+// `Kernel`; other receivers like `binding.eval` accept).
+// In Murphy `::Kernel` collapses to `Const{scope:None}`: `nil?` scope covers
+// bare + `::` for the const branch (pinned by `boundary_flags_cbase_kernel_eval` /
+// `boundary_flags_kernel_eval`). Namespaced `Foo::Kernel` still accepts
+// (pinned by `boundary_accepts_namespaced_kernel_eval`); `binding.eval`
+// accepts (pinned by `boundary_accepts_binding_eval`). `send` covers `Send`
+// only (not `Csend`), matching the `#[on_node(kind = "send")]` dispatch
+// (pinned by `boundary_accepts_csend_*`). String-literal + `__FILE__` /
+// `__LINE__` guards stay hand-rolled below. `instance_eval` / `class_eval` /
+// `module_eval` (any receiver) stay hand-rolled.
+def_node_matcher!(is_bare_eval, "(send nil? :eval ...)");
+def_node_matcher!(
+    is_kernel_eval,
+    "(send (const nil? :Kernel) :eval ...)"
+);
 
 const MSG_MISSING: &str = "Pass `__FILE__` and `__LINE__` to `%<method>s`.";
 const MSG_MISSING_EVAL: &str = "Pass a binding, `__FILE__`, and `__LINE__` to `eval`.";
@@ -85,13 +103,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     match method_str {
         "eval" => {
-            // Only flag bare `eval` or `Kernel.eval` — not `binding.eval` etc.
-            // `Binding#eval` takes (code, __FILE__, __LINE__) without a binding arg.
-            let recv_ok = match cx.call_receiver(node).get() {
-                None => true, // bare eval(...)
-                Some(r) => cx.is_global_const(r, "Kernel"),
-            };
-            if recv_ok {
+            // `(send nil? :eval ...)` (bare) or
+            // `(send (const nil? :Kernel) :eval ...)` (`Kernel` / `::Kernel`,
+            // top-level only); not `binding.eval`, `Foo::Kernel.eval`, etc.
+            // `send` covers `Send` only (not `Csend`).
+            if is_bare_eval(node, cx) || is_kernel_eval(node, cx) {
                 check_eval(node, arg_list, cx);
             }
         }
@@ -236,6 +252,51 @@ mod tests {
     #[test]
     fn accepts_instance_eval_with_non_string_code() {
         test::<EvalWithLocation>().expect_no_offenses("obj.instance_eval(&block)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.8): pin the exact node set
+    // the hand-rolled bare-or-Kernel guard matches, so the verbatim
+    // `(send {nil? (const nil? :Kernel)} :eval ...)` refactor can be proven
+    // equivalent. `::Kernel` collapses to `Const{scope:None}`: `nil?` covers
+    // bare + `::`. Namespaced `Foo::Kernel` still accepts; `&.` is a `csend`
+    // node and `send` covers `Send` only. `binding.eval` accepts (receiver is
+    // not bare/Kernel).
+
+    #[test]
+    fn boundary_flags_cbase_kernel_eval() {
+        test::<EvalWithLocation>().expect_offense(indoc! {"
+            ::Kernel.eval('code')
+            ^^^^^^^^^^^^^^^^^^^^^ Pass a binding, `__FILE__`, and `__LINE__` to `eval`.
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_kernel_eval() {
+        test::<EvalWithLocation>().expect_offense(indoc! {"
+            Kernel.eval('code')
+            ^^^^^^^^^^^^^^^^^^^ Pass a binding, `__FILE__`, and `__LINE__` to `eval`.
+        "});
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_kernel_eval() {
+        test::<EvalWithLocation>().expect_no_offenses("Foo::Kernel.eval('code')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_binding_eval() {
+        test::<EvalWithLocation>().expect_no_offenses("binding.eval('code')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_kernel_eval() {
+        // `&.` is a `csend` node; `send` covers `Send` only.
+        test::<EvalWithLocation>().expect_no_offenses("Kernel&.eval('code')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_bare_eval() {
+        test::<EvalWithLocation>().expect_no_offenses("eval&.('code')\n");
     }
 }
 

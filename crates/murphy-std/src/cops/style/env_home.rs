@@ -35,7 +35,21 @@
 //! ENV.fetch('HOME', '/') # non-nil default
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/EnvHome` receiver guard is `ENV` top-level
+// (`(const {nil? cbase} :ENV)`), methods `{:[] :fetch}`.
+// In Murphy `::ENV` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_env_bracket_home` /
+// `boundary_flags_cbase_env_fetch_home_nil`). Namespaced `Foo::ENV` still
+// accepts (pinned by `boundary_accepts_namespaced_*`). `send` covers `Send`
+// only (not `Csend`), matching the `#[on_node(kind = "send")]` dispatch
+// (pinned by `boundary_accepts_csend_*`). `HOME` string + `nil` second-arg
+// guards stay hand-rolled below.
+def_node_matcher!(
+    is_env_home_send,
+    "(send (const nil? :ENV) {:[] :fetch} ...)"
+);
 
 const MSG: &str = "Use `Dir.home` instead of `ENV['HOME']`.";
 
@@ -58,24 +72,18 @@ impl EnvHome {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // `(send (const nil? :ENV) {:[] :fetch} ...)` (`ENV` / `::ENV`,
+    // top-level only). `send` covers `Send` only (not `Csend`).
+    if !is_env_home_send(node, cx) {
+        return;
+    }
+
     let NodeKind::Send {
-        receiver,
-        method,
-        args,
+        method, args, ..
     } = *cx.kind(node)
     else {
         return;
     };
-
-    // Must have a receiver.
-    let Some(recv_id) = receiver.get() else {
-        return;
-    };
-
-    // Receiver must be the top-level `ENV` constant (not e.g. `MyModule::ENV`).
-    if !cx.is_global_const(recv_id, "ENV") {
-        return;
-    }
 
     let method_str = cx.symbol_str(method);
     let arg_list = cx.list(args);
@@ -158,6 +166,56 @@ mod tests {
     #[test]
     fn accepts_env_bracket_other_key() {
         test::<EnvHome>().expect_no_offenses("ENV['PATH']\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.8): pin the exact node set
+    // the hand-rolled `is_global_const` guard matches, so the verbatim
+    // `(send (const nil? :ENV) {:[] :fetch} ...)` refactor can be proven
+    // equivalent. `::ENV` collapses to `Const{scope:None}` in Murphy: `nil?`
+    // covers bare + `::`. Namespaced `Foo::ENV` still accepts; `&.` is a
+    // `csend` node and `send` covers `Send` only.
+
+    #[test]
+    fn boundary_flags_cbase_env_bracket_home() {
+        test::<EnvHome>().expect_correction(
+            indoc! {r#"
+                ::ENV['HOME']
+                ^^^^^^^^^^^^^ Use `Dir.home` instead of `ENV['HOME']`.
+            "#},
+            "Dir.home\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_env_fetch_home_nil() {
+        test::<EnvHome>().expect_correction(
+            indoc! {r#"
+                ::ENV.fetch('HOME', nil)
+                ^^^^^^^^^^^^^^^^^^^^^^^^ Use `Dir.home` instead of `ENV['HOME']`.
+            "#},
+            "Dir.home\n",
+        );
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_env_bracket_home() {
+        test::<EnvHome>().expect_no_offenses("Foo::ENV['HOME']\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_env_fetch_home_nil() {
+        test::<EnvHome>().expect_no_offenses("Foo::ENV.fetch('HOME', nil)\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_env_bracket_home() {
+        // `&.` is a `csend` node; `send` covers `Send` only.
+        test::<EnvHome>().expect_no_offenses("ENV&.[]('HOME')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_env_fetch_home_nil() {
+        test::<EnvHome>().expect_no_offenses("ENV&.fetch('HOME', nil)\n");
     }
 }
 
