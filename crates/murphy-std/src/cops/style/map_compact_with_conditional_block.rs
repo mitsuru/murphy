@@ -61,8 +61,29 @@
 //! # good
 //! array.reject { |e| some_condition? }
 //! ```
+//!
+//! Verbatim port of the call head `(call _ {:compact :filter_map} ...)`
+//! (murphy-s1yc.29): `call` = `{send csend}` covers safe-navigation
+//! (`array&.filter_map { |e| e if cond }`), mirroring RuboCop
+//! `alias on_csend on_send` plus `RESTRICT_ON_SEND [compact filter_map]`;
+//! the wildcard receiver binds an absent or present receiver per murphy-if9y;
+//! trailing `...` absorbs any argument list. The no-args-on-compact and
+//! map-block guards below apply separately (upstream `on_send` returns early
+//! unless the conditional-block shape matches).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.29):
+// `(call _ {:compact :filter_map} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`array&.filter_map { |e| e if cond }`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND [compact filter_map]`.
+// The `_` receiver binds an absent or present receiver per murphy-if9y;
+// trailing `...` absorbs any argument list, so the no-args-on-compact and
+// map-block guards below apply separately.
+def_node_matcher!(
+    map_compact_with_conditional_block_call,
+    "(call _ {:compact :filter_map} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -77,22 +98,31 @@ pub struct MapCompactWithConditionalBlock;
     safe_autocorrect = false,
 )]
 impl MapCompactWithConditionalBlock {
-    /// Triggered on `compact` (handles `map { ... }.compact`) and `filter_map`.
-    #[on_node(kind = "send", methods = ["compact", "filter_map"])]
+    /// Send path: `map { ... }.compact` / `filter_map { ... }`.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:compact :filter_map} ...)` head filters to the
+    /// `RESTRICT_ON_SEND` methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
-    /// Also handle csend (e.g. `array&.map { }.compact`).
+    /// Safe-navigation send path: `array&.filter_map { |e| e if cond }`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if matches!(cx.method_name(node), Some("compact" | "filter_map")) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:compact :filter_map} ...)` head: filters to the
+    // `RESTRICT_ON_SEND` methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated call
+    // with a conditional block (e.g. `array.select { |e| e }`) would run check
+    // on every call node instead of being rejected by the method set up front.
+    if !map_compact_with_conditional_block_call(node, cx) {
+        return;
+    }
     let method_name = cx.method_name(node).unwrap_or("");
 
     let (block_node, offense_range, current_label) = if method_name == "compact" {
@@ -538,6 +568,52 @@ mod tests {
     fn accepts_filter_map_different_lvar() {
         test::<MapCompactWithConditionalBlock>()
             .expect_no_offenses("array.filter_map { |e| x if some_condition? }\n");
+    }
+
+    // --- Characterization (murphy-s1yc.29): pin the exact node set the
+    // dual send(methods=[compact filter_map]) + manual-csend-filter dispatch
+    // matches, so the verbatim `(call _ {:compact :filter_map} ...)` port can
+    // be proven byte-identical. `call` covers safe-navigation (mirroring
+    // upstream `alias on_csend on_send` plus `RESTRICT_ON_SEND
+    // [compact filter_map]`); trailing `...` absorbs any argument list, so
+    // the no-args-on-compact and map-block guards below apply separately.
+
+    #[test]
+    fn s1yc29_flags_csend_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port the `csend` handler
+        // filters `compact`/`filter_map` manually because `methods = [...]`
+        // is only valid for `kind = "send"`; the verbatim head collapses the
+        // workaround.
+        test::<MapCompactWithConditionalBlock>().expect_correction(
+            indoc! {"
+                array&.filter_map { |e| e if some_condition? }
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `filter_map { ... }` with `select`.
+            "},
+            "array&.select { |e| some_condition? }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc29_accepts_compact_with_args() {
+        // Arguments: trailing `...` absorbs the argument list so the head
+        // matches, and the complementary no-args-on-compact guard accepts.
+        test::<MapCompactWithConditionalBlock>()
+            .expect_no_offenses("array.map { |e| e if some_condition? }.compact(1)\n");
+    }
+
+    #[test]
+    fn s1yc29_accepts_bare_compact() {
+        // Bare `compact`: the `_` receiver binds an absent receiver per
+        // murphy-if9y so the head matches, and the complementary
+        // needs-receiver guard accepts.
+        test::<MapCompactWithConditionalBlock>().expect_no_offenses("compact\n");
+    }
+
+    #[test]
+    fn s1yc29_accepts_unrelated_method() {
+        // `select` is outside the verbatim method set, so the head rejects.
+        test::<MapCompactWithConditionalBlock>().expect_no_offenses("array.select { |e| e }\n");
     }
 }
 
