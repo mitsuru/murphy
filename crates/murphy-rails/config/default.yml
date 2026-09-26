@@ -157,6 +157,10 @@ Rails/AttributeDefaultBlockValue:
   Include:
     - '**/app/models/**/*'
 
+Rails/BulkChangeTable:
+  Include:
+    - 'db/**/*.rb'
+
 Rails/ContentTag:
   Exclude:
     - '**/app/models/**/*.rb'

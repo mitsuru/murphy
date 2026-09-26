@@ -20,7 +20,7 @@
 //! pre-`murphy-9cr.22` rails crate; see `git show
 //! 46a1de6^:crates/murphy-rails/src/cops/rails/`).
 
-use murphy_plugin_api::{Cx, NoOptions, cop, register_cops, submit_cop};
+use murphy_plugin_api::register_cops;
 
 /// default.yml embedded in the .so as a resource.
 pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
@@ -84,33 +84,8 @@ mod option_key_guard {
 // `ApplicationMailer` promoted to real cop in
 // `cops::rails::application_mailer`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/BulkChangeTable
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct BulkChangeTable;
-
-#[cop(
-    name = "Rails/BulkChangeTable",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl BulkChangeTable {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(BulkChangeTable);
+// `BulkChangeTable` promoted to real cop in
+// `cops::rails::bulk_change_table`.
 
 // `EnvironmentVariableAccess` promoted to real cop in
 // `cops::rails::environment_variable_access`.

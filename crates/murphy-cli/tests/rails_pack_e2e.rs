@@ -636,6 +636,11 @@ fn rails_pack_enforces_audited_rails_file_scopes() {
             "app/controllers/foo_controller.rb",
         ),
         (
+            "Rails/BulkChangeTable",
+            "db/migrate/001_add_col.rb",
+            "app/models/foo.rb",
+        ),
+        (
             "Rails/ContentTag",
             "app/helpers/foo_helper.rb",
             "app/models/foo.rb",
