@@ -23,7 +23,23 @@
 //! Only `block` nodes are checked: numbered (`_1`) and `it` blocks reference
 //! their implicit parameter, so they are never truly empty.
 
-use murphy_plugin_api::{cop, CopOptions, Cx, NodeId};
+use murphy_plugin_api::{cop, CopOptions, Cx, NodeId, def_node_matcher};
+
+// RuboCop parity: `Lint/EmptyBlock` `lambda_or_proc?` `Proc.new` branch is
+// `(send (const {nil? cbase} :Proc) :new)` (block form, empty body).
+// Verbatim as `(call (const nil? :Proc) :new ...)`.
+// In Murphy `::Proc` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `accepts_empty_proc_new` + `boundary_accepts_cbase_proc_new`).
+// Namespaced `Foo::Proc` still flags as an empty block (pinned by
+// `boundary_flags_namespaced_proc_new_empty_block`). `call` covers `Send` +
+// `Csend`, matching the generic `method_name`+`call_receiver` dispatch
+// (pinned by `boundary_accepts_csend_proc_new` per DuplicateRequire /
+// TallyMethod precedent). The `proc` / lambda guards + empty-body + comment
+// guards stay hand-rolled below.
+def_node_matcher!(
+    is_proc_new_call,
+    "(call (const nil? :Proc) :new ...)"
+);
 
 #[derive(Default)]
 pub struct EmptyBlock;
@@ -83,11 +99,9 @@ fn is_lambda_or_proc(node: NodeId, cx: &Cx<'_>) -> bool {
     match method {
         // `proc {}` — receiverless `proc` call.
         "proc" => cx.call_receiver(call).get().is_none(),
-        // `Proc.new {}` — `Proc` constant (bare or `::Proc`) receiver.
-        "new" => cx
-            .call_receiver(call)
-            .get()
-            .is_some_and(|recv| cx.is_global_const(recv, "Proc")),
+        // `Proc.new {}` — `(call (const nil? :Proc) :new ...)`
+        // (`Proc` / `::Proc`, top-level only). `call` covers `Send` + `Csend`.
+        "new" => is_proc_new_call(call, cx),
         _ => false,
     }
 }
@@ -206,5 +220,32 @@ mod tests {
             x.map { }
             ^^^^^^^^^ Empty block detected.
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.10): pin the exact node set
+    // the hand-rolled `is_global_const` guard matches, so the verbatim
+    // `(call (const nil? :Proc) :new ...)` refactor can be proven equivalent.
+    // `::Proc` collapses to `Const{scope:None}` in Murphy: `nil?` covers
+    // bare + `::` (both accept as lambda). Namespaced `Foo::Proc` is not
+    // top-level, so the empty block still flags. `call` covers `Send` +
+    // `Csend`, matching the generic `method_name`+`call_receiver` dispatch.
+
+    #[test]
+    fn boundary_accepts_cbase_proc_new() {
+        test::<EmptyBlock>().expect_no_offenses("::Proc.new {}\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_proc_new_empty_block() {
+        test::<EmptyBlock>().expect_offense(indoc! {r#"
+            Foo::Proc.new {}
+            ^^^^^^^^^^^^^^^^ Empty block detected.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_csend_proc_new() {
+        // `&.` is a `csend` node; `call` covers `Send` + `Csend`.
+        test::<EmptyBlock>().expect_no_offenses("Proc&.new {}\n");
     }
 }
