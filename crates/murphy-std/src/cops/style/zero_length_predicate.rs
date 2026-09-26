@@ -43,7 +43,22 @@
 //! - Comparison form: replace whole comparison node with `recv.empty?` or
 //!   `!recv.empty?` using whole-node interpolation (structural rewrite).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/ZeroLengthPredicate` `non_polymorphic_collection?`
+// const heads are `(const {nil? cbase} :File)` for `stat` and
+// `(const {nil? cbase} {:File :Tempfile :StringIO})` for `new`/`open`
+// (top-level only). In Murphy `::File` collapses to `Const{scope:None}`:
+// `nil?` covers bare + `::` (both excluded, pinned by
+// `boundary_accepts_cbase_file_stat_size`). Namespaced `Foo::File` still
+// flags (pinned by `boundary_flags_namespaced_file_stat_size`). Upstream's
+// third arm (`File::Stat.new`) is NOT implemented in Murphy and stays
+// deferred. Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_file_const_matcher, "(const nil? :File)");
+def_node_matcher!(
+    is_new_open_const_matcher,
+    "(const nil? {:File :Tempfile :StringIO})"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -251,14 +266,13 @@ fn is_non_polymorphic(recv: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     };
 
-    if method_name == "stat" && cx.is_global_const(const_id, "File") {
+    // `(const nil? :File)` — top-level only (`::` collapses to
+    // `Const{scope:None}`). Namespaced still flags.
+    if method_name == "stat" && is_file_const_matcher(const_id, cx) {
         return true;
     }
-    if matches!(method_name, "new" | "open")
-        && (cx.is_global_const(const_id, "File")
-            || cx.is_global_const(const_id, "Tempfile")
-            || cx.is_global_const(const_id, "StringIO"))
-    {
+    // `(const nil? {:File :Tempfile :StringIO})` — top-level only.
+    if matches!(method_name, "new" | "open") && is_new_open_const_matcher(const_id, cx) {
         return true;
     }
     false
@@ -465,6 +479,47 @@ mod tests {
     #[test]
     fn accepts_csend_size_gt_zero() {
         test::<ZeroLengthPredicate>().expect_no_offenses("x&.size > 0\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.27): pin the exact node set
+    // the hand-rolled `is_non_polymorphic` (`is_global_const(File)` for
+    // `stat`, `is_global_const(File/Tempfile/StringIO)` for `new`/`open`)
+    // matches, so the verbatim const-inner refactor can be proven equivalent.
+    // `::File` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (both excluded, pinned by `boundary_accepts_cbase_file_stat_size`).
+    // Namespaced `Foo::File` still flags (not excluded, pinned by
+    // `boundary_flags_namespaced_file_stat_size`). Upstream's third arm
+    // (`File::Stat.new`) is NOT implemented in Murphy and stays deferred.
+
+    #[test]
+    fn boundary_accepts_cbase_file_stat_size() {
+        test::<ZeroLengthPredicate>().expect_no_offenses("::File.stat(f).size == 0\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_file_stat_size() {
+        test::<ZeroLengthPredicate>().expect_offense(indoc! {r#"
+            Foo::File.stat(f).size == 0
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `empty?` instead of `Foo::File.stat(f).size == 0`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_tempfile_open_size() {
+        test::<ZeroLengthPredicate>().expect_no_offenses("::Tempfile.open(f).size == 0\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_tempfile_open_size() {
+        test::<ZeroLengthPredicate>().expect_offense(indoc! {r#"
+            Foo::Tempfile.open(f).size == 0
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `empty?` instead of `Foo::Tempfile.open(f).size == 0`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_stringio_new_length() {
+        test::<ZeroLengthPredicate>().expect_no_offenses("::StringIO.new(f).length == 0\n");
     }
 }
 murphy_plugin_api::submit_cop!(ZeroLengthPredicate);
