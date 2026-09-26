@@ -8,13 +8,13 @@ to this page plus `docs/benchmarks/results.json`.
 
 <!-- BENCHMARK-RESULTS-BEGIN -->
 
-Last updated: 2026-09-25T19:04:33Z (commit `d86c63a77b3bf1cc89d90e3db9aebb53142296c5`, ubuntu-latest).
+Last updated: 2026-09-26T08:51:24Z (commit `15d7ac168592564adb33d1b0d1e43918c4a4696c`, ubuntu-latest).
 
 | Files (N) | murphy (mean) | RuboCop (mean) | Speedup |
 | --- | --- | --- | --- |
-| 1 | 14ms (±0ms) | 988ms (±18ms) | 71.4× |
-| 20 | 16ms (±1ms) | 1.06s (±8ms) | 67.5× |
-| 100 | 20ms (±8ms) | 1.09s (±9ms) | 53.6× |
+| 1 | 14ms (±0ms) | 958ms (±11ms) | 69.7× |
+| 20 | 15ms (±1ms) | 1.03s (±8ms) | 68.0× |
+| 100 | 19ms (±1ms) | 1.06s (±5ms) | 55.8× |
 
 Means with standard deviation over hyperfine runs (--warmup 2).
 Higher speedup is better for murphy. Raw exports are kept as CI
