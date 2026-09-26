@@ -58,6 +58,15 @@
 //!       inside an autocorrected numblock body).
 //! ```
 //!
+//! Verbatim port of the call head `(call _ {:each_with_object :inject :reduce} ...)`
+//! (murphy-s1yc.32): `call` = `{send csend}` covers safe-navigation
+//! (`array&.each_with_object({}) { |elem, hash| hash[elem] = elem }`), mirroring
+//! RuboCop `alias on_csend on_send` plus
+//! `RESTRICT_ON_SEND [each_with_object inject reduce]`; the wildcard receiver
+//! binds an absent or present receiver per murphy-if9y; trailing `...` absorbs
+//! any argument list. The empty-hash and block-shape guards below apply
+//! separately (upstream `on_send` returns early unless the block shape matches).
+//!
 //! ## Matched shapes
 //!
 //! ```ruby
@@ -70,8 +79,21 @@
 //! array.to_h { |elem| [elem.id, elem.name] }
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop, def_node_matcher};
 use std::borrow::Cow;
+
+// Verbatim port of the call head (murphy-s1yc.32):
+// `(call _ {:each_with_object :inject :reduce} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`array&.each_with_object({}) { ... }`), mirroring
+// RuboCop `alias on_csend on_send` plus
+// `RESTRICT_ON_SEND [each_with_object inject reduce]`. The `_` receiver binds
+// an absent or present receiver per murphy-if9y; trailing `...` absorbs any
+// argument list, so the empty-hash and block-shape guards below apply
+// separately.
+def_node_matcher!(
+    reduce_to_hash_call,
+    "(call _ {:each_with_object :inject :reduce} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -86,19 +108,19 @@ pub struct ReduceToHash;
     options = NoOptions,
 )]
 impl ReduceToHash {
-    #[on_node(kind = "send", methods = ["each_with_object", "inject", "reduce"])]
+    /// Send path: `array.each_with_object({}) { ... }` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:each_with_object :inject :reduce} ...)` head filters to the
+    /// `RESTRICT_ON_SEND` methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
+    /// Safe-navigation send path: `array&.each_with_object({}) { ... }`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if matches!(
-            cx.method_name(node),
-            Some("each_with_object" | "inject" | "reduce")
-        ) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -120,6 +142,15 @@ struct Match {
 }
 
 fn check(send: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:each_with_object :inject :reduce} ...)` head:
+    // filters to the `RESTRICT_ON_SEND` methods on either send or csend
+    // (safe-navigation), with any receiver (absent or present). Without this,
+    // an unrelated call with a matching block (e.g. `array.map({}) { ... }`)
+    // would run check on every call node instead of being rejected by the
+    // method set up front.
+    if !reduce_to_hash_call(send, cx) {
+        return;
+    }
     let Some(method) = cx.method_name(send) else {
         return;
     };
@@ -679,6 +710,60 @@ mod tests {
             "},
             "array.to_h { [_1.id, _1.name] }\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.32): pin the exact node set the
+    // dual send(methods=[each_with_object inject reduce]) + manual-csend-filter
+    // dispatch matches, so the verbatim
+    // `(call _ {:each_with_object :inject :reduce} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send` plus `RESTRICT_ON_SEND
+    // [each_with_object inject reduce]`); trailing `...` absorbs any argument
+    // list, so the empty-hash and block-shape guards below apply separately.
+
+    #[test]
+    fn s1yc32_flags_csend_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port the `csend` handler
+        // filters `each_with_object`/`inject`/`reduce` manually because
+        // `methods = [...]` is only valid for `kind = "send"`; the verbatim
+        // head collapses the workaround.
+        test::<ReduceToHash>().expect_correction(
+            indoc! {"
+                array&.each_with_object({}) { |elem, hash| hash[elem] = elem.to_s }
+                       ^^^^^^^^^^^^^^^^ Use `to_h { ... }` instead of `each_with_object`.
+            "},
+            "array&.to_h { |elem| [elem, elem.to_s] }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc32_flags_bare_receiver() {
+        // Bare `each_with_object` with a matching block: the `_` receiver
+        // binds an absent receiver per murphy-if9y so the head matches, and
+        // this cop has no needs-receiver guard so the offense is still
+        // reported.
+        test::<ReduceToHash>().expect_offense(indoc! {r#"
+            each_with_object({}) { |elem, hash| hash[elem] = elem.to_s }
+            ^^^^^^^^^^^^^^^^ Use `to_h { ... }` instead of `each_with_object`.
+        "#});
+    }
+
+    #[test]
+    fn s1yc32_accepts_with_extra_args() {
+        // Arguments: trailing `...` absorbs the argument list so the head
+        // matches, but this cop requires a single empty-hash argument so the
+        // offense is still rejected by the complementary guard.
+        test::<ReduceToHash>().expect_no_offenses(
+            "array.each_with_object({}, extra) { |elem, hash| hash[elem] = elem }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc32_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<ReduceToHash>()
+            .expect_no_offenses("array.map({}) { |elem| elem }\n");
     }
 
     #[test]
