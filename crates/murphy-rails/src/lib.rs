@@ -57,145 +57,20 @@ mod option_key_guard {
 // `ActionFilter` promoted to real cop in
 // `cops::rails::action_filter`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActionOrder
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActionOrder;
+// `ActionOrder` promoted to real cop in
+// `cops::rails::action_order`.
 
-#[cop(
-    name = "Rails/ActionOrder",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActionOrder {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActionOrder);
+// `ActiveRecordCallbacksOrder` promoted to real cop in
+// `cops::rails::active_record_callbacks_order`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActiveRecordCallbacksOrder
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActiveRecordCallbacksOrder;
+// `ActiveRecordOverride` promoted to real cop in
+// `cops::rails::active_record_override`.
 
-#[cop(
-    name = "Rails/ActiveRecordCallbacksOrder",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActiveRecordCallbacksOrder {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActiveRecordCallbacksOrder);
+// `ActiveSupportAliases` promoted to real cop in
+// `cops::rails::active_support_aliases`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActiveRecordOverride
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActiveRecordOverride;
-
-#[cop(
-    name = "Rails/ActiveRecordOverride",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActiveRecordOverride {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActiveRecordOverride);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActiveSupportAliases
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActiveSupportAliases;
-
-#[cop(
-    name = "Rails/ActiveSupportAliases",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActiveSupportAliases {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActiveSupportAliases);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActiveSupportOnLoad
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActiveSupportOnLoad;
-
-#[cop(
-    name = "Rails/ActiveSupportOnLoad",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActiveSupportOnLoad {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActiveSupportOnLoad);
+// `ActiveSupportOnLoad` promoted to real cop in
+// `cops::rails::active_support_on_load`.
 
 /// ## RuboCop parity
 ///
