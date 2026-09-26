@@ -50,7 +50,20 @@
 //! replaces the entire offense node with `receiver.transform_values { |val| body }`.
 //! The val arg and body expressions pass through byte-for-byte from the source.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Style/HashTransformValues` `on_bad_hash_brackets_map` inner is
+// `(send (const _ :Hash) :[] ...)` (any-scope upstream).
+// Murphy's `is_const_hash` uses top-level-only `Hash` (scope None,
+// `::Hash` collapses to None), so the verbatim port uses
+// `(send (const nil? :Hash) :[] ...)` to preserve the current node set
+// (pinned by `boundary_flags_cbase_hash_brackets_map` +
+// `boundary_ignores_namespaced_hash_brackets_map`), per the TallyMethod
+// precedent: equivalence-preserving vs hand-rolled, not a RuboCop parity fix.
+// `send` covers Send only (not Csend), matching `#[on_node(kind = "send")]`
+// (pinned by `boundary_ignores_csend_hash_brackets_map`). Block-shape guards
+// stay hand-rolled below. Predicate-only, byte-identical.
+def_node_matcher!(is_hash_brackets, "(send (const nil? :Hash) :[] ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -199,12 +212,9 @@ fn check_to_h_block(block_node: NodeId, cx: &Cx<'_>) {
 
 /// Check `Hash[receiver.map { |k, v| [k, expr] }]`.
 fn check_hash_brackets_map(send_node: NodeId, cx: &Cx<'_>) {
-    // Must be `Hash[...]`.
-    let recv = match cx.call_receiver(send_node).get() {
-        Some(r) => r,
-        None => return,
-    };
-    if !is_const_hash(recv, cx) {
+    // `(send (const nil? :Hash) :[] ...)` top-level only; preserves `::Hash`
+    // via scope-None collapse. `Foo::Hash` silent, csend silent via `send`.
+    if !is_hash_brackets(send_node, cx) {
         return;
     }
     // Must have exactly one argument: the block.
@@ -249,14 +259,6 @@ fn check_hash_brackets_map(send_node: NodeId, cx: &Cx<'_>) {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// Check if a node is `Hash` (const without scope).
-fn is_const_hash(node: NodeId, cx: &Cx<'_>) -> bool {
-    if let NodeKind::Const { scope, name } = *cx.kind(node) {
-        return scope.get().is_none() && cx.symbol_str(name) == "Hash";
-    }
-    false
-}
 
 /// Check if a node satisfies the `hash_receiver?` condition:
 /// - A hash literal `{...}`
@@ -560,6 +562,36 @@ mod tests {
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
             "#},
             "foo.merge(bar).transform_values { |v| v.to_s }\n",
+        );
+    }
+
+    // --- Boundary characterization (murphy-ft88.20): pin the exact node set
+    // the hand-rolled top-level `Hash` guard matches, so the verbatim
+    // `(send (const nil? :Hash) :[] ...)` refactor can be proven equivalent.
+    // `::Hash` collapses to `Const{scope:None}`: `nil?` covers bare + `::`.
+    // Namespaced `Foo::Hash` still accepts; `&.` is csend and `send` covers
+    // Send only.
+
+    #[test]
+    fn boundary_flags_cbase_hash_brackets_map() {
+        test::<HashTransformValues>().expect_offense(indoc! {r#"
+            ::Hash[{a: 1}.map { |k, v| [k, foo(v)] }]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `Hash[_.map {...}]`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_hash_brackets_map() {
+        test::<HashTransformValues>().expect_no_offenses(
+            "Foo::Hash[{a: 1}.map { |k, v| [k, foo(v)] }]\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_csend_hash_brackets_map() {
+        // `&.` is csend; `send` covers Send only.
+        test::<HashTransformValues>().expect_no_offenses(
+            "Hash&.[]({a: 1}.map { |k, v| [k, foo(v)] })\n",
         );
     }
 }

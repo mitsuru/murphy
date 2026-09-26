@@ -17,7 +17,23 @@
 //!   autocorrect shape.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// RuboCop parity: `Lint/RedundantTypeConversion` `string_constructor?` inner is
+// `(send (const {cbase nil?} :String) :new ...)` (top-level only).
+// In Murphy `::String` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_string_new_to_s`), namespaced
+// `Foo::String` still rejects (pinned by
+// `boundary_ignores_namespaced_string_new_to_s`).
+// `call` covers Send+Csend, matching the generic `method_name`+`call_receiver`
+// dispatch via both `check_send`+`check_csend` (csend flags, pinned by
+// `boundary_flags_csend_string_new_to_s` +
+// `boundary_flags_string_new_csend_to_s`), per the `Lint/DuplicateRequire`
+// precedent. Equivalence-preserving vs hand-rolled, not a RuboCop parity fix:
+// `exception: false` suppression, parenthesized unwrap, and other ctors stay
+// hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_string_new_call, "(call (const nil? :String) :new ...)");
 
 #[derive(Default)]
 pub struct RedundantTypeConversion;
@@ -113,8 +129,10 @@ fn constructor_receiver(method: &str, node: NodeId, cx: &Cx<'_>) -> bool {
     };
     match method {
         "to_s" => {
-            name == "new" && call_receiver_const(node, "String", cx)
-                || kernel_constructor(node, "String", cx)
+            // `(call (const nil? :String) :new ...)` top-level only; preserves
+            // `::String` via scope-None collapse. Bare `String` + `::` flag,
+            // `Foo::String` silent, csend flags via `call`.
+            is_string_new_call(node, cx) || kernel_constructor(node, "String", cx)
         }
         "to_i" => kernel_constructor(node, "Integer", cx),
         "to_f" => kernel_constructor(node, "Float", cx),
@@ -236,5 +254,66 @@ mod tests {
             .expect_no_offenses("foo.to_s\n")
             .expect_no_offenses("1.to_s\n")
             .expect_no_offenses("String(value).to_i\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.20): pin the exact node set
+    // the hand-rolled `is_global_const(String)` guard matches, so the verbatim
+    // `(call (const nil? :String) :new ...)` refactor can be proven equivalent.
+    // `::String` collapses to `Const{scope:None}`: `nil?` covers bare + `::`.
+    // Namespaced `Foo::String` still accepts; `call` covers Send+Csend per
+    // DuplicateRequire precedent.
+
+    #[test]
+    fn boundary_flags_string_new_to_s() {
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                String.new("x").to_s
+                                ^^^^ Redundant `to_s` detected.
+            "#},
+            "String.new(\"x\")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_cbase_string_new_to_s() {
+        // `::String` collapses to Const scope None, so `nil?` flags it.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                ::String.new("x").to_s
+                                  ^^^^ Redundant `to_s` detected.
+            "#},
+            "::String.new(\"x\")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_string_new_to_s() {
+        // `Foo::String` has non-nil scope, so `nil?` rejects.
+        test::<RedundantTypeConversion>()
+            .expect_no_offenses("Foo::String.new(\"x\").to_s\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_string_new_to_s() {
+        // Inner `&.` is csend; `call` covers Send+Csend.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                String&.new("x").to_s
+                                 ^^^^ Redundant `to_s` detected.
+            "#},
+            "String&.new(\"x\")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_string_new_csend_to_s() {
+        // Outer `&.` is csend; `call_receiver` generic dispatch flags.
+        test::<RedundantTypeConversion>().expect_correction(
+            indoc! {r#"
+                String.new("x")&.to_s
+                                 ^^^^ Redundant `to_s` detected.
+            "#},
+            "String.new(\"x\")\n",
+        );
     }
 }
