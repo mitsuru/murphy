@@ -27,9 +27,42 @@
 //!
 //! Replaces the entire outer call node with `__dir__`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
 
 const MSG: &str = "Use `__dir__` to get an absolute path to the current file's directory.";
+
+// RuboCop parity: `Style/Dir` `dir_replacement?` is
+// `{(send (const {nil? cbase} :File) :expand_path (send (const {nil? cbase} :File) :dirname #file_keyword?))
+//   (send (const {nil? cbase} :File) :dirname (send (const {nil? cbase} :File) :realpath #file_keyword?))}`
+// (send-only, top-level only, exactly 1 arg per call — no `...`).
+// A top-level `{arm arm}` union is not expressible in v1 (variable-length
+// child lists are rejected inside `{}`), so each RuboCop union arm becomes
+// its own matcher below — each arm verbatim.
+// In Murphy `::File` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `flags_qualified_expand_path_dirname` +
+// `boundary_flags_cbase_dirname_realpath`); namespaced `Foo::File` still
+// rejects (pinned by `boundary_ignores_namespaced_file` +
+// `boundary_ignores_mixed_namespaced_inner`); send-only dispatch keeps `&.` inners/outer silent (pinned by
+// `boundary_ignores_csend_outer` + `boundary_ignores_csend_inner`);
+// `#file_keyword?` calls the free `file_keyword_p` below (body carried over
+// verbatim from the hand-rolled `is_file_keyword`: `__FILE__` is Unknown-kind
+// with that source; a plain string stays silent, pinned by
+// `boundary_ignores_string_leaf`).
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(
+    dir_expand_path_replacement,
+    "(send (const nil? :File) :expand_path (send (const nil? :File) :dirname #file_keyword?))"
+);
+def_node_matcher!(
+    dir_dirname_replacement,
+    "(send (const nil? :File) :dirname (send (const nil? :File) :realpath #file_keyword?))"
+);
+
+/// Returns `true` if `node` represents `__FILE__`.
+fn file_keyword_p(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(cx.kind(node), NodeKind::Unknown)
+        && cx.raw_source(cx.range(node)) == "__FILE__"
+}
 
 #[derive(Default)]
 pub struct Dir;
@@ -48,83 +81,8 @@ impl Dir {
     }
 }
 
-/// Returns `true` if `node` is `File.<method>(__FILE__)` (accepting `::File`),
-/// with exactly one argument which is `__FILE__`.
-fn is_file_call(node: NodeId, method: &str, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver,
-        method: sym,
-        args,
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-
-    let Some(recv) = receiver.get() else {
-        return false;
-    };
-    if !cx.is_global_const(recv, "File") {
-        return false;
-    }
-    if cx.symbol_str(sym) != method {
-        return false;
-    }
-    let arg_list = cx.list(args);
-    if arg_list.len() != 1 {
-        return false;
-    }
-    is_file_keyword(arg_list[0], cx)
-}
-
-/// Returns `true` if `node` represents `__FILE__`.
-fn is_file_keyword(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.kind(node), NodeKind::Unknown)
-        && cx.raw_source(cx.range(node)) == "__FILE__"
-}
-
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver,
-        method: sym,
-        args,
-    } = *cx.kind(node)
-    else {
-        return;
-    };
-
-    let method_name = cx.symbol_str(sym);
-
-    let matches = match method_name {
-        "expand_path" => {
-            // File.expand_path(File.dirname(__FILE__))
-            if let Some(recv) = receiver.get() {
-                if cx.is_global_const(recv, "File") {
-                    let arg_list = cx.list(args);
-                    arg_list.len() == 1 && is_file_call(arg_list[0], "dirname", cx)
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
-        "dirname" => {
-            // File.dirname(File.realpath(__FILE__))
-            if let Some(recv) = receiver.get() {
-                if cx.is_global_const(recv, "File") {
-                    let arg_list = cx.list(args);
-                    arg_list.len() == 1 && is_file_call(arg_list[0], "realpath", cx)
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
-        _ => false,
-    };
-
-    if !matches {
+    if !dir_expand_path_replacement(node, cx) && !dir_dirname_replacement(node, cx) {
         return;
     }
 
@@ -193,6 +151,59 @@ mod tests {
     #[test]
     fn accepts_expand_path_dirname_non_file_const() {
         test::<Dir>().expect_no_offenses("path = File.expand_path(Foo.dirname(__FILE__))\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.23): pin the exact node set
+    // the hand-rolled `is_global_const(File)` + arity-1 + `is_file_keyword`
+    // checks match, so the verbatim
+    // `{(send (const nil? :File) :expand_path (send (const nil? :File) :dirname #file_keyword?))
+    //   (send (const nil? :File) :dirname (send (const nil? :File) :realpath #file_keyword?))}`
+    // refactor can be proven equivalent. `::File` collapses to Const scope
+    // None, so `nil?` covers bare + `::` (pinned by
+    // `flags_qualified_expand_path_dirname`); namespaced `Foo::File` still
+    // rejects; inner/outer `&.` are csend and the cop only handles `send`,
+    // so they stay silent; exactly 1 arg (no `...`) so 2-arg outers stay
+    // silent; the leaf must be `__FILE__` (a string stays silent).
+
+    #[test]
+    fn boundary_ignores_namespaced_file() {
+        test::<Dir>().expect_no_offenses("path = Foo::File.expand_path(Foo::File.dirname(__FILE__))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_mixed_namespaced_inner() {
+        test::<Dir>().expect_no_offenses("path = File.expand_path(Foo::File.dirname(__FILE__))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_outer() {
+        test::<Dir>().expect_no_offenses("path = File&.expand_path(File.dirname(__FILE__))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_inner() {
+        test::<Dir>().expect_no_offenses("path = File.expand_path(File&.dirname(__FILE__))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_extra_outer_arg() {
+        test::<Dir>().expect_no_offenses("path = File.expand_path(File.dirname(__FILE__), __dir__)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_string_leaf() {
+        test::<Dir>().expect_no_offenses("path = File.expand_path(File.dirname('__FILE__'))\n");
+    }
+
+    #[test]
+    fn boundary_flags_cbase_dirname_realpath() {
+        test::<Dir>().expect_correction(
+            indoc! {r#"
+                path = ::File.dirname(::File.realpath(__FILE__))
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `__dir__` to get an absolute path to the current file's directory.
+            "#},
+            "path = __dir__\n",
+        );
     }
 }
 
