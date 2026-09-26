@@ -56,11 +56,40 @@
 //! def bar(a = 1, b = 2, c = 3, d = 4); end
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop, def_node_matcher};
 
 /// Stateless unit struct (ADR 0035).
 #[derive(Default)]
 pub struct ParameterLists;
+
+// RuboCop parity: `Metrics/ParameterLists` `struct_new_or_data_define_block?`
+// is `(block {(send (const {nil? cbase} :Struct) :new ...)
+// (send (const {nil? cbase} :Data) :define ...)} (args) ...)` (send-only,
+// `block`-only upstream), and `argument_to_lambda_or_proc?` delegates to
+// `proc?`, whose `Proc.new` arm is
+// `(block (send #global_const?(:Proc) :new) ...)` (rubocop 1.91.0 /
+// rubocop-ast 1.50.0).
+// Verbatim inners as `call` to preserve Murphy's node set: Murphy resolves the
+// call via `cx.block_call` (all of `Block`/`Numblock`/`Itblock`) with generic
+// `method_name` + `call_receiver` dispatch (both `Send` + `Csend`), so `call`
+// covers exactly the nodes the hand-rolled guards match (per DuplicateRequire /
+// TallyMethod precedent: equivalence-preserving vs hand-rolled, not a RuboCop
+// parity fix).
+// In Murphy `::Proc` / `::Struct` / `::Data` collapse to `Const{scope:None}`:
+// `nil?` covers bare + `::` (pinned by `boundary_skips_cbase_*`).
+// Namespaced `Foo::Struct` still counts (pinned by
+// `boundary_flags_namespaced_*`). Each matcher pairs its const with its method
+// (`Struct` -> `new`, `Data` -> `define`), so `Struct.define` / `Data.new`
+// still fall through, matching the hand-rolled `match`.
+def_node_matcher!(is_proc_new_call, "(call (const nil? :Proc) :new ...)");
+def_node_matcher!(
+    is_struct_new_call,
+    "(call (const nil? :Struct) :new ...)"
+);
+def_node_matcher!(
+    is_data_define_call,
+    "(call (const nil? :Data) :define ...)"
+);
 
 /// Options for [`ParameterLists`]. All three keys match RuboCop's defaults.
 #[derive(CopOptions)]
@@ -238,14 +267,9 @@ fn is_lambda_or_proc_block(parent: NodeId, cx: &Cx<'_>) -> bool {
     if cx.call_receiver(call).get().is_none() && cx.method_name(call) == Some("proc") {
         return true;
     }
-    // `Proc.new { }` — `Proc.new`, where `Proc` is the global constant.
-    if cx.method_name(call) == Some("new")
-        && let Some(recv) = cx.call_receiver(call).get()
-        && cx.is_global_const(recv, "Proc")
-    {
-        return true;
-    }
-    false
+    // `Proc.new { }` — `(call (const nil? :Proc) :new ...)`
+    // (`Proc` / `::Proc`, top-level only). `call` covers `Send` + `Csend`.
+    is_proc_new_call(call, cx)
 }
 
 /// RuboCop `struct_new_or_data_define_block?(parent.parent)` combined with
@@ -273,14 +297,10 @@ fn is_struct_new_or_data_define_block(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(call) = cx.block_call(node).get() else {
         return false;
     };
-    let Some(recv) = cx.call_receiver(call).get() else {
-        return false;
-    };
-    match cx.method_name(call) {
-        Some("new") => cx.is_global_const(recv, "Struct"),
-        Some("define") => cx.is_global_const(recv, "Data"),
-        _ => false,
-    }
+    // `(call (const nil? :Struct) :new ...)` (`Struct` / `::Struct`) or
+    // `(call (const nil? :Data) :define ...)` (`Data` / `::Data`, top-level
+    // only). `call` covers `Send` + `Csend`.
+    is_struct_new_call(call, cx) || is_data_define_call(call, cx)
 }
 
 #[cfg(test)]
@@ -460,6 +480,98 @@ mod tests {
                        ^^^^^^^^^ Avoid parameter lists longer than 2 parameters. [3/2]
                 end
             "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.12): pin the exact node set
+    // the hand-rolled `is_global_const` guards match, so the verbatim
+    // `(call (const nil? :Proc) :new ...)` /
+    // `(call (const nil? :Struct) :new ...)` /
+    // `(call (const nil? :Data) :define ...)` refactors can be proven
+    // equivalent. `::Proc` / `::Struct` / `::Data` collapse to
+    // `Const{scope:None}` in Murphy: `nil?` covers bare + `::`.
+    // Namespaced `Foo::Proc` etc. still flag. `call` covers `Send` + `Csend`,
+    // matching the generic `method_name`+`call_receiver` dispatch via
+    // `cx.block_call` (per DuplicateRequire / TallyMethod precedent).
+
+    #[test]
+    fn boundary_skips_cbase_proc_new_params() {
+        test::<ParameterLists>().expect_no_offenses("::Proc.new { |a, b, c, d, e, f| }\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_proc_new_params() {
+        test::<ParameterLists>().expect_offense(indoc! {"
+            Foo::Proc.new { |a, b, c, d, e, f| }
+                            ^^^^^^^^^^^^^^^^^^ Avoid parameter lists longer than 5 parameters. [6/5]
+        "});
+    }
+
+    #[test]
+    fn boundary_skips_csend_proc_new_params() {
+        // `&.` is a `csend` node; `call` covers `Send` + `Csend`.
+        test::<ParameterLists>().expect_no_offenses("Proc&.new { |a, b, c, d, e, f| }\n");
+    }
+
+    #[test]
+    fn boundary_skips_cbase_struct_new_initialize() {
+        test::<ParameterLists>().expect_no_offenses(indoc! {"
+            ::Struct.new(:one) do
+              def initialize(a, b, c, d, e, f)
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_struct_new_initialize() {
+        test::<ParameterLists>().expect_offense(indoc! {"
+            Foo::Struct.new(:one) do
+              def initialize(a, b, c, d, e, f)
+                            ^^^^^^^^^^^^^^^^^^ Avoid parameter lists longer than 5 parameters. [6/5]
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_skips_csend_struct_new_initialize() {
+        test::<ParameterLists>().expect_no_offenses(indoc! {"
+            Struct&.new(:one) do
+              def initialize(a, b, c, d, e, f)
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_skips_cbase_data_define_initialize() {
+        test::<ParameterLists>().expect_no_offenses(indoc! {"
+            ::Data.define(:one) do
+              def initialize(a, b, c, d, e, f)
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_data_define_initialize() {
+        test::<ParameterLists>().expect_offense(indoc! {"
+            Foo::Data.define(:one) do
+              def initialize(a, b, c, d, e, f)
+                            ^^^^^^^^^^^^^^^^^^ Avoid parameter lists longer than 5 parameters. [6/5]
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_skips_csend_data_define_initialize() {
+        test::<ParameterLists>().expect_no_offenses(indoc! {"
+            Data&.define(:one) do
+              def initialize(a, b, c, d, e, f)
+              end
+            end
+        "});
     }
 }
 

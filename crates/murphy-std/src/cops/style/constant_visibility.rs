@@ -31,7 +31,7 @@
 //!   receiver allowed to be a top-level (`::`) constant.
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop, def_node_matcher};
 
 #[derive(CopOptions)]
 pub struct ConstantVisibilityOptions {
@@ -41,6 +41,25 @@ pub struct ConstantVisibilityOptions {
 
 #[derive(Default)]
 pub struct ConstantVisibility;
+
+// RuboCop parity: `Style/ConstantVisibility` `module?` delegates to rubocop-ast
+// `class_constructor?`: `{(send #global_const?({:Class :Module :Struct}) :new
+// ...) (send #global_const?(:Data) :define ...) ...}` (`global_const?` is
+// `(const {nil? cbase} %1)`, rubocop 1.91.0 / rubocop-ast 1.50.0).
+// Verbatim as const matchers applied to the `unwrap_begin`-unwrapped receiver:
+// the surrounding `cx.block_call` resolution (bare send vs block form) +
+// parenthesized-receiver unwrapping + `new` / `define` method dispatch stay
+// hand-rolled, so parenthesized receivers (`(Struct).new`, pinned by
+// `boundary_accepts_paren_receiver_struct_new_module`) keep their behavior.
+// In Murphy `::Struct` / `::Data` collapse to `Const{scope:None}`: `nil?`
+// covers bare + `::` (pinned by `boundary_accepts_cbase_*`). Namespaced
+// `Foo::Struct` / `Foo::Data` still flag (pinned by
+// `boundary_flags_namespaced_*`).
+def_node_matcher!(
+    is_class_module_struct_const,
+    "(const nil? {:Class :Module :Struct})"
+);
+def_node_matcher!(is_data_const, "(const nil? :Data)");
 
 #[cop(
     name = "Style/ConstantVisibility",
@@ -103,10 +122,11 @@ fn is_module_assignment(node: NodeId, cx: &Cx<'_>) -> bool {
     };
     let recv_id = unwrap_begin(recv_id, cx);
     match cx.method_name(call_id) {
-        Some("new") => cx.is_global_const(recv_id, "Class")
-            || cx.is_global_const(recv_id, "Module")
-            || cx.is_global_const(recv_id, "Struct"),
-        Some("define") => cx.is_global_const(recv_id, "Data"),
+        // `(const nil? {:Class :Module :Struct})` (`Class` / `::Class`, etc,
+        // top-level only).
+        Some("new") => is_class_module_struct_const(recv_id, cx),
+        // `(const nil? :Data)` (`Data` / `::Data`, top-level only).
+        Some("define") => is_data_const(recv_id, cx),
         _ => false,
     }
 }
@@ -328,6 +348,71 @@ mod tests {
         test::<ConstantVisibility>().expect_no_offenses(
             "class Foo\n  BAR = 42\n  private_constant(*[:BAR])\nend\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.12): pin the exact node set
+    // the hand-rolled `is_global_const` guards match, so the verbatim
+    // `(const nil? {:Class :Module :Struct})` / `(const nil? :Data)`
+    // refactors can be proven equivalent. `::Struct` / `::Data` collapse to
+    // `Const{scope:None}` in Murphy: `nil?` covers bare + `::` (`::Class`
+    // pinned by pre-existing `ignore_modules_enabled_accepts_toplevel_constructor`).
+    // Namespaced `Foo::Struct` / `Foo::Data` still flag. `call`-generic
+    // dispatch covers `Send` + `Csend` (pinned by csend accepts below).
+    // The const matchers apply to the `unwrap_begin`-unwrapped receiver, so
+    // parenthesized receivers (`(Struct).new`) keep their current behavior.
+
+    #[test]
+    fn boundary_accepts_cbase_struct_new_module() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  S = ::Struct.new(:x)\nend\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_struct_new_module() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_offense(indoc! {"
+                class Foo
+                  S = Foo::Struct.new(:x)
+                  ^^^^^^^^^^^^^^^^^^^^^^^ Explicitly make `S` public or private using either `#public_constant` or `#private_constant`.
+                end
+            "});
+    }
+
+    #[test]
+    fn boundary_accepts_csend_struct_new_module() {
+        // `&.` is a `csend` node; the generic dispatch covers `Send` + `Csend`.
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  S = Struct&.new(:x)\nend\n");
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_data_define_module() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  D = ::Data.define(:x)\nend\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_data_define_module() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_offense(indoc! {"
+                class Foo
+                  D = Foo::Data.define(:x)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^ Explicitly make `D` public or private using either `#public_constant` or `#private_constant`.
+                end
+            "});
+    }
+
+    #[test]
+    fn boundary_accepts_paren_receiver_struct_new_module() {
+        // Parenthesized receivers are unwrapped before the const check.
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  S = (Struct).new(:x)\nend\n");
     }
 }
 murphy_plugin_api::submit_cop!(ConstantVisibility);
