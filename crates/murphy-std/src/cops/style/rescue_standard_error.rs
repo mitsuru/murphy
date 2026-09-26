@@ -33,7 +33,20 @@
 //!       under the explicit style, matching RuboCop behaviour.
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RescueStandardError` `rescue_standard_error?` inner is
+// `(const {nil? cbase} :StandardError)` inside
+// `(resbody $(array (const {nil? cbase} :StandardError)) _ _)`.
+// In Murphy `::StandardError` collapses to `Const{scope:None}`: `nil?` covers
+// bare + `::` (pinned by `boundary_flags_cbase_standard_error_implicit`).
+// Namespaced `Foo::StandardError` still accepts (pinned by
+// `boundary_accepts_namespaced_standard_error_implicit`). The `resbody` /
+// single-element `array` guards stay hand-rolled below.
+def_node_matcher!(
+    is_standard_error_const,
+    "(const nil? :StandardError)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -102,7 +115,9 @@ impl RescueStandardError {
                 // Flag `rescue StandardError` when it is the sole exception class.
                 if exception_list.len() == 1 {
                     let exc_id = exception_list[0];
-                    if cx.is_global_const(exc_id, "StandardError") {
+                    // `(const nil? :StandardError)` (`StandardError` /
+                    // `::StandardError`, top-level only).
+                    if is_standard_error_const(exc_id, cx) {
                         // Offense range: from rescue keyword start to end of
                         // the StandardError constant (inclusive).
                         let kw_range = rescue_keyword_range(node, cx);
@@ -324,6 +339,39 @@ mod tests {
                 rescue StandardError
                 ^^^^^^^^^^^^^^^^^^^^ Omit the error class when rescuing `StandardError` by itself.
                   baz
+                end
+            "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.9): pin the exact node set
+    // the hand-rolled `is_global_const` guard matches, so the verbatim
+    // `(const nil? :StandardError)` refactor can be proven equivalent.
+    // `::StandardError` collapses to `Const{scope:None}` in Murphy: `nil?`
+    // covers bare + `::`. Namespaced `Foo::StandardError` still accepts.
+
+    #[test]
+    fn boundary_flags_cbase_standard_error_implicit() {
+        test::<RescueStandardError>()
+            .with_options(&implicit_opts())
+            .expect_offense(indoc! {"
+                begin
+                  foo
+                rescue ::StandardError
+                ^^^^^^^^^^^^^^^^^^^^^^ Omit the error class when rescuing `StandardError` by itself.
+                  bar
+                end
+            "});
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_standard_error_implicit() {
+        test::<RescueStandardError>()
+            .with_options(&implicit_opts())
+            .expect_no_offenses(indoc! {"
+                begin
+                  foo
+                rescue Foo::StandardError
+                  bar
                 end
             "});
     }

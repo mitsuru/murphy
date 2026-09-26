@@ -45,7 +45,23 @@
 //!   Offense range is the whole const node (`cx.range(node)`).
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
+
+// RuboCop parity: `Gemspec/RubyVersionGlobalsUsage` `ruby_version?` is
+// `{ (const {cbase nil?} :RUBY_VERSION)
+//    (const (const {cbase nil?} :Ruby) :VERSION) }`.
+// In Murphy `::RUBY_VERSION` / `::Ruby` collapse to `Const{scope:None}`:
+// `nil?` covers bare + `::` (pinned by `flags_cbase_rooted_ruby_version` /
+// `flags_cbase_rooted_ruby_scoped_const`). Namespaced `Foo::RUBY_VERSION` /
+// `Foo::Ruby::VERSION` still accept (pinned by
+// `boundary_accepts_namespaced_*`). The inner `Ruby` const never self-matches
+// (name is `Ruby`, not `VERSION`/`RUBY_VERSION`), so `Ruby::VERSION` flags
+// once. File walk + message rendering stay hand-rolled below.
+def_node_matcher!(is_ruby_version_bare, "(const nil? :RUBY_VERSION)");
+def_node_matcher!(
+    is_ruby_scoped_version,
+    "(const (const nil? :Ruby) :VERSION)"
+);
 
 #[derive(Default)]
 pub struct RubyVersionGlobalsUsage;
@@ -76,20 +92,10 @@ impl RubyVersionGlobalsUsage {
 /// `{ (const {cbase nil?} :RUBY_VERSION)
 ///    (const (const {cbase nil?} :Ruby) :VERSION) }`.
 fn is_ruby_version_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    // (const {cbase nil?} :RUBY_VERSION)
-    if cx.is_global_const(node, "RUBY_VERSION") {
-        return true;
-    }
-    // (const (const {cbase nil?} :Ruby) :VERSION)
-    let NodeKind::Const { scope, name } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.symbol_str(name) != "VERSION" {
-        return false;
-    }
-    scope
-        .get()
-        .is_some_and(|inner| cx.is_global_const(inner, "Ruby"))
+    // `(const nil? :RUBY_VERSION)` (`RUBY_VERSION` / `::RUBY_VERSION`,
+    // top-level only) or `(const (const nil? :Ruby) :VERSION)`
+    // (`Ruby::VERSION` / `::Ruby::VERSION`, top-level `Ruby` only).
+    is_ruby_version_bare(node, cx) || is_ruby_scoped_version(node, cx)
 }
 
 murphy_plugin_api::submit_cop!(RubyVersionGlobalsUsage);
@@ -177,5 +183,22 @@ mod tests {
         test::<RubyVersionGlobalsUsage>().expect_no_offenses(indoc! {r#"
             puts Foo::Ruby
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.9): pin the exact node set
+    // the hand-rolled `is_global_const` guards match, so the verbatim
+    // `(const nil? :RUBY_VERSION)` + `(const (const nil? :Ruby) :VERSION)`
+    // refactor can be proven equivalent. `::RUBY_VERSION` / `::Ruby::VERSION`
+    // collapse to `Const{scope:None}`: `nil?` covers bare + `::`.
+    // Namespaced `Foo::RUBY_VERSION` / `Foo::Ruby::VERSION` still accept.
+
+    #[test]
+    fn boundary_accepts_namespaced_ruby_version() {
+        test::<RubyVersionGlobalsUsage>().expect_no_offenses("puts Foo::RUBY_VERSION\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_ruby_scoped_version() {
+        test::<RubyVersionGlobalsUsage>().expect_no_offenses("puts Foo::Ruby::VERSION\n");
     }
 }
