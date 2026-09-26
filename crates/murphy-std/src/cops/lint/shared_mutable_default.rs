@@ -26,6 +26,19 @@ use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
 // hand-rolled below.
 def_node_matcher!(hash_new, "(send (const nil? :Hash) :new ...)");
 
+// RuboCop parity: `Lint/SharedMutableDefault` inner mutable defaults include
+// `(send (const {nil? cbase} {:Array :Hash}) :new)` (zero args, send-only).
+// In Murphy `::Array` / `::Hash` collapse to `Const{scope:None}`: `nil?`
+// covers bare + `::` (pinned by `boundary_flags_cbase_array_new_inner`).
+// Namespaced `Foo::Array` still does not flag (pinned by
+// `boundary_ignores_namespaced_array_new_inner`). `send` covers `Send` only,
+// matching the `NodeKind::Send` guard (csend still does not flag, pinned by
+// `boundary_ignores_csend_array_new_inner`).
+def_node_matcher!(
+    is_array_or_hash_new,
+    "(send (const nil? {:Array :Hash}) :new)"
+);
+
 const MSG: &str = "Do not create a Hash with a mutable default value as the default value can accidentally be changed.";
 
 #[derive(Default)]
@@ -68,12 +81,11 @@ fn mutable_default_arg(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Array(_) => true,
         NodeKind::Hash(_) => !capacity_keyword_argument(node, cx),
-        NodeKind::Send { receiver, method, args } => {
-            cx.symbol_str(method) == "new"
-                && cx.list(args).is_empty()
-                && receiver
-                    .get()
-                    .is_some_and(|receiver| cx.is_global_const(receiver, "Array") || cx.is_global_const(receiver, "Hash"))
+        NodeKind::Send { .. } => {
+            // `(send (const nil? {:Array :Hash}) :new)` (`Array`/`Hash` /
+            // `::Array`/`::Hash`, top-level only, zero args). `send` covers
+            // `Send` only.
+            is_array_or_hash_new(node, cx)
         }
         _ => false,
     }
@@ -176,6 +188,31 @@ mod tests {
         test::<SharedMutableDefault>().expect_no_offenses("Hash&.new([])
 ");
     }
+
+    // --- Boundary characterization (murphy-ft88.13): pin the exact node set
+    // the hand-rolled `Array.new`/`Hash.new` inner (`is_global_const` +
+    // `NodeKind::Send` + empty args) matches, so the verbatim
+    // `(send (const nil? {:Array :Hash}) :new)` refactor can be proven
+    // equivalent.
+
+    #[test]
+    fn boundary_flags_cbase_array_new_inner() {
+        test::<SharedMutableDefault>().expect_offense(indoc! {r#"
+            Hash.new(::Array.new)
+            ^^^^^^^^^^^^^^^^^^^^^ Do not create a Hash with a mutable default value as the default value can accidentally be changed.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_array_new_inner() {
+        test::<SharedMutableDefault>().expect_no_offenses("Hash.new(Foo::Array.new)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_array_new_inner() {
+        test::<SharedMutableDefault>().expect_no_offenses("Hash.new(Array&.new)\n");
+    }
+
 }
 
 murphy_plugin_api::submit_cop!(SharedMutableDefault);

@@ -37,7 +37,26 @@
 //! an AST-shuffle (the algorithm name moves from a constant into a string
 //! argument), so whole-node interpolation is the right tool over surgical edits.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/DeprecatedOpenSSLConstant` `algorithm_const` is
+// `(send $(const (const (const {nil? cbase} :OpenSSL) {:Cipher :Digest}) _) ...)`
+// (any method, any args; `RESTRICT_ON_SEND = %i[new digest]` restricts dispatch).
+// Murphy's `check_send` already restricts to `new`/`digest` via
+// `#[on_node(kind = "send", methods = ["new", "digest"])]`, so the verbatim
+// port uses `_ ...` (any method, any args) to match the same node set as
+// RuboCop's method-omitted form (per `Style/DateTime` precedent).
+// In Murphy `::OpenSSL` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `flags_cbase_prefixed`). Namespaced `Foo::OpenSSL` still
+// does not flag (pinned by `boundary_ignores_namespaced_openssl`). `send`
+// covers `Send` only, matching `#[on_node(kind = "send")]` (csend still does
+// not flag, pinned by `boundary_ignores_csend`). The algorithm-name `_`
+// matches any const name (`AES`, `SHA256`, etc). The capture stays hand-rolled
+// below (parent extraction for replacement); this is predicate-only.
+def_node_matcher!(
+    is_algorithm_const_send,
+    "(send (const (const (const nil? :OpenSSL) {:Cipher :Digest}) _) _ ...)"
+);
 
 #[derive(Default)]
 pub struct DeprecatedOpenSSLConstant;
@@ -80,6 +99,11 @@ impl DeprecatedOpenSSLConstant {
         }
 
         // `algorithm_const`: receiver must be `OpenSSL::{Cipher|Digest}::<X>`.
+        // `(send (const (const (const nil? :OpenSSL) {:Cipher :Digest}) _) _ ...)`
+        // (`OpenSSL` / `::OpenSSL`, top-level only). `send` covers `Send` only.
+        if !is_algorithm_const_send(node, cx) {
+            return;
+        }
         let Some(parent) = algorithm_const_parent(receiver, cx) else {
             return;
         };
@@ -112,36 +136,14 @@ fn is_named_const(node: NodeId, name: &str, cx: &Cx<'_>) -> bool {
 /// If `receiver` is `OpenSSL::{Cipher|Digest}::<X>`, return the parent const
 /// node (`OpenSSL::Cipher` / `OpenSSL::Digest`).
 fn algorithm_const_parent(receiver: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    // `(send (const (const (const nil? :OpenSSL) {:Cipher :Digest}) _) _ ...)`
+    // already verified the `OpenSSL::{Cipher,Digest}::<X>` chain via
+    // `is_algorithm_const_send`; just extract the parent for replacement.
     // receiver = (const <parent> :X)
     let NodeKind::Const { scope, .. } = *cx.kind(receiver) else {
         return None;
     };
-    let parent = scope.get()?;
-    // parent = (const (const {nil cbase} :OpenSSL) {:Cipher :Digest})
-    let NodeKind::Const {
-        scope: parent_scope,
-        name: parent_name,
-    } = *cx.kind(parent)
-    else {
-        return None;
-    };
-    let parent_name = cx.symbol_str(parent_name);
-    if parent_name != "Cipher" && parent_name != "Digest" {
-        return None;
-    }
-    let grandparent = parent_scope.get()?;
-    if !is_named_const(grandparent, "OpenSSL", cx) {
-        return None;
-    }
-    // grandparent's scope must be nil or cbase (no further nesting).
-    let NodeKind::Const { scope: gp_scope, .. } = *cx.kind(grandparent) else {
-        return None;
-    };
-    match gp_scope.get() {
-        None => Some(parent),
-        Some(s) if matches!(cx.kind(s), NodeKind::Cbase) => Some(parent),
-        _ => None,
-    }
+    scope.get()
 }
 
 /// `openssl_class` — the parent const's source (`OpenSSL::Cipher` /
@@ -377,5 +379,25 @@ mod tests {
             "#},
             "OpenSSL::Cipher.new('des')\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.13): pin the exact node set
+    // the hand-rolled `algorithm_const_parent` (nested `OpenSSL::{Cipher,Digest}`
+    // chain, top-level only) matches, so the verbatim
+    // `(send (const (const (const nil? :OpenSSL) {:Cipher :Digest}) _) _ ...)`
+    // refactor can be proven equivalent. `::OpenSSL` collapses:
+    // `nil?` covers bare + `::` (both flag, cbase pinned by
+    // `flags_cbase_prefixed`). Namespaced `Foo::OpenSSL` is not top-level,
+    // so it does not flag. `send` covers `Send` only, matching
+    // `#[on_node(kind = "send")]` (csend still does not flag).
+
+    #[test]
+    fn boundary_ignores_namespaced_openssl() {
+        test::<DeprecatedOpenSSLConstant>().expect_no_offenses("Foo::OpenSSL::Cipher::AES.new(128, :GCM)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        test::<DeprecatedOpenSSLConstant>().expect_no_offenses("OpenSSL::Cipher::AES&.new(128, :GCM)\n");
     }
 }
