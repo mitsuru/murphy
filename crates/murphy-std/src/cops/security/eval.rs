@@ -37,7 +37,15 @@
 //!
 //! `` The use of `eval` is a serious security risk. `` (matches RuboCop).
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// RuboCop parity: `Security/Eval` Kernel receiver is
+// `(const {cbase nil?} :Kernel)` (top-level only).
+// In Murphy `::Kernel` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `flags_cbase_kernel_receiver`), namespaced Foo::Kernel
+// still rejects (pinned by `boundary_ignores_namespaced_kernel_eval`).
+// `send` head + nil/binding arms + str/dstr guards stay hand-rolled below.
+def_node_matcher!(is_kernel_const, "(const nil? :Kernel)");
 
 #[derive(Default)]
 pub struct Eval;
@@ -94,10 +102,9 @@ fn receiver_is_eval_target(node: NodeId, cx: &Cx<'_>) -> bool {
             cx.call_receiver(receiver).get().is_none()
                 && cx.method_name(receiver) == Some("binding")
         }
-        // `(const {cbase nil?} :Kernel)` — `Kernel` / `::Kernel`.
-        // Murphy normalises `::Kernel` to a scope-less `Const`, so
-        // `is_global_const` matches both forms.
-        NodeKind::Const { .. } => cx.is_global_const(receiver, "Kernel"),
+        // `(const nil? :Kernel)` top-level only; preserves `::Kernel` via
+        // scope-None collapse.
+        NodeKind::Const { .. } => is_kernel_const(receiver, cx),
         _ => false,
     }
 }
@@ -184,5 +191,18 @@ mod tests {
     #[test]
     fn accepts_non_eval_method() {
         test::<Eval>().expect_no_offenses("instance_eval { foo }\n");
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_kernel_eval() {
+        // `Foo::Kernel` const_name is "Foo::Kernel", not "Kernel", so silent;
+        // verbatim `(const nil? :Kernel)` must preserve.
+        test::<Eval>().expect_no_offenses("Foo::Kernel.eval(something)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_kernel_eval() {
+        // `&.` is csend, not send; check_send only dispatches on send.
+        test::<Eval>().expect_no_offenses("Kernel&.eval(something)\n");
     }
 }
