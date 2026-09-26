@@ -89,7 +89,21 @@
 
 use std::collections::{HashMap, HashSet};
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop, method_predicates};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher, method_predicates};
+
+// RuboCop parity: `Naming/MethodName` `new_struct?` is
+// `(send (const {nil? cbase} :Struct) :new ...)` and `define_data?` is
+// `(send (const {nil? cbase} :Data) :define ...)` (send-only, top-level
+// only, any args). In Murphy `::Struct` / `::Data` collapse to
+// `Const{scope:None}`, so `nil?` covers bare + `::` (pinned by
+// `flags_struct_and_data_member_names` +
+// `boundary_flags_cbase_data_define_member`); namespaced `Other::Struct` /
+// `Other::Data` still silent (pinned by
+// `ignores_nonliteral_or_unmatched_dynamic_definitions`); send-only dispatch
+// keeps `&.` silent (pinned by `boundary_ignores_csend_*`, matching RuboCop
+// send-only). Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_struct_new_call, "(send (const nil? :Struct) :new ...)");
+def_node_matcher!(is_data_define_call, "(send (const nil? :Data) :define ...)");
 
 #[derive(Default)]
 pub struct MethodName;
@@ -301,7 +315,7 @@ fn check_send(node: NodeId, opts: &Options, cx: &Cx<'_>) {
         return;
     }
 
-    if selector == "new" && const_receiver_is(node, "Struct", cx) {
+    if selector == "new" && is_struct_new_call(node, cx) {
         let first_member = usize::from(
             args.first()
                 .is_some_and(|&arg| matches!(*cx.kind(arg), NodeKind::Str(_))),
@@ -314,7 +328,7 @@ fn check_send(node: NodeId, opts: &Options, cx: &Cx<'_>) {
         return;
     }
 
-    if selector == "define" && const_receiver_is(node, "Data", cx) {
+    if selector == "define" && is_data_define_call(node, cx) {
         for &member in args {
             if let Some(name) = literal_method_name(member, cx) {
                 check_dynamic_name(member, name, true, opts, cx);
@@ -338,21 +352,6 @@ fn check_send(node: NodeId, opts: &Options, cx: &Cx<'_>) {
         && matches!(selector, "attr" | "attr_reader" | "attr_writer" | "attr_accessor")
     {
         check_attribute_accessor(node, args, opts, cx);
-    }
-}
-
-/// `new_struct?` / `define_data?`: only bare or top-level-qualified constants
-/// match RuboCop's `(const {nil? cbase} :Name)` pattern.
-fn const_receiver_is(node: NodeId, expected: &str, cx: &Cx<'_>) -> bool {
-    let Some(receiver) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    match *cx.kind(receiver) {
-        NodeKind::Const { scope, name } if cx.symbol_str(name) == expected => match scope.get() {
-            None => true,
-            Some(scope) => matches!(*cx.kind(scope), NodeKind::Cbase),
-        },
-        _ => false,
     }
 }
 
@@ -1131,6 +1130,36 @@ mod tests {
                 def foo
                 end
             "#});
+    }
+
+    // --- Boundary characterization (murphy-puku batch 27): pin the exact
+    // node set the hand-rolled `const_receiver_is` Struct/Data guards match,
+    // so the verbatim `(send (const nil? :Struct) :new ...)` +
+    // `(send (const nil? :Data) :define ...)` refactor can be proven
+    // equivalent. `::Struct` / `::Data` collapse to Const scope None in
+    // Murphy, so `nil?` covers bare + `::` (both flag, cbase pre-pinned for
+    // Struct via `flags_struct_and_data_member_names`); namespaced
+    // `Foo::Struct` / `Foo::Data` still silent (pre-pinned via
+    // `ignores_nonliteral_or_unmatched_dynamic_definitions`); send-only
+    // dispatch keeps `&.` silent (new pins below, matching RuboCop
+    // send-only `new_struct?` / `define_data?`).
+
+    #[test]
+    fn boundary_flags_cbase_data_define_member() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            ::Data.define(:badMemberName)
+                          ^^^^^^^^^^^^^^ Use snake_case for method names.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_struct_new_member() {
+        test::<MethodName>().expect_no_offenses("Struct&.new(:badMemberName)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_data_define_member() {
+        test::<MethodName>().expect_no_offenses("Data&.define(:badMemberName)\n");
     }
 }
 murphy_plugin_api::submit_cop!(MethodName);

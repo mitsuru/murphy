@@ -47,7 +47,23 @@
 //!       disable directive is still treated as "has comments".
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, Symbol, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Style/SymbolProc` `proc_node?` Proc.new branch is
+// `(send (const {nil? cbase} :Proc) :new)` (0 args, send-only, top-level
+// only). Verbatim as `(call (const nil? :Proc) :new ...)`.
+// In Murphy `::Proc` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by `exempts_proc_new_when_active_support_enabled` +
+// `boundary_exempts_cbase_proc_new_when_active_support_enabled`).
+// Namespaced `Foo::Proc` still flags (pinned by
+// `flags_namespaced_proc_new_when_active_support_enabled`). `call` covers
+// `Send` + `Csend`, matching the generic `call_receiver` + `method_name`
+// dispatch (pinned by `boundary_exempts_csend_proc_new_when_active_support_enabled`
+// per EmptyBlock `boundary_accepts_csend_proc_new` precedent). `...`
+// preserves the hand-rolled any-args acceptance (equivalence-preserving vs
+// hand-rolled, not a RuboCop parity fix for the 0-args gap).
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_proc_new_call, "(call (const nil? :Proc) :new ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -308,19 +324,9 @@ fn is_lambda_or_proc_dispatch(node: NodeId, call: NodeId, block_method: &str, cx
     if block_method != "new" {
         return false;
     }
-    let Some(recv) = cx.call_receiver(call).get() else {
-        return false;
-    };
-    let NodeKind::Const { scope, name } = *cx.kind(recv) else {
-        return false;
-    };
-    // Only top-level `Proc` (nil scope) or `::Proc` (cbase scope), not a named
-    // scope like `Foo::Proc`.
-    let top_level = match scope.get() {
-        None => true,
-        Some(s) => matches!(cx.kind(s), NodeKind::Cbase),
-    };
-    top_level && cx.symbol_str(name) == "Proc"
+    // `(call (const nil? :Proc) :new ...)` (`Proc` / `::Proc`, top-level
+    // only). `call` covers `Send` + `Csend`; `...` preserves any-args.
+    is_proc_new_call(call, cx)
 }
 
 fn is_unsafe_hash_usage(call: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
@@ -1025,6 +1031,31 @@ mod tests {
                 coll.map { |e| e.upcase }
                          ^^^^^^^^^^^^^^^^ Pass `&:upcase` as an argument to `map` instead of a block.
             "});
+    }
+
+    // --- Boundary characterization (murphy-puku batch 27): pin the exact
+    // node set the hand-rolled `is_lambda_or_proc_dispatch` Proc.new branch
+    // (`is_global_const`-style top-level Proc + `new`) matches, so the
+    // verbatim `(call (const nil? :Proc) :new ...)` refactor can be proven
+    // equivalent. `::Proc` collapses to Const scope None in Murphy, so
+    // `nil?` covers bare + `::` (both exempt); namespaced `Foo::Proc`
+    // still flags (pre-existing `flags_namespaced_proc_new_*`); `call`
+    // covers Send + Csend, matching the generic `call_receiver` +
+    // `method_name` dispatch (csend still exempt, like EmptyBlock
+    // `boundary_accepts_csend_proc_new` precedent).
+
+    #[test]
+    fn boundary_exempts_cbase_proc_new_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("::Proc.new { |x| x.method }\n");
+    }
+
+    #[test]
+    fn boundary_exempts_csend_proc_new_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("Proc&.new { |x| x.method }\n");
     }
 }
 murphy_plugin_api::submit_cop!(SymbolProc);

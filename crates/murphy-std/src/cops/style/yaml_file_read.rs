@@ -39,7 +39,21 @@
 //! This is a structural rearrangement (whole-range replacement from the
 //! selector to the end of the expression).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/YAMLFileRead` `yaml_file_read?` const inners are
+// `(const {cbase nil?} :YAML)` (outer) + `(const {cbase nil?} :File)` (inner
+// `File.read`). Verbatim as `(const nil? :YAML)` + `(const nil? :File)`.
+// In Murphy `::YAML` / `::File` collapse to `Const{scope:None}`, so `nil?`
+// covers bare + `::` (pinned by `flags_yaml_load_file_read` +
+// `flags_qualified_yaml_load`); namespaced `Foo::YAML` / `Foo::File` still
+// reject (pinned by `boundary_ignores_namespaced_*`); send-only dispatch
+// keeps `&.` outers/inners silent (pinned by `boundary_ignores_csend_*`,
+// matching RuboCop send-only). The `load`/`safe_load`/`parse` method guard +
+// File.read arity-1 + path/rest reconstruction stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_yaml_const, "(const nil? :YAML)");
+def_node_matcher!(is_file_const, "(const nil? :File)");
 
 const MSG: &str = "Use `%s` instead.";
 
@@ -77,9 +91,9 @@ fn match_yaml_file_read<'a>(
         return None;
     };
 
-    // Receiver must be YAML (qualified or top-level).
+    // Receiver must be YAML (`(const nil? :YAML)`, top-level only).
     let recv = receiver.get()?;
-    if !cx.is_global_const(recv, "YAML") {
+    if !is_yaml_const(recv, cx) {
         return None;
     }
 
@@ -112,9 +126,9 @@ fn extract_file_read_arg(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         return None;
     };
 
-    // Receiver must be File (qualified or top-level).
+    // Receiver must be File (`(const nil? :File)`, top-level only).
     let recv = receiver.get()?;
-    if !cx.is_global_const(recv, "File") {
+    if !is_file_const(recv, cx) {
         return None;
     }
 
@@ -274,6 +288,36 @@ mod tests {
             <YAMLFileRead as Cop>::MINIMUM_TARGET_RUBY_VERSION,
             Some(RubyVersion::new(3, 1)),
         );
+    }
+
+    // --- Boundary characterization (murphy-puku batch 27): pin the exact
+    // node set the hand-rolled `is_global_const(YAML)` + `is_global_const(File)`
+    // guards match, so the verbatim `(const nil? :YAML)` +
+    // `(const nil? :File)` refactor can be proven equivalent.
+    // `::YAML` / `::File` collapse to Const scope None in Murphy, so `nil?`
+    // covers bare + `::` (cbase pre-pinned via `flags_qualified_yaml_load`);
+    // namespaced `Foo::YAML` / `Foo::File` still silent; send-only dispatch
+    // keeps `&.` outers/inners silent (matching RuboCop send-only
+    // `yaml_file_read?`).
+
+    #[test]
+    fn boundary_ignores_namespaced_yaml() {
+        test::<YAMLFileRead>().expect_no_offenses("Foo::YAML.load(File.read(path))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_file_inner() {
+        test::<YAMLFileRead>().expect_no_offenses("YAML.load(Foo::File.read(path))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_outer() {
+        test::<YAMLFileRead>().expect_no_offenses("YAML&.load(File.read(path))\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_inner() {
+        test::<YAMLFileRead>().expect_no_offenses("YAML.load(File&.read(path))\n");
     }
 }
 murphy_plugin_api::submit_cop!(YAMLFileRead);
