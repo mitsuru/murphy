@@ -37,7 +37,16 @@
 //! Replaces the full expression with `File.write(filename, content)` or
 //! `File.binwrite(filename, content)`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/FileWrite` `file_open?` const head is
+// `(const {nil? cbase} :File)` (top-level only). In Murphy `::File` collapses
+// to `Const{scope:None}`: `nil?` covers bare + `::` (both flag, `::` already
+// pinned by `flags_qualified_file_open_chained`). Namespaced `Foo::File`
+// still accepts (pinned by `boundary_ignores_namespaced_file_open`). The
+// `:open` method + truncating-mode guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_file_const_matcher, "(const nil? :File)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -88,8 +97,10 @@ fn match_file_open<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(NodeId, &'a str)> {
     }
 
     // Receiver must be File or ::File.
+    // `(const nil? :File)` — top-level only (`::` collapses to
+    // `Const{scope:None}`). Namespaced still accepts.
     let recv = receiver.get()?;
-    if !cx.is_global_const(recv, "File") {
+    if !is_file_const_matcher(recv, cx) {
         return None;
     }
 
@@ -356,6 +367,27 @@ mod tests {
     fn no_offense_block_write_with_splat() {
         test::<FileWrite>()
             .expect_no_offenses("File.open(filename, 'w') { |f| f.write(*objects) }\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.26): pin the exact node set
+    // the hand-rolled `is_global_const(File)` in `match_file_open` matches,
+    // so the verbatim `(const nil? :File)` refactor can be proven equivalent.
+    // `::File` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (both flag, `::` already pinned by `flags_qualified_file_open_chained`).
+    // Namespaced `Foo::File` still accepts (pinned by
+    // `boundary_ignores_namespaced_file_open`). The cop is `Send`-only, so
+    // `&.` stays silent (pinned by `boundary_ignores_csend_file_open`).
+
+    #[test]
+    fn boundary_ignores_namespaced_file_open() {
+        test::<FileWrite>()
+            .expect_no_offenses("Foo::File.open(filename, 'w').write(content)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_file_open() {
+        test::<FileWrite>()
+            .expect_no_offenses("File&.open(filename, 'w').write(content)\n");
     }
 }
 

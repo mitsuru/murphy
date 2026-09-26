@@ -67,7 +67,17 @@
 //! src.map { |e| e * 2 }
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/MapIntoArray` `empty_array_asgn?` Array arms are
+// `(send (const {nil? cbase} :Array) :[] ...)` /
+// `(send (const {nil? cbase} :Array) :new ...)`. In Murphy `::Array` collapses
+// to `Const{scope:None}`: `nil?` covers bare + `::` (both flag, pinned by
+// `boundary_flags_cbase_array_bracket`). Namespaced `Foo::Array` still
+// accepts (pinned by `boundary_ignores_namespaced_array_bracket`). The
+// `:[]`/`:new` method + empty-args guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_array_const_matcher, "(const nil? :Array)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -529,18 +539,11 @@ fn is_empty_array_value(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns `true` if `node` is the constant `Array`.
+/// Verbatim `(const nil? :Array)` (top-level only); `::` collapses to
+/// `Const{scope:None}` so `nil?` covers bare + `::`.
 fn is_array_const(node: Option<NodeId>, cx: &Cx<'_>) -> bool {
     let Some(n) = node else { return false; };
-    match *cx.kind(n) {
-        NodeKind::Const { name, scope } => {
-            cx.symbol_str(name) == "Array"
-                && matches!(
-                    scope.get().map(|s| cx.kind(s)),
-                    None | Some(NodeKind::Cbase)
-                )
-        }
-        _ => false,
-    }
+    is_array_const_matcher(n, cx)
 }
 
 /// Returns `true` if `node` is `lvar(dest_name)`.
@@ -735,6 +738,44 @@ mod tests {
         test::<MapIntoArray>().expect_no_offenses(indoc! {"
             dest = []
             src.each { |e| dest << transform(e, dest) }
+            dest
+        "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.26): pin the exact node set
+    // the hand-rolled `is_array_const` (None-or-Cbase scope) matches, so the
+    // verbatim `(const nil? :Array)` refactor can be proven equivalent.
+    // `::Array` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (both flag, pinned by `boundary_flags_cbase_array_bracket`). Namespaced
+    // `Foo::Array` still accepts (pinned by
+    // `boundary_ignores_namespaced_array_bracket`). `Array&.[]` is `Csend`
+    // and `is_empty_array_value` only handles `Send`, so it stays silent
+    // (pinned by `boundary_ignores_csend_array_bracket`).
+
+    #[test]
+    fn boundary_flags_cbase_array_bracket() {
+        test::<MapIntoArray>().expect_offense(indoc! {"
+            dest = ::Array[]
+            src.each { |e| dest << e * 2 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `map` instead of `each` to map elements into an array.
+            dest
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_array_bracket() {
+        test::<MapIntoArray>().expect_no_offenses(indoc! {"
+            dest = Foo::Array[]
+            src.each { |e| dest << e * 2 }
+            dest
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_array_bracket() {
+        test::<MapIntoArray>().expect_no_offenses(indoc! {"
+            dest = Array&.[]
+            src.each { |e| dest << e * 2 }
             dest
         "});
     }

@@ -47,7 +47,16 @@
 //! Replaces from the `open` selector to the end of the read node:
 //! `File.open(f).read` → `File.read(f)`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/FileRead` `file_open?` const head is
+// `(const {nil? cbase} :File)` (top-level only). In Murphy `::File` collapses
+// to `Const{scope:None}`: `nil?` covers bare + `::` (both flag, pinned by
+// `boundary_flags_cbase_file_open`). Namespaced `Foo::File` still accepts
+// (pinned by `boundary_ignores_namespaced_file_open`). The `:open` method +
+// mode + block-pass guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_file_const_matcher, "(const nil? :File)");
 
 const READ_FILE_START_TO_FINISH_MODES: &[&str] = &["r", "rt", "rb", "r+", "r+t", "r+b"];
 
@@ -190,11 +199,13 @@ impl FileRead {
 }
 
 /// Returns true if the receiver of the send node is `File` (nil-scoped or cbase-scoped).
+/// Verbatim `(const nil? :File)` (top-level only); `::` collapses to
+/// `Const{scope:None}` so `nil?` covers bare + `::`.
 fn is_file_class(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(recv) = cx.call_receiver(node).get() else {
         return false;
     };
-    cx.is_global_const(recv, "File")
+    is_file_const_matcher(recv, cx)
 }
 
 /// Extracts the mode string from `File.open` call arguments.
@@ -326,6 +337,36 @@ mod tests {
     #[test]
     fn accepts_non_file_open() {
         test::<FileRead>().expect_no_offenses("io.open(filename).read\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.26): pin the exact node set
+    // the hand-rolled `is_file_class` (`is_global_const(File)`) matches, so
+    // the verbatim `(const nil? :File)` refactor can be proven equivalent.
+    // `::File` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (both flag, pinned by `boundary_flags_cbase_file_open`). Namespaced
+    // `Foo::File` still accepts (pinned by
+    // `boundary_ignores_namespaced_file_open`). The cop is `Send`-only, so
+    // `&.` stays silent (pinned by `boundary_ignores_csend_file_open`).
+
+    #[test]
+    fn boundary_flags_cbase_file_open() {
+        test::<FileRead>().expect_correction(
+            indoc! {r#"
+                ::File.open(filename).read
+                       ^^^^^^^^^^^^^^^^^^^ Use `File.read`.
+            "#},
+            "::File.read(filename)\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_file_open() {
+        test::<FileRead>().expect_no_offenses("Foo::File.open(filename).read\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_file_open() {
+        test::<FileRead>().expect_no_offenses("File&.open(filename).read\n");
     }
 }
 murphy_plugin_api::submit_cop!(FileRead);
