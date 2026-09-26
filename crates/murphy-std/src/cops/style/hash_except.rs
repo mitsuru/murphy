@@ -62,9 +62,30 @@
 //! Replaces `reject { ... }` / `select { ... }` / `filter { ... }` with
 //! `except(<key_source>)`. The offense range covers from the selector of
 //! `reject`/`select`/`filter` through the closing brace/`end` of the block.
+//!
+//! Verbatim port of the call head `(call _ {:reject :select :filter} ...)`
+//! (murphy-s1yc.30): `call` = `{send csend}` covers safe-navigation
+//! (`h&.reject { |k, v| k == :foo }`), mirroring RuboCop
+//! `alias on_csend on_send` plus `RESTRICT_ON_SEND [reject select filter]` in
+//! the `HashSubset` mixin; the wildcard receiver binds an absent or present
+//! receiver per murphy-if9y; trailing `...` absorbs any argument list. The
+//! block-shape and semantic guards below apply separately (upstream `on_send`
+//! returns early unless the block shape matches).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop, def_node_matcher};
 use crate::cops::util::unwrap_parenthesized;
+
+// Verbatim port of the call head (murphy-s1yc.30):
+// `(call _ {:reject :select :filter} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`h&.reject { |k, v| k == :foo }`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND [reject select filter]` in
+// the `HashSubset` mixin. The `_` receiver binds an absent or present receiver
+// per murphy-if9y; trailing `...` absorbs any argument list, so the
+// block-shape and semantic guards below apply separately.
+def_node_matcher!(
+    hash_except_call,
+    "(call _ {:reject :select :filter} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -81,16 +102,19 @@ const MSG: &str = "Use `%s` instead.";
     safe_autocorrect = false,
 )]
 impl HashExcept {
-    #[on_node(kind = "send", methods = ["select", "filter", "reject"])]
+    /// Send path: `h.reject { |k, v| k == :foo }` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:reject :select :filter} ...)` head filters to the
+    /// `RESTRICT_ON_SEND` methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
+    /// Safe-navigation send path: `h&.reject { |k, v| k == :foo }`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if matches!(cx.method_name(node), Some("select" | "filter" | "reject")) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -100,6 +124,15 @@ impl HashExcept {
 
 /// Main check: the `send` node is a `select`/`filter`/`reject` call.
 fn check(send_node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:reject :select :filter} ...)` head: filters to the
+    // `RESTRICT_ON_SEND` methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated call
+    // with a matching block (e.g. `h.map { |k, v| k == :foo }`) would run
+    // check on every call node instead of being rejected by the method set
+    // up front.
+    if !hash_except_call(send_node, cx) {
+        return;
+    }
     // The block wrapping this send call.
     let block_node = match cx.block_node(send_node).get() {
         Some(b) => b,
@@ -573,6 +606,59 @@ mod tests {
   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:foo)` instead.\n",
             "h.except(:foo)\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.30): pin the exact node set the
+    // dual send(methods=[select filter reject]) + manual-csend-filter dispatch
+    // matches, so the verbatim `(call _ {:reject :select :filter} ...)` port
+    // can be proven byte-identical. `call` covers safe-navigation (mirroring
+    // upstream `alias on_csend on_send` plus `RESTRICT_ON_SEND
+    // [reject select filter]` in the HashSubset mixin); trailing `...`
+    // absorbs any argument list, so the block-shape and semantic guards below
+    // apply separately.
+
+    #[test]
+    fn s1yc30_flags_csend_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port the `csend` handler
+        // filters `select`/`filter`/`reject` manually because `methods = [...]`
+        // is only valid for `kind = "send"`; the verbatim head collapses the
+        // workaround.
+        test::<HashExcept>().expect_correction(
+            indoc! {"
+                h&.reject { |k, v| k == :foo }
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:foo)` instead.
+            "},
+            "h&.except(:foo)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc30_flags_bare_receiver() {
+        // Bare `reject` with a matching block: the `_` receiver binds an
+        // absent receiver per murphy-if9y so the head matches, and this cop
+        // has no needs-receiver guard so the offense is still reported.
+        test::<HashExcept>().expect_offense(indoc! {r#"
+            reject { |k, v| k == :foo }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:foo)` instead.
+        "#});
+    }
+
+    #[test]
+    fn s1yc30_flags_with_args() {
+        // Arguments: trailing `...` absorbs the argument list so the head
+        // matches, and this cop has no no-args guard so the offense is still
+        // reported (the block-shape and semantic guards decide).
+        test::<HashExcept>().expect_offense(indoc! {r#"
+            h.reject(1) { |k, v| k == :foo }
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:foo)` instead.
+        "#});
+    }
+
+    #[test]
+    fn s1yc30_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<HashExcept>().expect_no_offenses("h.map { |k, v| k == :foo }\n");
     }
 }
 
