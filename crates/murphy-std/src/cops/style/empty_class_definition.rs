@@ -15,7 +15,16 @@
 //!   AllowedParentClasses is not yet wired.
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/EmptyClassDefinition` `class_new_assignment` const
+// head is `(const _ :Class)` (any scope). In Murphy `_` covers bare + `::` +
+// namespaced (all flag, pinned by `boundary_flags_cbase_class_new` and
+// `boundary_flags_namespaced_class_new`). The `:new` method + arg guards stay
+// hand-rolled below. The cop matches `Send`-only, so `&.` stays silent
+// (pinned by `boundary_ignores_csend_class_new`).
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_class_const_matcher, "(const _ :Class)");
 
 const MSG_CLASS_KEYWORD: &str = "Use the `class` keyword instead of `Class.new` to define an empty class.";
 
@@ -67,10 +76,11 @@ impl EmptyClassDefinition {
         let Some(recv_id) = receiver.get() else {
             return;
         };
-        let NodeKind::Const { name, .. } = *cx.kind(recv_id) else {
+        // `(const _ :Class)` — any scope (bare + `::` + namespaced flag).
+        if !is_class_const_matcher(recv_id, cx) {
             return;
-        };
-        if cx.symbol_str(name) != "Class" || cx.symbol_str(method) != "new" {
+        }
+        if cx.symbol_str(method) != "new" {
             return;
         }
         let arg_list = cx.list(args);
@@ -146,6 +156,36 @@ mod tests {
         test::<EmptyClassDefinition>().expect_no_offenses(
             "FooError = Class.new('some_string')\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.27): pin the exact node set
+    // the hand-rolled `Const` name check (`symbol_str(name) == "Class"`,
+    // any scope) matches, so the verbatim `(const _ :Class)` refactor can be
+    // proven equivalent. `_` covers bare + `::` + namespaced (all flag,
+    // pinned by `boundary_flags_cbase_class_new` and
+    // `boundary_flags_namespaced_class_new`). The cop matches `Send`-only,
+    // so `&.` stays silent (pinned by `boundary_ignores_csend_class_new`).
+
+    #[test]
+    fn boundary_flags_cbase_class_new() {
+        test::<EmptyClassDefinition>().expect_offense(indoc! {"
+            FooError = ::Class.new(StandardError)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_class_new() {
+        test::<EmptyClassDefinition>().expect_offense(indoc! {"
+            FooError = Foo::Class.new(StandardError)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_class_new() {
+        test::<EmptyClassDefinition>()
+            .expect_no_offenses("FooError = Class&.new(StandardError)\n");
     }
 }
 murphy_plugin_api::submit_cop!(EmptyClassDefinition);

@@ -60,6 +60,16 @@ def_node_matcher!(date_time, "(call (const nil? :DateTime) _ ...)");
 // requires exactly zero arguments (`foo.to_datetime(8)` does not match).
 def_node_matcher!(to_datetime, "(call _ :to_datetime)");
 
+// RuboCop parity: `Style/DateTime` `historic_date?` scope head is
+// `(const (const {nil? cbase} :Date) _)` (any const under top-level `Date`).
+// In Murphy `::Date` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both historic-skip, pinned by `boundary_accepts_cbase_historic_date`).
+// Namespaced `Foo::Date` still flags (pinned by
+// `boundary_flags_namespaced_historic_date`). The outer const name (`_`) +
+// second-arg position guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_date_const_matcher, "(const nil? :Date)");
+
 const CLASS_MSG: &str = "Prefer `Time` over `DateTime`.";
 const COERCION_MSG: &str = "Do not use `#to_datetime`.";
 
@@ -135,14 +145,15 @@ fn is_historic_date(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(&second_arg) = args.get(1) else {
         return false;
     };
-    // Match: (const (const {nil? cbase} :Date) :SOMETHING)
+    // Match: (const (const nil? :Date) _) — top-level only (`::` collapses
+    // to `Const{scope:None}`). Namespaced still flags.
     let NodeKind::Const { scope, .. } = *cx.kind(second_arg) else {
         return false;
     };
     let Some(scope_id) = scope.get() else {
         return false;
     };
-    cx.is_global_const(scope_id, "Date")
+    is_date_const_matcher(scope_id, cx)
 }
 
 /// Find the token spelling `DateTime` within the receiver const node's range.
@@ -224,6 +235,29 @@ mod tests {
         test::<DateTime>().expect_no_offenses(indoc! {r#"
             DateTime.iso8601('1751-04-23', Date::ENGLAND)
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.27): pin the exact node set
+    // the hand-rolled `is_historic_date` (`is_global_const(Date)` scope
+    // check) matches, so the verbatim `(const nil? :Date)` scope refactor
+    // can be proven equivalent. `::Date` collapses to `Const{scope:None}`:
+    // `nil?` covers bare + `::` (both historic-skip, pinned by
+    // `boundary_accepts_cbase_historic_date`). Namespaced `Foo::Date` still
+    // flags (pinned by `boundary_flags_namespaced_historic_date`).
+
+    #[test]
+    fn boundary_accepts_cbase_historic_date() {
+        test::<DateTime>().expect_no_offenses(indoc! {r#"
+            DateTime.iso8601('1751-04-23', ::Date::ENGLAND)
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_historic_date() {
+        test::<DateTime>().expect_offense(indoc! {"
+            DateTime.iso8601('1751-04-23', Foo::Date::ENGLAND)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `Time` over `DateTime`.
+        "});
     }
 
     #[test]
