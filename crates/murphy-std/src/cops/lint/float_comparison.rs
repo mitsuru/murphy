@@ -16,12 +16,32 @@
 //!   Intentional refinements: multi-statement `begin` uses the last value
 //!   (Ruby semantics) where RuboCop uses the first child, and parenthesized
 //!   zero `(0.0)` stays exempt via unwrapping; csend mirrors send.
+//!
+//! Verbatim port of the call head `(call _ {:== :!= :eql? :equal?} ...)`
+//! (murphy-s1yc.33): `call` = `{send csend}` covers safe-navigation
+//! (`x&.eql?(0.1)`), mirroring RuboCop `alias on_csend on_send` plus
+//! `RESTRICT_ON_SEND EQUALITY_METHODS`; the wildcard receiver binds an
+//! absent or present receiver per murphy-if9y; trailing `...` absorbs any
+//! argument list. The one-arg and float-shape guards below apply separately
+//! (upstream `on_send` returns early unless the comparison shape matches).
 
 use crate::cops::util::unwrap_parenthesized;
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, NodeList, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, NodeList, cop, def_node_matcher};
 
 #[derive(Default)]
 pub struct FloatComparison;
+
+// Verbatim port of the call head (murphy-s1yc.33):
+// `(call _ {:== :!= :eql? :equal?} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`x&.eql?(0.1)`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND EQUALITY_METHODS`. The `_`
+// receiver binds an absent or present receiver per murphy-if9y; trailing
+// `...` absorbs any argument list, so the one-arg and float-shape guards
+// below apply separately.
+def_node_matcher!(
+    float_comparison_call,
+    "(call _ {:== :!= :eql? :equal?} ...)"
+);
 
 #[cop(
     name = "Lint/FloatComparison",
@@ -31,17 +51,19 @@ pub struct FloatComparison;
     options = NoOptions
 )]
 impl FloatComparison {
-    #[on_node(kind = "send", methods = ["==", "!=", "eql?", "equal?"])]
+    /// Send path: `x == 0.1` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:== :!= :eql? :equal?} ...)` head filters to the
+    /// `RESTRICT_ON_SEND` methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check_comparison(node, cx);
     }
 
+    /// Safe-navigation send path: `x&.eql?(0.1)`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else { return; };
-        if matches!(cx.symbol_str(method), "==" | "!=" | "eql?" | "equal?") {
-            check_comparison(node, cx);
-        }
+        check_comparison(node, cx);
     }
 
     #[on_node(kind = "case")]
@@ -61,6 +83,14 @@ impl FloatComparison {
 }
 
 fn check_comparison(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:== :!= :eql? :equal?} ...)` head: filters to the
+    // `RESTRICT_ON_SEND` methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated call
+    // with a float argument (e.g. `x.foo(0.1)`) would run check on every
+    // call node instead of being rejected by the method set up front.
+    if !float_comparison_call(node, cx) {
+        return;
+    }
     let (method, lhs, args) = match *cx.kind(node) {
         NodeKind::Send { receiver, method, args } => (method, receiver.get(), cx.list(args)),
         NodeKind::Csend { receiver, method, args } => (method, Some(receiver), cx.list(args)),
@@ -341,5 +371,49 @@ mod tests {
             (side_effect; 0.1) == x
             ^^^^^^^^^^^^^^^^^^^^^^^ Avoid equality comparisons of floats as they are unreliable.
         "#});
+    }
+
+    // --- Characterization (murphy-s1yc.33): pin the exact node set the
+    // dual send(methods=[== != eql? equal?]) + manual-csend-filter dispatch
+    // matches, so the verbatim `(call _ {:== :!= :eql? :equal?} ...)` port can
+    // be proven byte-identical. `call` covers safe-navigation (mirroring
+    // upstream `alias on_csend on_send` plus `RESTRICT_ON_SEND
+    // EQUALITY_METHODS`); trailing `...` absorbs any argument list, so the
+    // one-arg and float-shape guards below apply separately.
+
+    #[test]
+    fn s1yc33_flags_csend() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port the `csend` handler
+        // filters `==`/`!=`/`eql?`/`equal?` manually because
+        // `methods = [...]` is only valid for `kind = "send"`; the verbatim
+        // head collapses the workaround.
+        test::<FloatComparison>().expect_offense(indoc! {r#"
+            x&.eql?(0.1)
+            ^^^^^^^^^^^^ Avoid equality comparisons of floats as they are unreliable.
+        "#});
+    }
+
+    #[test]
+    fn s1yc33_accepts_bare_receiver() {
+        // Bare `eql?`: the `_` receiver binds an absent receiver per
+        // murphy-if9y so the head matches, but this cop requires a receiver
+        // (`let Some(lhs) ... else return`) so the offense is still rejected
+        // by the complementary guard.
+        test::<FloatComparison>().expect_no_offenses("eql?(0.1)\n");
+    }
+
+    #[test]
+    fn s1yc33_accepts_with_extra_args() {
+        // Arguments: trailing `...` absorbs the argument list so the head
+        // matches, but this cop requires exactly one argument so the offense
+        // is still rejected by the complementary guard.
+        test::<FloatComparison>().expect_no_offenses("x.eql?(0.1, extra)\n");
+    }
+
+    #[test]
+    fn s1yc33_accepts_unrelated_method() {
+        // `foo` is outside the verbatim method set, so the head rejects.
+        test::<FloatComparison>().expect_no_offenses("x.foo(0.1)\n");
     }
 }
