@@ -58,6 +58,15 @@ def_node_matcher!(
     "(send (const (const (const nil? :OpenSSL) {:Cipher :Digest}) _) _ ...)"
 );
 
+// RuboCop parity: `Lint/DeprecatedOpenSSLConstant` `digest_const?` is
+// `(const _ :Digest)` (any scope). In Murphy `_` covers bare + `::` +
+// namespaced (all skip, pinned by `boundary_skips_cbase_digest_new` +
+// `boundary_skips_namespaced_digest_new`). The cop dispatches on `send`
+// only, so csend never reaches this check (pinned by
+// `boundary_ignores_csend`). Predicate-only, no captures, byte-identical
+// suppression.
+def_node_matcher!(is_digest_const, "(const _ :Digest)");
+
 #[derive(Default)]
 pub struct DeprecatedOpenSSLConstant;
 
@@ -92,9 +101,8 @@ impl DeprecatedOpenSSLConstant {
         let Some(receiver) = cx.call_receiver(node).get() else {
             return;
         };
-        // `digest_const?(node.receiver)` — skip the already-correct
-        // `OpenSSL::Digest.new(...)` form (receiver's own name is `Digest`).
-        if is_named_const(receiver, "Digest", cx) {
+        // `(const _ :Digest)` — any scope (bare + `::` + namespaced skip).
+        if is_digest_const(receiver, cx) {
             return;
         }
 
@@ -123,14 +131,6 @@ impl DeprecatedOpenSSLConstant {
         let replacement = format!("{parent_source}.{method}({replacement_args})");
         cx.emit_edit(cx.range(node), &replacement);
     }
-}
-
-/// True when `node` is a `Const` whose own (short) name equals `name`.
-fn is_named_const(node: NodeId, name: &str, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { name: sym, .. } = *cx.kind(node) else {
-        return false;
-    };
-    cx.symbol_str(sym) == name
 }
 
 /// If `receiver` is `OpenSSL::{Cipher|Digest}::<X>`, return the parent const
@@ -399,5 +399,31 @@ mod tests {
     #[test]
     fn boundary_ignores_csend() {
         test::<DeprecatedOpenSSLConstant>().expect_no_offenses("OpenSSL::Cipher::AES&.new(128, :GCM)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.28): pin the exact node set
+    // the hand-rolled `is_named_const(Digest)` (any scope, no scope check)
+    // matches, so the verbatim `(const _ :Digest)` refactor can be proven
+    // equivalent. `_` covers any scope: bare + `::` + namespaced all skip
+    // (no offense, already-correct form). The cop dispatches on `send` only,
+    // so csend never reaches the Digest check (already pinned by
+    // `boundary_ignores_csend`).
+
+    #[test]
+    fn boundary_skips_cbase_digest_new() {
+        test::<DeprecatedOpenSSLConstant>()
+            .expect_no_offenses("::Digest.new('SHA256')\n");
+    }
+
+    #[test]
+    fn boundary_skips_namespaced_digest_new() {
+        test::<DeprecatedOpenSSLConstant>()
+            .expect_no_offenses("Foo::Digest.new('SHA256')\n");
+    }
+
+    #[test]
+    fn boundary_skips_cbase_openssl_digest_new() {
+        test::<DeprecatedOpenSSLConstant>()
+            .expect_no_offenses("::OpenSSL::Digest.new('SHA256')\n");
     }
 }

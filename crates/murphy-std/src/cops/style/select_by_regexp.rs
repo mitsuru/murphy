@@ -59,6 +59,16 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop, def_node_m
 // Predicate-only, no captures, byte-identical suppression.
 def_node_matcher!(is_hash_const, "(const _ :Hash)");
 
+// RuboCop parity: `Style/SelectByRegexp` `env_const?` is
+// `(const {nil? cbase} :ENV)` (top-level only). In Murphy `_` covers bare +
+// `::` + namespaced (all suppress, pinned by
+// `boundary_accepts_cbase_env_select` +
+// `boundary_accepts_namespaced_env_select`, preserving the current gap vs
+// upstream which would flag namespaced). Csend receiver `ENV&.select` also
+// suppresses (pinned by `boundary_accepts_csend_env_select`).
+// Predicate-only, no captures, byte-identical suppression.
+def_node_matcher!(is_env_const, "(const _ :ENV)");
+
 const MSG: &str = "Prefer `%<replacement>s` to `%<original_method>s` with a regexp match.";
 
 /// The set of send methods that trigger this cop.
@@ -161,8 +171,8 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(receiver) {
         // Hash literal `{}`
         NodeKind::Hash(_) => true,
-        // ENV constant
-        NodeKind::Const { name, .. } => cx.symbol_str(name) == "ENV",
+        // `(const _ :ENV)` — any scope (bare + `::` + namespaced suppress).
+        NodeKind::Const { .. } => is_env_const(receiver, cx),
         // Send: to_h / to_hash chain, or Hash.new
         // `(const _ :Hash)` — any scope (bare + `::` + namespaced suppress).
         // `:new`-only guard stays hand-rolled (`Hash[]` still flags).
@@ -586,6 +596,32 @@ mod tests {
             Hash[].select { |x| x.match?(/regexp/) }
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.28): pin the exact node set
+    // the hand-rolled `ENV` const guard (any scope, no scope check) matches,
+    // so the verbatim `(const _ :ENV)` refactor can be proven equivalent.
+    // `_` covers any scope: bare + `::` + namespaced all suppress (no
+    // offense, preserving the current gap vs upstream `(const {nil? cbase}
+    // :ENV)` which would flag namespaced). Csend receiver `ENV&.select`
+    // also suppresses (pinned by `boundary_accepts_csend_env_select`).
+
+    #[test]
+    fn boundary_accepts_cbase_env_select() {
+        test::<SelectByRegexp>()
+            .expect_no_offenses("::ENV.select { |x| x.match? /regexp/ }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_env_select() {
+        test::<SelectByRegexp>()
+            .expect_no_offenses("Foo::ENV.select { |x| x.match? /regexp/ }\n");
+    }
+
+    #[test]
+    fn boundary_accepts_csend_env_select() {
+        test::<SelectByRegexp>()
+            .expect_no_offenses("ENV&.select { |x| x.match? /regexp/ }\n");
     }
 
     #[test]
