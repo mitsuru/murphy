@@ -27,6 +27,14 @@
 //!   is applied correctly for the accessor; only the operator position is not moved.
 //! ```
 //!
+//! Verbatim port of the call head `(call _ {:first :last :[] :at :slice} ...)`
+//! (murphy-s1yc.34): `call` = `{send csend}` covers safe-navigation
+//! (`arr.sort&.first`), mirroring RuboCop `alias on_csend on_send`;
+//! the wildcard receiver binds an absent or present receiver per murphy-if9y;
+//! trailing `...` absorbs any argument list. The position and sort-receiver
+//! guards below apply separately (upstream `on_send` returns early unless the
+//! sort/accessor shape matches).
+//!
 //! ## Matched shapes
 //!
 //! ```ruby
@@ -45,7 +53,18 @@
 //! arr.sort_by(&:foo).last
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.34):
+// `(call _ {:first :last :[] :at :slice} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`arr.sort&.first`), mirroring RuboCop
+// `alias on_csend on_send`. The `_` receiver binds an absent or present
+// receiver per murphy-if9y; trailing `...` absorbs any argument list, so the
+// position and sort-receiver guards below apply separately.
+def_node_matcher!(
+    redundant_sort_call,
+    "(call _ {:first :last :[] :at :slice} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -61,19 +80,19 @@ const MSG: &str = "Use `%suggestion%` instead of `%sorter%...%accessor_source%`.
     options = NoOptions,
 )]
 impl RedundantSort {
-    #[on_node(kind = "send", methods = ["first", "last", "[]", "at", "slice"])]
+    /// Send path: `arr.sort.first` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:first :last :[] :at :slice} ...)` head filters to the
+    /// accessor methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
+    /// Safe-navigation send path: `arr.sort&.first`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(cx.symbol_str(method), "first" | "last" | "[]" | "at" | "slice") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -230,6 +249,14 @@ fn sorter_str(sort_kind: SortKind) -> &'static str {
 // ---------------------------------------------------------------------------
 
 fn check(accessor: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:first :last :[] :at :slice} ...)` head: filters to
+    // the accessor methods on either send or csend (safe-navigation), with
+    // any receiver (absent or present). Without this, an unrelated call with
+    // a sort receiver (e.g. `arr.sort.map`) would run check on every call
+    // node instead of being rejected by the method set up front.
+    if !redundant_sort_call(accessor, cx) {
+        return;
+    }
     // The accessor must indicate a position.
     let Some(position) = accessor_position(accessor, cx) else {
         return;
@@ -591,6 +618,55 @@ mod tests {
     #[test]
     fn accepts_csend_sort_by_block_first() {
         test::<RedundantSort>().expect_no_offenses("obj&.sort_by { |x| x.foo }.first\n");
+    }
+
+    // --- Characterization (murphy-s1yc.34): pin the exact node set the
+    // dual send(methods=[first last [] at slice]) + manual-csend-filter
+    // dispatch matches, so the verbatim
+    // `(call _ {:first :last :[] :at :slice} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send`); trailing `...` absorbs any argument list,
+    // so the position and sort-receiver guards below apply separately.
+
+    #[test]
+    fn s1yc34_flags_csend_corrects() {
+        // Safe navigation on the accessor: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        // Pre-port the `csend` handler filters
+        // `first`/`last`/`[]`/`at`/`slice` manually because
+        // `methods = [...]` is only valid for `kind = "send"`; the verbatim
+        // head collapses the workaround.
+        test::<RedundantSort>().expect_correction(
+            indoc! {"
+                arr.sort&.first
+                    ^^^^^^^^^^^ Use `min` instead of `sort...first`.
+            "},
+            "arr.min\n",
+        );
+    }
+
+    #[test]
+    fn s1yc34_accepts_bare_receiver() {
+        // Bare `first`: the `_` receiver binds an absent receiver per
+        // murphy-if9y so the head matches, but this cop requires a
+        // sort/sort_by receiver so the offense is still rejected by the
+        // complementary guard.
+        test::<RedundantSort>().expect_no_offenses("first\n");
+    }
+
+    #[test]
+    fn s1yc34_accepts_with_extra_args() {
+        // Arguments: trailing `...` absorbs the argument list so the head
+        // matches, but this cop requires zero args for `first`/`last` and
+        // exactly one 0/-1 arg for `[]`/`at`/`slice`, so the offense is
+        // still rejected by the complementary guard.
+        test::<RedundantSort>().expect_no_offenses("[2, 1, 3].sort.slice(0, 1)\n");
+    }
+
+    #[test]
+    fn s1yc34_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<RedundantSort>().expect_no_offenses("arr.map\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantSort);
