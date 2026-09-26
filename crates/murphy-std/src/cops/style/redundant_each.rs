@@ -27,6 +27,14 @@
 //!
 //!   Both send and csend are handled (matching RuboCop's alias on_csend on_send).
 //!   Block-pass guard: skip if last argument of receiver is a BlockPass.
+//!
+//!   Verbatim port of the call head `(call _ {:each :each_with_index :each_with_object} ...)`
+//!   (murphy-s1yc.26): `call` = `{send csend}` covers safe-navigation
+//!   (`array&.each.each`), mirroring RuboCop `alias on_csend on_send`
+//!   plus `RESTRICT_ON_SEND [each each_with_index each_with_object]`; the
+//!   wildcard receiver binds an absent or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list. The receiver-chain plus
+//!   block-pass guards below apply separately.
 //! ```
 //!
 //! ## Matched shapes
@@ -51,7 +59,19 @@
 //! array.each(&blk).each { }             # block-pass guard
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.26):
+// `(call _ {:each :each_with_index :each_with_object} ...)` — `call` =
+// `{send csend}` covers safe-navigation (`array&.each.each`), mirroring
+// RuboCop `alias on_csend on_send` plus `RESTRICT_ON_SEND`. The `_`
+// receiver binds an absent or present receiver per murphy-if9y; trailing
+// `...` absorbs any argument list, so the receiver-chain plus block-pass
+// guards below apply separately.
+def_node_matcher!(
+    redundant_each_call,
+    "(call _ {:each :each_with_index :each_with_object} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -69,22 +89,18 @@ const MSG_WITH_OBJECT: &str = "Use `with_object` to remove redundant `each`.";
     options = NoOptions,
 )]
 impl RedundantEach {
-    #[on_node(kind = "send", methods = ["each", "each_with_index", "each_with_object"])]
+    /// Triggered on each-family sends; the verbatim
+    /// `(call _ {:each :each_with_index :each_with_object} ...)` head filters
+    /// to the 3 RESTRICT_ON_SEND methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
+    /// Also handle csend (safe-navigation) versions: `array&.each.each`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(
-            cx.symbol_str(method),
-            "each" | "each_with_index" | "each_with_object"
-        ) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -126,6 +142,14 @@ fn is_valid_prev_method(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:each :each_with_index :each_with_object} ...)`
+    // head: filters to the 3 RESTRICT_ON_SEND methods on either send or csend
+    // (safe-navigation), with any receiver (absent or present). Without this,
+    // an unrelated call in a chain (e.g. `array.map`) would run check on
+    // every call node instead of being rejected by the method set up front.
+    if !redundant_each_call(node, cx) {
+        return;
+    }
     let method = match get_method_name(node, cx) {
         Some(m) => m,
         None => return,
@@ -471,6 +495,60 @@ mod tests {
     #[test]
     fn no_offense_each_with_object_alone() {
         test::<RedundantEach>().expect_no_offenses("array.each_with_object({}) { |v, o| v }\n");
+    }
+
+    // --- Characterization (murphy-s1yc.26): pin the exact node set the
+    // dual send(methods=[each each_with_index each_with_object]) +
+    // manual-csend-filter dispatch matches, so the verbatim
+    // `(call _ {:each :each_with_index :each_with_object} ...)` port can be
+    // proven byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send` plus `RESTRICT_ON_SEND`); trailing `...`
+    // absorbs any argument list, so the block-pass plus receiver-chain guards
+    // below apply separately.
+
+    #[test]
+    fn s1yc26_flags_csend_each_each_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port both handlers are
+        // send(methods=[3]) plus unfiltered csend with a manual method check;
+        // the verbatim head collapses the workaround.
+        test::<RedundantEach>().expect_correction(
+            indoc! {r#"
+                array&.each.each { |v| v }
+                       ^^^^^ Remove redundant `each`.
+            "#},
+            "array&.each { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc26_flags_bare_each_each_corrects() {
+        // Bare receiver: `_` in `(call _ {:each ...} ...)` binds an absent
+        // receiver per murphy-if9y, so a receiverless `each.each` (implicit
+        // self) flags direction A. Upstream RESTRICT_ON_SEND triggers on the
+        // method name regardless of receiver, and the current check has no
+        // receiver guard on the inner node.
+        test::<RedundantEach>().expect_correction(
+            indoc! {r#"
+                each.each { |v| v }
+                ^^^^^ Remove redundant `each`.
+            "#},
+            "each { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc26_accepts_plain_each_no_chain() {
+        // No chain: trailing `...` absorbs the (empty) argument list so the
+        // head matches, and the complementary receiver-chain guard accepts
+        // (no parent call, receiver is not each_/reverse_each).
+        test::<RedundantEach>().expect_no_offenses("array.each\n");
+    }
+
+    #[test]
+    fn s1yc26_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<RedundantEach>().expect_no_offenses("array.map { |v| v }\n");
     }
 }
 
