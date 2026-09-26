@@ -14,15 +14,24 @@
 //!   `shuffle[0, N]`, `shuffle[0..N]`, `shuffle[0...N]`,
 //!   `shuffle.slice(0, N)`, `shuffle.slice(0..N)`, `shuffle.slice(0...N)`,
 //!   and `shuffle(random: RNG).first` / similar variants.
-//!   Only plain-send accessors (`obj.shuffle.first`) are handled.
-//!   Safe-navigation at any level (`obj&.shuffle.first`, `obj.shuffle&.first`)
-//!   is not flagged — the cop only acts on plain-send receivers and
-//!   accessors, matching the conservative approach used by other std
-//!   cops (cf. `Style/RedundantSort`).
+//!   Safe-navigation on the accessor (`obj.shuffle&.first`) is flagged,
+//!   mirroring upstream `alias on_csend on_send`.
+//!   Safe-navigation on the shuffle receiver (`obj&.shuffle.first`) is not
+//!   flagged — the inner shuffle guard only acts on plain-send receivers,
+//!   matching the conservative approach of the pre-port implementation
+//!   (pinned by `accepts_safe_nav_shuffle_first/last`).
 //!
 //!   Known v1 limitation: no per-cop file-pattern gating. The cop fires on
 //!   any file; no `Include`/`Exclude` patterns are supported.
 //! ```
+//!
+//! Verbatim port of the call head `(call _ {:first :last :[] :at :slice} ...)`
+//! (murphy-s1yc.35): `call` = `{send csend}` covers safe-navigation
+//! (`arr.shuffle&.first`), mirroring RuboCop `alias on_csend on_send`;
+//! the wildcard receiver binds an absent or present receiver per murphy-if9y;
+//! trailing `...` absorbs any argument list. The shuffle-receiver and
+//! sample-size guards below apply separately (upstream `on_send` returns
+//! early unless the shuffle/accessor shape matches).
 //!
 //! ## Matched shapes
 //!
@@ -50,7 +59,18 @@
 //! any keyword arguments passed to `shuffle`. Safe by construction — the
 //! replacement is always equivalent.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.35):
+// `(call _ {:first :last :[] :at :slice} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`arr.shuffle&.first`), mirroring RuboCop
+// `alias on_csend on_send`. The `_` receiver binds an absent or present
+// receiver per murphy-if9y; trailing `...` absorbs any argument list, so the
+// shuffle-receiver and sample-size guards below apply separately.
+def_node_matcher!(
+    sample_call,
+    "(call _ {:first :last :[] :at :slice} ...)"
+);
 
 #[derive(Default)]
 pub struct Sample;
@@ -63,16 +83,23 @@ pub struct Sample;
     options = NoOptions,
 )]
 impl Sample {
-    #[on_node(kind = "send", methods = ["first", "last", "[]", "at", "slice"])]
+    /// Send path: `arr.shuffle.first` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:first :last :[] :at :slice} ...)` head filters to the
+    /// accessor methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
-    // Note: no csend handler — safe-navigation *accessor* (`obj.shuffle&.first`)
-    // is not flagged. And `is_shuffle_call` rejects csend receivers, so
-    // `obj&.shuffle.first` is also not flagged. Only plain-send-all-the-way
-    // chains are handled, matching the conservative approach established
-    // by `Style/RedundantSort`.
+    /// Safe-navigation send path: `arr.shuffle&.first`.
+    /// Mirrors upstream `alias on_csend on_send`; the verbatim head covers
+    /// `csend`. The inner shuffle guard still requires a plain-send
+    /// `shuffle` receiver, so `arr&.shuffle.first` stays accepted.
+    #[on_node(kind = "csend")]
+    fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +108,14 @@ impl Sample {
 
 /// Check if `node` is a shuffle-based accessor that should use `sample`.
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:first :last :[] :at :slice} ...)` head: filters to
+    // the accessor methods on either send or csend (safe-navigation), with
+    // any receiver (absent or present). Without this, an unrelated call with
+    // a shuffle receiver (e.g. `arr.shuffle.map`) would run check on every call
+    // node instead of being rejected by the method set up front.
+    if !sample_call(node, cx) {
+        return;
+    }
     // The receiver must be a plain shuffle call (Send only).
     let Some(receiver_id) = cx.call_receiver(node).get() else {
         return;
@@ -176,7 +211,9 @@ fn is_hash_or_pair(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Whether a node is a plain `shuffle` method call (Send only — csend excluded
-/// to avoid changing nil-safety behavior, matching `Style/RedundantSort`).
+/// to avoid changing nil-safety behavior; the inner upstream
+/// `(call _ :shuffle ...)` would cover `&.shuffle`, but the conservative
+/// pre-port behavior is preserved and pinned by `accepts_safe_nav_*`).
 fn is_shuffle_call(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Send { method, .. } => cx.symbol_str(method) == "shuffle",
@@ -737,6 +774,53 @@ mod tests {
     #[test]
     fn accepts_shuffle_with_keyword_find() {
         test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle(random: Random.new).find(&:odd?)\n");
+    }
+
+    // --- Characterization (murphy-s1yc.35): pin the exact node set the
+    // send-only methods=[first last [] at slice] dispatch matches, so the
+    // verbatim `(call _ {:first :last :[] :at :slice} ...)` port can be
+    // proven byte-identical (plus outer-csend coverage per upstream
+    // `alias on_csend on_send`). `call` covers safe-navigation; the `_`
+    // receiver binds an absent or present receiver per murphy-if9y;
+    // trailing `...` absorbs any argument list, so the shuffle-receiver
+    // and sample-size guards below apply separately.
+
+    #[test]
+    fn s1yc35_flags_outer_csend_corrects() {
+        // Safe-navigation on the accessor: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        // Pre-port there was no csend handler so this accepted; the verbatim
+        // head collapses the workaround and flags it like upstream.
+        test::<Sample>().expect_correction(
+            indoc! {"
+                [1, 2, 3].shuffle&.first
+                          ^^^^^^^^^^^^^^ Use `sample` instead of `shuffle&.first`.
+            "},
+            "[1, 2, 3].sample\n",
+        );
+    }
+
+    #[test]
+    fn s1yc35_accepts_bare_receiver() {
+        // Bare `first`: the `_` receiver binds an absent receiver per
+        // murphy-if9y so the head matches, but this cop requires a
+        // shuffle receiver so the offense is still rejected by the
+        // complementary guard.
+        test::<Sample>().expect_no_offenses("first\n");
+    }
+
+    #[test]
+    fn s1yc35_accepts_with_extra_args() {
+        // Arguments: trailing `...` absorbs the argument list so the head
+        // matches, but `shuffle[1, 3]` starts at a nonzero index so the
+        // sample-size guard still rejects it.
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle[1, 3]\n");
+    }
+
+    #[test]
+    fn s1yc35_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<Sample>().expect_no_offenses("arr.map\n");
     }
 }
 murphy_plugin_api::submit_cop!(Sample);
