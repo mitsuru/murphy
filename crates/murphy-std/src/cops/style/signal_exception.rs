@@ -29,7 +29,7 @@
 //!       (consistent with RuboCop).
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -126,15 +126,15 @@ impl SignalException {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if `node` is a `Const` with name `:Kernel` and nil scope.
-fn is_kernel_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.kind(node) {
-        NodeKind::Const { scope, name } => {
-            cx.symbol_str(*name) == "Kernel" && scope.get().is_none()
-        }
-        _ => false,
-    }
-}
+// RuboCop parity: `Style/SignalException` `kernel_call?` inner is
+// `(send (const {nil? cbase} :Kernel) %1 ...)` (send-only, top-level only).
+// In Murphy `::Kernel` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_kernel_fail`), namespaced
+// `Foo::Kernel` still rejects (pinned by
+// `boundary_ignores_namespaced_kernel_fail`). The cop only handles `send`,
+// so `&.` stays silent (pinned by `boundary_ignores_csend_kernel_fail`).
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_kernel_const, "(const nil? :Kernel)");
 
 /// Returns `true` if `node` is inside a `Resbody` body (i.e. inside
 /// a rescue handler body). Walks ancestors until a `Resbody` is found.
@@ -385,6 +385,33 @@ mod tests {
                     end
                 "},
             );
+    }
+
+    // --- Boundary characterization (murphy-pz9l): pin the exact node set
+    // the hand-rolled `is_kernel_const` (Const name Kernel, scope None)
+    // matches, so the verbatim `(const nil? :Kernel)` refactor can be proven
+    // equivalent. `::Kernel` collapses to Const scope None, so it flags;
+    // `Foo::Kernel` has non-nil scope, so it stays silent; `&.` is csend
+    // and the cop only handles `send`, so it stays silent.
+
+    #[test]
+    fn boundary_flags_cbase_kernel_fail() {
+        test::<SignalException>().expect_offense(indoc! {"
+            ::Kernel.fail
+                     ^^^^ Always use `raise` to signal exceptions.
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_kernel_fail() {
+        // `Foo::Kernel` has non-nil scope -- not a top-level Kernel.
+        test::<SignalException>().expect_no_offenses("Foo::Kernel.fail\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_kernel_fail() {
+        // Inner `&.` is csend; the cop only handles `send`.
+        test::<SignalException>().expect_no_offenses("Kernel&.fail\n");
     }
 }
 

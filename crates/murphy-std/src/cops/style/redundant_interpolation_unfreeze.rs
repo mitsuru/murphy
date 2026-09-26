@@ -25,7 +25,7 @@
 //!     - minimum_target_ruby_version = "3.0" gates the entire cop.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, Range, SourceTokenKind, cop, def_node_matcher};
 
 const MSG: &str = "Don't unfreeze interpolated strings as they are already unfrozen.";
 
@@ -103,15 +103,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// Returns `true` if `node` is a `Const` with name `String` and nil scope.
-fn is_string_const_no_scope(node: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.kind(node) {
-        NodeKind::Const { scope, name } => {
-            cx.symbol_str(*name) == "String" && scope.get().is_none()
-        }
-        _ => false,
-    }
-}
+// RuboCop parity: `Style/RedundantInterpolationUnfreeze`
+// `redundant_unfreeze?` const inner is `(send (const nil? :String) :new ...)`
+// (send-only, top-level only). In Murphy `::String` collapses to Const scope
+// None, so `nil?` covers bare + `::` (pinned by
+// `boundary_flags_cbase_string_new_with_dstr`), namespaced `Foo::String`
+// still rejects (pinned by `no_offense_namespaced_string_const`). The cop
+// only handles `send`, so `&.` stays silent (pinned by
+// `boundary_ignores_csend_string_new_with_dstr`). Arity + dstr-interpolation
+// guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_string_const_no_scope, "(const nil? :String)");
 
 /// Returns `true` if `node` is a `Dstr` with at least one `Begin` child
 /// (real interpolation, not adjacent-literal concatenation).
@@ -314,6 +316,32 @@ mod tests {
                 "#{foo} bar"
             "##},
         );
+    }
+
+    // --- Boundary characterization (murphy-pz9l): pin the exact node set
+    // the hand-rolled `is_string_const_no_scope` (Const name String, scope
+    // None) matches, so the verbatim `(const nil? :String)` refactor can be
+    // proven equivalent. `::String` collapses to Const scope None, so it
+    // flags; the cop only handles `send`, so `&.` stays silent.
+
+    #[test]
+    fn boundary_flags_cbase_string_new_with_dstr() {
+        test::<RedundantInterpolationUnfreeze>().expect_correction(
+            indoc! {r##"
+                ::String.new("#{foo} bar")
+                ^^^^^^^^^^^^ Don't unfreeze interpolated strings as they are already unfrozen.
+            "##},
+            indoc! {r##"
+                "#{foo} bar"
+            "##},
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_csend_string_new_with_dstr() {
+        // Inner `&.` is csend; the cop only handles `send`.
+        test::<RedundantInterpolationUnfreeze>()
+            .expect_no_offenses(r##"String&.new("#{foo} bar")"##);
     }
 }
 murphy_plugin_api::submit_cop!(RedundantInterpolationUnfreeze);
