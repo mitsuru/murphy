@@ -58,7 +58,24 @@
 //! selector start through the end of the whole expression, replaced with
 //! `tally`. Marked `safe_autocorrect = false`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Style/TallyMethod` `tally_each_with_object?` inner
+// `Hash.new(0)` is `(send (const {nil? cbase} :Hash) :new (int 0))`
+// (send-only upstream). Murphy's `is_hash_new_zero` uses generic
+// `method_name` + `call_receiver` dispatch (both `Send` + `Csend`), so the
+// verbatim port uses `call` to preserve the current node set (per
+// DuplicateRequire precedent: equivalence-preserving vs hand-rolled, not a
+// RuboCop parity fix). In Murphy `::Hash` collapses to `Const{scope:None}`:
+// `nil?` covers bare + `::` (pinned by `flags_each_with_object_cbase_hash`).
+// Namespaced `Foo::Hash` still accepts (pinned by
+// `boundary_accepts_namespaced_hash_new_zero`); `Hash&.new(0)` flags (pinned
+// by `boundary_flags_csend_hash_new_zero`, `call` covers both). Single-arg
+// `(int 0)` guard stays hand-rolled below (predicate-only, no captures).
+def_node_matcher!(
+    is_hash_new_zero_match,
+    "(call (const nil? :Hash) :new ...)"
+);
 
 const MSG_EACH_WITH_OBJECT: &str = "Use `tally` instead of `each_with_object`.";
 const MSG_GROUP_BY: &str = "Use `tally` instead of `group_by` and `transform_values`.";
@@ -249,14 +266,11 @@ fn is_count_op_asgn(node: NodeId, elem: ParamRef, hash: ParamRef, cx: &Cx<'_>) -
 }
 
 /// `Hash.new(0)` — bare or `::`-scoped `Hash`, method `new`, single arg `0`.
+/// `(call (const nil? :Hash) :new ...)` (`Hash` / `::Hash`, top-level only).
+/// `call` covers `Send` + `Csend` (matching the generic dispatch). Single-arg
+/// `(int 0)` guard stays hand-rolled below.
 fn is_hash_new_zero(node: NodeId, cx: &Cx<'_>) -> bool {
-    if cx.method_name(node) != Some("new") {
-        return false;
-    }
-    let Some(recv) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    if !cx.is_global_const(recv, "Hash") {
+    if !is_hash_new_zero_match(node, cx) {
         return false;
     }
     let [arg] = cx.call_arguments(node) else {
@@ -483,6 +497,29 @@ mod tests {
     fn flags_each_with_object_cbase_hash() {
         test::<TallyMethod>().expect_offense(indoc! {"
             array.each_with_object(::Hash.new(0)) { |item, counts| counts[item] += 1 }
+                  ^^^^^^^^^^^^^^^^ Use `tally` instead of `each_with_object`.
+        "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.8): pin the exact node set
+    // the hand-rolled `is_global_const(Hash)` + `(int 0)` guard matches, so
+    // the verbatim `(call (const nil? :Hash) :new (int 0))` refactor can be
+    // proven equivalent. `::Hash` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::`. Namespaced `Foo::Hash` still accepts. `call`
+    // covers `Send` + `Csend` (matching the current generic
+    // `method_name`+`call_receiver` dispatch, per DuplicateRequire precedent).
+
+    #[test]
+    fn boundary_accepts_namespaced_hash_new_zero() {
+        test::<TallyMethod>().expect_no_offenses(
+            "array.each_with_object(Foo::Hash.new(0)) { |item, counts| counts[item] += 1 }\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_csend_hash_new_zero() {
+        test::<TallyMethod>().expect_offense(indoc! {"
+            array.each_with_object(Hash&.new(0)) { |item, counts| counts[item] += 1 }
                   ^^^^^^^^^^^^^^^^ Use `tally` instead of `each_with_object`.
         "});
     }
