@@ -15,7 +15,20 @@
 //!   RuboCop's redundant-index criterion.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.39):
+// `(call _ {:each_with_index :with_index} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`ary&.each_with_index { |v| v }`), mirroring the
+// upstream inner `$(call _ {:each_with_index :with_index} ...)` which also
+// matches csend. The `_` receiver binds an absent or present receiver per
+// murphy-if9y; trailing `...` absorbs any argument list (e.g. the
+// `with_index(1)` offset), so the one-logical-arg block guard and the
+// chained-receiver guard below apply separately.
+def_node_matcher!(
+    redundant_with_index_call,
+    "(call _ {:each_with_index :with_index} ...)"
+);
 
 #[derive(Default)]
 pub struct RedundantWithIndex;
@@ -90,10 +103,24 @@ fn redundant_call(block: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         _ => return None,
     };
 
+    // Verbatim `(call _ {:each_with_index :with_index} ...)` head: filters to
+    // the redundant-index methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated call
+    // with any receiver (e.g. `ary.map`) would run the block-arg checks
+    // instead of being rejected by the method set up front.
+    if !redundant_with_index_call(call, cx) {
+        return None;
+    }
     let method = cx.method_name(call)?;
     if !matches!(method, "each_with_index" | "with_index") {
         return None;
     }
+    // Trailing `...` absorbs any argument list, so the head matches even
+    // `each_with_index(1)` (offset form). That shape is still redundant and
+    // must be flagged (the offset is dropped by the `each` correction), so
+    // no zero-arg guard applies here -- unlike the sort_by/min_by batches.
+    // The one-logical-arg block guard above and the chained-receiver guard
+    // below apply separately.
     if method == "with_index" {
         let receiver = cx.call_receiver(call).get()?;
         cx.call_receiver(receiver).get()?;
@@ -254,6 +281,74 @@ mod tests {
     #[test]
     fn accepts_destructured_value_with_index_argument() {
         test::<RedundantWithIndex>().expect_no_offenses("ary.each_with_index { |(a, b), i| a }\n");
+    }
+
+    // --- Characterization (murphy-s1yc.39): pin the exact node set the
+    // block/numblock/itblock dispatch with hand-rolled method_name
+    // each_with_index/with_index matches, so the verbatim
+    // `(call _ {:each_with_index :with_index} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation; the `_` receiver binds
+    // an absent or present receiver per murphy-if9y; trailing `...` absorbs
+    // any argument list (e.g. the `with_index(1)` offset), so the
+    // one-logical-arg block guard and the chained-receiver guard below apply
+    // separately.
+
+    #[test]
+    fn s1yc39_flags_csend_corrects() {
+        // Safe-navigation: `call` covers `csend`, mirroring upstream inner
+        // `$(call _ {:each_with_index :with_index} ...)` which also matches
+        // csend. Pre-port block dispatch already flags via method_name; the
+        // verbatim head collapses the workaround and keeps it byte-identical.
+        // Verified vs standalone NodePattern: `(call _ {:each_with_index
+        // :with_index} ...)` matches csend.
+        test::<RedundantWithIndex>().expect_correction(
+            indoc! {r#"
+                ary&.each_with_index { |v| v }
+                     ^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
+            "#},
+            "ary&.each { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc39_flags_bare() {
+        // Bare `each_with_index { |v| v }` has no receiver; the `_` wildcard
+        // binds the absent receiver per murphy-if9y, so the verbatim head
+        // matches and the one-arg block guard below flags -- pinned here.
+        // (Upstream has an extra `return unless node.receiver` guard outside
+        // the matcher, so upstream would not flag bare; murphy preserves its
+        // flag behavior byte-identical with the head matching.)
+        // Verified vs standalone NodePattern: `(call _ {:each_with_index
+        // :with_index} ...)` matches bare send.
+        test::<RedundantWithIndex>().expect_offense(indoc! {r#"
+            each_with_index { |v| v }
+            ^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
+        "#});
+    }
+
+    #[test]
+    fn s1yc39_flags_with_args() {
+        // Offset arg: trailing `...` absorbs any argument list, so the head
+        // matches `each_with_index(1)` and the block guard below still flags
+        // (the offset is dropped by the `each` correction) -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:each_with_index
+        // :with_index} ...)` matches `ary.each_with_index(1)`.
+        test::<RedundantWithIndex>().expect_correction(
+            indoc! {r#"
+                ary.each_with_index(1) { |v| v }
+                    ^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
+            "#},
+            "ary.each { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn s1yc39_accepts_unrelated() {
+        // Unrelated `map` is not in the head method set, so the verbatim head
+        // rejects it up front -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:each_with_index
+        // :with_index} ...)` does not match `ary.map`.
+        test::<RedundantWithIndex>().expect_no_offenses("ary.map { |v| v }\n");
     }
 }
 
