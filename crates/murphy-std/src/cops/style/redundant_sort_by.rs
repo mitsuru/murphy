@@ -35,7 +35,16 @@
 //! Replaces the span from the `sort_by` selector through the block end with
 //! `sort` (single edit).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.38):
+// `(call _ :sort_by ...)` — `call` = `{send csend}` covers safe-navigation
+// (`array&.sort_by { |x| x }`), mirroring the upstream inner
+// `$(call _ :sort_by)` which also matches csend. The `_` receiver binds an
+// absent or present receiver per murphy-if9y; trailing `...` absorbs any
+// argument list, so the zero-arg and identity-block guards below apply
+// separately.
+def_node_matcher!(redundant_sort_by_call, "(call _ :sort_by ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -98,12 +107,23 @@ fn match_identity_block<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(NodeId, &'a
         return None;
     };
 
+    // Verbatim `(call _ :sort_by ...)` head: filters to the sort_by method
+    // on either send or csend, with any receiver (absent or present).
+    // Without this, an unrelated call (e.g. `array.map`) would run the
+    // identity-block checks instead of being rejected by the method set
+    // up front.
+    if !redundant_sort_by_call(call, cx) {
+        return None;
+    }
+
     // Inner call must be `sort_by`.
     if cx.method_name(call)? != "sort_by" {
         return None;
     }
 
-    // The call must have no extra arguments (no block-pass etc.).
+    // Trailing `...` absorbs any argument list, so the head matches even
+    // `sort_by(2) { |x| x }`. That shape is valid and must NOT be flagged;
+    // the zero-arg guard below rejects it separately.
     if !cx.call_arguments(call).is_empty() {
         return None;
     }
@@ -139,6 +159,10 @@ fn match_identity_numblock(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         return None;
     };
 
+    // Verbatim `(call _ :sort_by ...)` head (see block variant above).
+    if !redundant_sort_by_call(send, cx) {
+        return None;
+    }
     if cx.method_name(send)? != "sort_by" {
         return None;
     }
@@ -168,6 +192,10 @@ fn match_identity_itblock(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         return None;
     };
 
+    // Verbatim `(call _ :sort_by ...)` head (see block variant above).
+    if !redundant_sort_by_call(send, cx) {
+        return None;
+    }
     if cx.method_name(send)? != "sort_by" {
         return None;
     }
@@ -321,6 +349,62 @@ mod tests {
     fn accepts_sort_by_with_block_pass() {
         // sort_by(&:foo) is not an identity block form
         test::<RedundantSortBy>().expect_no_offenses("array.sort_by(&:foo)\n");
+    }
+
+    // --- Characterization (murphy-s1yc.38): pin the exact node set the
+    // block/numblock/itblock dispatch with hand-rolled method_name sort_by
+    // matches, so the verbatim `(call _ :sort_by ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation; the `_` receiver binds
+    // an absent or present receiver per murphy-if9y; trailing `...` absorbs
+    // any argument list, so the zero-arg and identity-block guards below
+    // apply separately.
+
+    #[test]
+    fn s1yc38_flags_csend_corrects() {
+        // Safe-navigation: `call` covers `csend`, mirroring upstream inner
+        // `$(call _ :sort_by)` which also matches csend. Pre-port block
+        // dispatch already flags via method_name; the verbatim head collapses
+        // the workaround and keeps it byte-identical.
+        // Verified vs standalone NodePattern: `(call _ :sort_by ...)`
+        // matches csend.
+        test::<RedundantSortBy>().expect_correction(
+            indoc! {r#"
+                array&.sort_by { |x| x }
+                       ^^^^^^^^^^^^^^^^^ Use `sort` instead of `sort_by { |x| x }`.
+            "#},
+            "array&.sort\n",
+        );
+    }
+
+    #[test]
+    fn s1yc38_flags_bare() {
+        // Bare `sort_by { |x| x }` has no receiver; the `_` wildcard binds the
+        // absent receiver per murphy-if9y, so the verbatim head matches and the
+        // identity-block guard below flags -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ :sort_by ...)`
+        // matches bare send.
+        test::<RedundantSortBy>().expect_offense(indoc! {r#"
+            sort_by { |x| x }
+            ^^^^^^^^^^^^^^^^^ Use `sort` instead of `sort_by { |x| x }`.
+        "#});
+    }
+
+    #[test]
+    fn s1yc38_accepts_with_args() {
+        // Extra args: trailing `...` absorbs any argument list, so the head
+        // matches and the zero-arg guard below rejects -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ :sort_by ...)`
+        // matches `array.sort_by(2)`.
+        test::<RedundantSortBy>().expect_no_offenses("array.sort_by(2) { |x| x }\n");
+    }
+
+    #[test]
+    fn s1yc38_accepts_unrelated() {
+        // Unrelated `map` is not in the head method set, so the verbatim head
+        // rejects it up front -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ :sort_by ...)`
+        // does not match `array.map`.
+        test::<RedundantSortBy>().expect_no_offenses("array.map { |x| x }\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantSortBy);
