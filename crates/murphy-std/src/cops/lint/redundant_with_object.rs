@@ -16,7 +16,20 @@
 //!   with `each` can change the expression return value.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.40):
+// `(call _ {:each_with_object :with_object} _)` — `call` = `{send csend}`
+// covers safe-navigation (`ary&.each_with_object([]) { |v| v }`), mirroring the
+// upstream inner `$(call _ {:each_with_object :with_object} _)` which also
+// matches csend. The `_` receiver binds an absent or present receiver per
+// murphy-if9y; trailing `_` requires exactly one argument (the memo object),
+// so the empty-args guard and the chained-receiver guard below apply
+// separately.
+def_node_matcher!(
+    redundant_with_object_call,
+    "(call _ {:each_with_object :with_object} _)"
+);
 
 #[derive(Default)]
 pub struct RedundantWithObject;
@@ -81,10 +94,26 @@ fn redundant_call(block: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         _ => return None,
     };
 
+    // Verbatim `(call _ {:each_with_object :with_object} _)` head: filters to
+    // the redundant-object methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present) and exactly one argument.
+    // Without this, an unrelated call with any receiver (e.g. `ary.map`)
+    // would run the block-arg checks instead of being rejected by the method
+    // set up front.
+    if !redundant_with_object_call(call, cx) {
+        return None;
+    }
     let method = cx.method_name(call)?;
     if !matches!(method, "each_with_object" | "with_object") {
         return None;
     }
+    // Trailing `_` requires exactly one argument, so the head rejects both
+    // zero-arg (`each_with_object { |v| v }`) and multi-arg
+    // (`each_with_object([], x)`) shapes. The latter is an upstream parity
+    // fix: pre-port only rejected the empty case, over-flagging 2-arg calls
+    // upstream accepts -- pinned by s1yc40 zero-arg accept; cf. s1yc.2
+    // strict-arity parity fix. The one-logical-arg block guard above and the
+    // chained-receiver guard below apply separately.
     if method == "with_object" {
         let receiver = cx.call_receiver(call).get()?;
         cx.call_receiver(receiver).get()?;
@@ -207,6 +236,61 @@ mod tests {
     fn accepts_destructured_value_with_object_argument() {
         test::<RedundantWithObject>()
             .expect_no_offenses("ary.each_with_object([]) { |(a, b), o| a }\n");
+    }
+
+    // --- Characterization (murphy-s1yc.40): pin the exact node set the
+    // block/numblock/itblock dispatch with hand-rolled method_name
+    // each_with_object/with_object matches, so the verbatim
+    // `(call _ {:each_with_object :with_object} _)` port can be proven
+    // byte-identical. `call` covers safe-navigation; the `_` receiver binds
+    // an absent or present receiver per murphy-if9y; trailing `_` requires
+    // exactly one argument (e.g. the `[]` memo), so the empty-args guard and
+    // the chained-receiver guard below apply separately.
+
+    #[test]
+    fn s1yc40_flags_csend() {
+        // Safe-navigation: `call` covers `csend`, mirroring upstream inner
+        // `$(call _ {:each_with_object :with_object} _)` which also matches
+        // csend. Pre-port block dispatch already flags via method_name; the
+        // verbatim head collapses the workaround and keeps it byte-identical.
+        // Verified vs standalone NodePattern: `(call _ {:each_with_object
+        // :with_object} _)` matches csend.
+        test::<RedundantWithObject>().expect_offense(indoc! {r#"
+            ary&.each_with_object([]) { |v| v }
+                 ^^^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_object`.
+        "#});
+    }
+
+    #[test]
+    fn s1yc40_flags_bare() {
+        // Bare `each_with_object([]) { |v| v }` has no receiver; the `_`
+        // wildcard binds the absent receiver per murphy-if9y, so the verbatim
+        // head matches and the one-arg block guard below flags -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:each_with_object
+        // :with_object} _)` matches bare send.
+        test::<RedundantWithObject>().expect_offense(indoc! {r#"
+            each_with_object([]) { |v| v }
+            ^^^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_object`.
+        "#});
+    }
+
+    #[test]
+    fn s1yc40_accepts_no_args() {
+        // Zero-arg: trailing `_` requires exactly one argument, so the head
+        // rejects `ary.each_with_object { |v| v }` up front -- pinned here
+        // (pre-port empty-args guard already accepts; verbatim keeps it).
+        // Verified vs standalone NodePattern: `(call _ {:each_with_object
+        // :with_object} _)` does not match zero-arg call.
+        test::<RedundantWithObject>().expect_no_offenses("ary.each_with_object { |v| v }\n");
+    }
+
+    #[test]
+    fn s1yc40_accepts_unrelated() {
+        // Unrelated `map` is not in the head method set, so the verbatim head
+        // rejects it up front -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:each_with_object
+        // :with_object} _)` does not match `ary.map`.
+        test::<RedundantWithObject>().expect_no_offenses("ary.map { |v| v }\n");
     }
 }
 
