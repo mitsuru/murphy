@@ -962,6 +962,7 @@ dependencies = [
  "murphy-prism",
  "murphy-translate",
  "regex",
+ "serde",
  "serde_json",
 ]
 

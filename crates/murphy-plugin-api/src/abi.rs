@@ -343,6 +343,16 @@ pub struct CxRaw {
     /// fields. Read via `Cx::parse_diagnostics()`.
     pub parse_diagnostics: *const ParseDiagnostic,
     pub parse_diagnostics_len: usize,
+    /// Rails `db/schema.rb` view as JSON (murphy-s0vb): serialized
+    /// [`RailsSchema`](crate::RailsSchema) (`{"tables":[...]}`), empty
+    /// (`null`/`0`, i.e. `RawSlice::EMPTY`) when no schema file was found.
+    /// The host loads `db/schema.rb` once per run, extracts tables via
+    /// [`rails_schema::schema_from_ast`](crate::rails_schema::schema_from_ast),
+    /// and threads the JSON here; the plugin decodes via
+    /// [`Cx::rails_schema`](crate::Cx::rails_schema). Tail-appended under
+    /// ABI v4 lockstep; per project policy the numeric ABI is not bumped
+    /// for tail-appended CxRaw fields.
+    pub rails_schema_json: RawSlice,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -750,7 +760,10 @@ mod tests {
         // 270-271 padding).
         assert_eq!(offset_of!(CxRaw, parse_diagnostics), 272);
         assert_eq!(offset_of!(CxRaw, parse_diagnostics_len), 280);
-        assert_eq!(size_of::<CxRaw>(), 288);
+        // murphy-s0vb: tail-appended RawSlice; starts at 288 (after
+        // parse_diagnostics_len at 280, no padding needed).
+        assert_eq!(offset_of!(CxRaw, rails_schema_json), 288);
+        assert_eq!(size_of::<CxRaw>(), 304);
     }
 
     #[test]

@@ -268,6 +268,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
         options_json: DEFAULT_OPTIONS_JSON.to_string(),
         context: crate::AllCopsContext::default(),
         file_path: DEFAULT_TEST_FILE_PATH.to_string(),
+        rails_schema_json: String::new(),
         _phantom: PhantomData,
     }
 }
@@ -294,6 +295,7 @@ pub fn test_with_options<T: NodeCop + Default>(opts: &<T as Cop>::Options) -> Te
         options_json: opts.to_config_json(),
         context: crate::AllCopsContext::default(),
         file_path: DEFAULT_TEST_FILE_PATH.to_string(),
+        rails_schema_json: String::new(),
         _phantom: PhantomData,
     }
 }
@@ -315,6 +317,7 @@ pub struct Tester<T: NodeCop + Default> {
     options_json: String,
     context: crate::AllCopsContext,
     file_path: String,
+    rails_schema_json: String,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -401,6 +404,20 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Thread a `db/schema.rb` source text into `Cx::rails_schema()` for this
+    /// cop test (murphy-s0vb). The schema source is parsed with the same
+    /// translator as the cop under test, extracted via
+    /// [`crate::rails_schema::schema_from_ast`], and threaded as JSON —
+    /// mirroring the host's once-per-run `db/schema.rb` load. Without this,
+    /// `Cx::rails_schema()` is `None` and schema-dependent cops emit nothing
+    /// (matching RuboCop's `return unless schema`).
+    pub fn with_rails_schema(mut self, schema_src: &str) -> Self {
+        let ast = murphy_translate::translate(schema_src, "db/schema.rb");
+        let schema = crate::rails_schema::schema_from_ast(&ast);
+        self.rails_schema_json = schema.to_json();
+        self
+    }
+
     /// Assert the cop emits exactly the offenses described by the caret
     /// annotations in `annotated`. See the module docs for the
     /// annotation grammar.
@@ -411,6 +428,7 @@ impl<T: NodeCop + Default> Tester<T> {
             &self.options_json,
             self.context,
             &self.file_path,
+            &self.rails_schema_json,
         );
         self
     }
@@ -418,7 +436,13 @@ impl<T: NodeCop + Default> Tester<T> {
     /// Assert the cop emits no offenses against `src`.
     #[track_caller]
     pub fn expect_no_offenses(&self, src: &str) -> &Self {
-        assert_no_offenses_inner::<T>(src, &self.options_json, self.context, &self.file_path);
+        assert_no_offenses_inner::<T>(
+            src,
+            &self.options_json,
+            self.context,
+            &self.file_path,
+            &self.rails_schema_json,
+        );
         self
     }
 
@@ -432,6 +456,7 @@ impl<T: NodeCop + Default> Tester<T> {
             &self.options_json,
             self.context,
             &self.file_path,
+            &self.rails_schema_json,
         );
         self
     }
@@ -441,7 +466,13 @@ impl<T: NodeCop + Default> Tester<T> {
     /// [`Tester::expect_offense`] when both must hold.
     #[track_caller]
     pub fn expect_no_corrections(&self, src: &str) -> &Self {
-        assert_no_corrections_inner::<T>(src, &self.options_json, self.context, &self.file_path);
+        assert_no_corrections_inner::<T>(
+            src,
+            &self.options_json,
+            self.context,
+            &self.file_path,
+            &self.rails_schema_json,
+        );
         self
     }
 }
@@ -452,13 +483,19 @@ fn assert_no_offenses_inner<T: NodeCop + Default>(
     options_json: &str,
     ctx: crate::AllCopsContext,
     file_path: &str,
+    rails_schema_json: &str,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_offenses must not contain annotations; use expect_offense instead");
     }
-    let offenses =
-        run_cop_with_options_json_and_context_and_path::<T>(src, options_json, ctx, file_path);
+    let offenses = run_cop_with_options_json_and_context_and_path_and_schema::<T>(
+        src,
+        options_json,
+        ctx,
+        file_path,
+        rails_schema_json,
+    );
     if !offenses.is_empty() {
         panic!(
             "expect_no_offenses found {} offense(s) for {}",
@@ -607,6 +644,7 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
     options_json: &str,
     ctx: crate::AllCopsContext,
     file_path: &str,
+    rails_schema_json: &str,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -614,8 +652,13 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
             "expect_offense must contain at least one annotation; use expect_no_offenses instead"
         );
     }
-    let actuals =
-        run_cop_with_options_json_and_context_and_path::<T>(&cleaned, options_json, ctx, file_path);
+    let actuals = run_cop_with_options_json_and_context_and_path_and_schema::<T>(
+        &cleaned,
+        options_json,
+        ctx,
+        file_path,
+        rails_schema_json,
+    );
     assert_offenses_match("expect_offense", &cleaned, &expected, &actuals);
 }
 
@@ -674,6 +717,7 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
     options_json: &str,
     ctx: crate::AllCopsContext,
     file_path: &str,
+    rails_schema_json: &str,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -682,11 +726,12 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
         );
     }
 
-    let captured = run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+    let captured = run_cop_with_options_and_edits_json_and_context_and_path_and_schema::<T>(
         &cleaned,
         options_json,
         ctx,
         file_path,
+        rails_schema_json,
     );
     assert_offenses_match("expect_correction", &cleaned, &expected, &captured.offenses);
 
@@ -706,17 +751,19 @@ fn assert_no_corrections_inner<T: NodeCop + Default>(
     options_json: &str,
     ctx: crate::AllCopsContext,
     file_path: &str,
+    rails_schema_json: &str,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_corrections must not contain annotations; use expect_correction instead");
     }
 
-    let captured = run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+    let captured = run_cop_with_options_and_edits_json_and_context_and_path_and_schema::<T>(
         src,
         options_json,
         ctx,
         file_path,
+        rails_schema_json,
     );
     if !captured.edits.is_empty() {
         panic!(
@@ -993,17 +1040,35 @@ fn run_cop_with_options_json_and_context<T: NodeCop + Default>(
     run_cop_with_options_and_edits_json_and_context::<T>(source, options_json, ctx).offenses
 }
 
+#[allow(dead_code)]
 fn run_cop_with_options_json_and_context_and_path<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
     ctx: crate::AllCopsContext,
     file_path: &str,
 ) -> Vec<CapturedOffense> {
-    run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+    run_cop_with_options_json_and_context_and_path_and_schema::<T>(
         source,
         options_json,
         ctx,
         file_path,
+        "",
+    )
+}
+
+fn run_cop_with_options_json_and_context_and_path_and_schema<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    ctx: crate::AllCopsContext,
+    file_path: &str,
+    rails_schema_json: &str,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_and_edits_json_and_context_and_path_and_schema::<T>(
+        source,
+        options_json,
+        ctx,
+        file_path,
+        rails_schema_json,
     )
     .offenses
 }
@@ -1038,6 +1103,22 @@ fn run_cop_with_options_and_edits_json_and_context_and_path<T: NodeCop + Default
     ctx: crate::AllCopsContext,
     file_path: &str,
 ) -> CapturedRun {
+    run_cop_with_options_and_edits_json_and_context_and_path_and_schema::<T>(
+        source,
+        options_json,
+        ctx,
+        file_path,
+        "",
+    )
+}
+
+fn run_cop_with_options_and_edits_json_and_context_and_path_and_schema<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    ctx: crate::AllCopsContext,
+    file_path: &str,
+    rails_schema_json: &str,
+) -> CapturedRun {
     let ast = murphy_translate::translate(source, file_path);
     let var_model = crate::var_semantic_model::VarSemanticModel::build(&ast);
     let cop = T::default();
@@ -1058,6 +1139,10 @@ fn run_cop_with_options_and_edits_json_and_context_and_path<T: NodeCop + Default
     let options_slice = RawSlice {
         ptr: options_json.as_ptr(),
         len: options_json.len(),
+    };
+    let schema_slice = RawSlice {
+        ptr: rails_schema_json.as_ptr(),
+        len: rails_schema_json.len(),
     };
     // Harvest prism diagnostics so `Cx::parse_diagnostics()` works in tests
     // (murphy-zpgm). The owned `messages` outlive the wire slice and the
@@ -1082,6 +1167,7 @@ fn run_cop_with_options_and_edits_json_and_context_and_path<T: NodeCop + Default
         &var_model,
         ctx,
         &wire,
+        schema_slice,
     );
     let cx = unsafe { Cx::from_raw(&raw) };
 
@@ -1191,6 +1277,7 @@ fn cx_raw_for(
     var_model: &crate::var_semantic_model::VarSemanticModel,
     ctx: crate::AllCopsContext,
     parse_diagnostics: &[ParseDiagnostic],
+    rails_schema_json: RawSlice,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -1241,6 +1328,7 @@ fn cx_raw_for(
             parse_diagnostics.as_ptr()
         },
         parse_diagnostics_len: parse_diagnostics.len(),
+        rails_schema_json,
     }
 }
 

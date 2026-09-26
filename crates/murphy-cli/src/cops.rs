@@ -228,13 +228,14 @@ fn write_json<W: Write>(out: &mut W, listings: &[Listing]) -> std::io::Result<()
 /// once per lint run (after config load, before any file is parsed) so the
 /// diagnostic surfaces even on a zero-file run.
 pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core::CopRegistry) {
-    // Warn only for stubs from dynamic packs (e.g. murphy-rails) where the cop's
-    // default_enabled tristate says false — meaning it has no real implementation yet.
-    // Fully-implemented cops that are disabled by default in default.yml (e.g.
-    // Style/CollectionMethods) will work fine if the user enables them, so no warning.
+    // Warn only for stubs from dynamic packs (e.g. murphy-rails): disabled by
+    // default AND still carrying the arena-migration stub description.
+    // Fully-implemented opt-in cops (e.g. Rails/UnusedIgnoredColumns, upstream
+    // Enabled:false but real) must not warn — murphy-s0vb.
     for (cop, pack_name) in registry.all_cops_with_packs() {
         let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
-        if is_disabled_dynamic_pack_stub(pack_name, cop_default)
+        let description = std::str::from_utf8(unsafe { cop.description.as_bytes() }).unwrap_or("");
+        if is_disabled_dynamic_pack_stub(pack_name, cop_default, description)
             && let Ok(name) = std::str::from_utf8(unsafe { cop.name.as_bytes() })
             && config.is_explicitly_enabled(name)
         {
@@ -260,28 +261,66 @@ pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core:
 
 /// The registry's `builtin` pack contains real native implementations; its
 /// `default_enabled = false` value is a user-facing default, not a stub marker.
-/// Dynamic packs use that value for their migration stubs.
-fn is_disabled_dynamic_pack_stub(pack_name: &str, default_enabled: Option<bool>) -> bool {
-    pack_name != "builtin" && default_enabled == Some(false)
+/// Dynamic packs use that value for their migration stubs, but real opt-in cops
+/// (e.g. Rails/UnusedIgnoredColumns) also carry `false` — so the stub
+/// description (`pending arena migration`) disambiguates (murphy-s0vb).
+fn is_disabled_dynamic_pack_stub(
+    pack_name: &str,
+    default_enabled: Option<bool>,
+    description: &str,
+) -> bool {
+    pack_name != "builtin"
+        && default_enabled == Some(false)
+        && description.contains("pending arena migration")
 }
 
 #[cfg(test)]
 mod tests {
     use super::is_disabled_dynamic_pack_stub;
 
+    const STUB_DESC: &str = "Rails cop pending arena migration (cf. murphy-au8). Stub registered.";
+    const REAL_DESC: &str = "Remove a column that does not exist.";
+
     #[test]
     fn builtin_cops_disabled_by_default_are_not_stubs() {
-        assert!(!is_disabled_dynamic_pack_stub("builtin", Some(false)));
+        assert!(!is_disabled_dynamic_pack_stub(
+            "builtin",
+            Some(false),
+            STUB_DESC
+        ));
     }
 
     #[test]
     fn disabled_dynamic_pack_cops_are_stub_candidates() {
-        assert!(is_disabled_dynamic_pack_stub("murphy-rails", Some(false)));
+        assert!(is_disabled_dynamic_pack_stub(
+            "murphy-rails",
+            Some(false),
+            STUB_DESC
+        ));
+    }
+
+    #[test]
+    fn real_opt_in_dynamic_cops_are_not_stubs() {
+        // murphy-s0vb: real opt-in cops (e.g. Rails/UnusedIgnoredColumns)
+        // carry default_enabled=false but must not warn.
+        assert!(!is_disabled_dynamic_pack_stub(
+            "murphy-rails",
+            Some(false),
+            REAL_DESC
+        ));
     }
 
     #[test]
     fn enabled_or_unspecified_dynamic_cops_are_not_stub_candidates() {
-        assert!(!is_disabled_dynamic_pack_stub("murphy-rails", Some(true)));
-        assert!(!is_disabled_dynamic_pack_stub("murphy-rails", None));
+        assert!(!is_disabled_dynamic_pack_stub(
+            "murphy-rails",
+            Some(true),
+            STUB_DESC
+        ));
+        assert!(!is_disabled_dynamic_pack_stub(
+            "murphy-rails",
+            None,
+            STUB_DESC
+        ));
     }
 }
