@@ -129,6 +129,18 @@ Rails/ActionFilter:
     - '**/app/controllers/**/*.rb'
     - '**/app/mailers/**/*.rb'
 
+Rails/ActionOrder:
+  Include:
+    - '**/app/controllers/**/*.rb'
+
+Rails/ActiveRecordCallbacksOrder:
+  Include:
+    - '**/app/models/**/*.rb'
+
+Rails/ActiveRecordOverride:
+  Include:
+    - '**/app/models/**/*.rb'
+
 Rails/ApplicationRecord:
   Exclude:
     - 'db/**/*.rb'
