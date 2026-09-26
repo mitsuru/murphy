@@ -44,7 +44,26 @@
 //! Pathname.new(__dir__).expand_path
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/ExpandPathArguments` `file_expand_path` is
+// `(send (const {nil? cbase} :File) :expand_path $_ $_)` (File receiver,
+// two args; captures stay hand-rolled). Murphy splits the const-receiver
+// check (`File.expand_path` top-level) from the `__FILE__`/string-literal
+// guards, so the verbatim port covers the const part only:
+// `(send (const nil? :File) :expand_path ...)` (send-only, matching the
+// `Send`-only dispatch via `#[on_node(kind = "send")]`; no `csend` handler).
+// In Murphy `::File` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both flag, pinned by `boundary_flags_cbase_file_expand_path`).
+// Namespaced `Foo::File` is not top-level, so silent (pinned by
+// `boundary_ignores_namespaced_file_expand_path`). `send` covers `Send`
+// only, matching the `Send`-only dispatch (csend silent, pinned by
+// `boundary_ignores_csend_file_expand_path`). The `$_ $_` captures +
+// `__FILE__`/string handling + Pathname branches stay hand-rolled below.
+def_node_matcher!(
+    file_expand_path_const,
+    "(send (const nil? :File) :expand_path ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -78,9 +97,9 @@ fn check_expand_path(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // Try File.expand_path pattern (receiver is File const, 2 args)
-    if let Some(recv) = receiver.get()
-        && is_file_const(recv, cx)
+    // `(send (const nil? :File) :expand_path ...)` (top-level only, send-only).
+    // The `$_ $_` captures + `__FILE__`/string guards stay hand-rolled below.
+    if file_expand_path_const(node, cx)
     {
         let args = cx.list(args);
         if args.len() == 2 {
@@ -224,20 +243,7 @@ fn is_file_magic(node: NodeId, cx: &Cx<'_>) -> bool {
         && cx.raw_source(cx.range(node)) == "__FILE__"
 }
 
-/// Returns true if `node` is `File` or `::File` constant.
-fn is_file_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { name, scope } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.symbol_str(name) != "File" {
-        return false;
-    }
-    // Accept nil scope (bare `File`) or cbase scope (`::File`)
-    match scope.get() {
-        None => true,
-        Some(scope_node) => matches!(*cx.kind(scope_node), NodeKind::Cbase),
-    }
-}
+// `is_file_const` replaced by verbatim `file_expand_path_const` above (predicate-only).
 
 /// Returns true if `node` is `Pathname` or `::Pathname` constant.
 fn is_pathname_const(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -385,6 +391,36 @@ mod tests {
             "},
             "Pathname.new(__dir__).expand_path\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.17): pin the exact node set
+    // the hand-rolled `is_file_const` (nil/cbase scope, reject namespaced) +
+    // method `expand_path` matches, so the verbatim
+    // `(send (const nil? :File) :expand_path ...)` refactor can be proven
+    // equivalent. `::File` collapses to `Const{scope:None}`: `nil?` covers
+    // bare + `::` (both flag). Namespaced `Foo::File` is not top-level, so
+    // silent. `send` covers `Send` only, matching the `Send`-only dispatch
+    // (no `csend` handler, so `&.` is silent). Pathname branches stay
+    // hand-rolled below.
+
+    #[test]
+    fn boundary_flags_cbase_file_expand_path() {
+        test::<ExpandPathArguments>().expect_offense(indoc! {"
+            ::File.expand_path('..', __FILE__)
+                   ^^^^^^^^^^^ Use `expand_path(__dir__)` instead of `expand_path('..', __FILE__)`.
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_file_expand_path() {
+        test::<ExpandPathArguments>()
+            .expect_no_offenses("Foo::File.expand_path('..', __FILE__)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_file_expand_path() {
+        test::<ExpandPathArguments>()
+            .expect_no_offenses("File&.expand_path('..', __FILE__)\n");
     }
 }
 
