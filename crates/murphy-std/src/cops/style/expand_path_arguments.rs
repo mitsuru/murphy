@@ -65,6 +65,21 @@ def_node_matcher!(
     "(send (const nil? :File) :expand_path ...)"
 );
 
+// RuboCop parity: `Style/ExpandPathArguments` `pathname_new_parent_expand_path`
+// is `(send (send (send (const {nil? cbase} :Pathname) :new $_) :parent) ...)`
+// (Pathname receiver, one arg; captures + `__FILE__` guards stay hand-rolled).
+// Murphy splits the const-receiver check (`Pathname.new` top-level) from the
+// `__FILE__`/arity guards, so the verbatim port covers the const part only:
+// `(const nil? :Pathname)` (top-level only).
+// In Murphy `::Pathname` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both flag, pinned by
+// `boundary_flags_cbase_pathname_new_parent_expand_path`). Namespaced
+// `Foo::Pathname` is not top-level, so silent (pinned by
+// `boundary_ignores_namespaced_pathname_new_parent_expand_path`). The `:new`
+// method + 1-arg `__FILE__` guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(pathname_const, "(const nil? :Pathname)");
+
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct ExpandPathArguments;
@@ -246,17 +261,10 @@ fn is_file_magic(node: NodeId, cx: &Cx<'_>) -> bool {
 // `is_file_const` replaced by verbatim `file_expand_path_const` above (predicate-only).
 
 /// Returns true if `node` is `Pathname` or `::Pathname` constant.
+/// Verbatim `(const nil? :Pathname)` (top-level only); `::` collapses to
+/// `Const{scope:None}` so `nil?` covers bare + `::`.
 fn is_pathname_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { name, scope } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.symbol_str(name) != "Pathname" {
-        return false;
-    }
-    match scope.get() {
-        None => true,
-        Some(scope_node) => matches!(*cx.kind(scope_node), NodeKind::Cbase),
-    }
+    pathname_const(node, cx)
 }
 
 #[cfg(test)]
@@ -421,6 +429,34 @@ mod tests {
     fn boundary_ignores_csend_file_expand_path() {
         test::<ExpandPathArguments>()
             .expect_no_offenses("File&.expand_path('..', __FILE__)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.24): pin the exact node set
+    // the hand-rolled `is_pathname_const` (nil/cbase scope, reject namespaced)
+    // matches, so the verbatim `(const nil? :Pathname)` refactor can be proven
+    // equivalent. `::Pathname` collapses to `Const{scope:None}`: `nil?` covers
+    // bare + `::` (both flag). Namespaced `Foo::Pathname` is not top-level,
+    // so silent. `send` covers `Send` only, matching the `Send`-only dispatch
+    // (no `csend` handler, so `&.` is silent).
+
+    #[test]
+    fn boundary_flags_cbase_pathname_new_parent_expand_path() {
+        test::<ExpandPathArguments>().expect_offense(indoc! {"
+            ::Pathname.new(__FILE__).parent.expand_path
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Pathname.new(__dir__).expand_path` instead of `Pathname.new(__FILE__).parent.expand_path`.
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_pathname_new_parent_expand_path() {
+        test::<ExpandPathArguments>()
+            .expect_no_offenses("Foo::Pathname.new(__FILE__).parent.expand_path\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_pathname_parent_expand_path() {
+        test::<ExpandPathArguments>()
+            .expect_no_offenses("Pathname.new(__FILE__).parent&.expand_path\n");
     }
 }
 

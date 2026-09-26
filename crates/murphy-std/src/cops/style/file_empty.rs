@@ -41,7 +41,18 @@
 //! FileTest.empty?('path')
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/FileEmpty` file-class receiver is
+// `(const {nil? cbase} {:File :FileTest})` (top-level only).
+// In Murphy `::File` / `::FileTest` collapse to `Const{scope:None}`: `nil?`
+// covers bare + `::` (both flag, pinned by `boundary_flags_cbase_file_zero`;
+// replacement preserves the `::` source via `raw_source`). Namespaced
+// `Foo::File` / `Foo::FileTest` still accept (pinned by
+// `boundary_ignores_namespaced_file_zero`). The method + arity + bang guards
+// stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(is_file_class_const, "(const nil? {:File :FileTest})");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -180,19 +191,11 @@ fn extract_file_size_or_read<'a>(
 /// Returns the source string for `File` or `FileTest` receiver const,
 /// if the node is a nil-scoped or cbase-scoped `File` or `FileTest` constant.
 fn file_class_src<'a>(node: NodeId, cx: &'a Cx<'a>) -> Option<&'a str> {
-    let NodeKind::Const { name, scope } = *cx.kind(node) else {
-        return None;
-    };
-    let const_name = cx.symbol_str(name);
-    if !matches!(const_name, "File" | "FileTest") {
-        return None;
-    }
-    // Accept nil scope or cbase scope (::File / ::FileTest).
-    let scope_ok = match scope.get() {
-        None => true,
-        Some(scope_id) => matches!(*cx.kind(scope_id), NodeKind::Cbase),
-    };
-    if !scope_ok {
+    // `(const nil? {:File :FileTest})` — top-level `File` / `FileTest` /
+    // `::File` / `::FileTest` only (`::` collapses to `Const{scope:None}`).
+    // Namespaced `Foo::File` still accepts. Source (including any `::`)
+    // stays hand-rolled for the replacement below.
+    if !is_file_class_const(node, cx) {
         return None;
     }
     Some(cx.raw_source(cx.range(node)))
@@ -336,6 +339,30 @@ mod tests {
     #[test]
     fn accepts_non_zero_size_comparison() {
         test::<FileEmpty>().expect_no_offenses("File.size('path') == 1\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.24): pin the exact node set
+    // the hand-rolled `file_class_src` (nil/cbase scope, reject namespaced)
+    // matches, so the verbatim `(const nil? {:File :FileTest})` refactor can
+    // be proven equivalent. `::File` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both flag, replacement preserves the `::` source).
+    // Namespaced `Foo::File` is not top-level, so silent.
+
+    #[test]
+    fn boundary_flags_cbase_file_zero() {
+        test::<FileEmpty>().expect_correction(
+            indoc! {r#"
+                ::File.zero?('path/to/file')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `::File.empty?('path/to/file')` instead.
+            "#},
+            "::File.empty?('path/to/file')\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_file_zero() {
+        test::<FileEmpty>()
+            .expect_no_offenses("Foo::File.zero?('path/to/file')\n");
     }
 }
 murphy_plugin_api::submit_cop!(FileEmpty);
