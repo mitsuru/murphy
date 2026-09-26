@@ -64,6 +64,21 @@ def_node_matcher!(
     "(send (const nil? :Marshal) {:load :restore} ...)"
 );
 
+// RuboCop parity: `Security/MarshalLoad` inner `dump` negation is
+// `(send (const {nil? cbase} :Marshal) :dump ...)` (send-only upstream).
+// Murphy's `is_marshal_dump` uses generic `method_name` + `call_receiver`
+// dispatch (both `Send` + `Csend`), so the verbatim port uses `call` to
+// preserve the current node set (per DuplicateRequire / TallyMethod precedent:
+// equivalence-preserving vs hand-rolled, not a RuboCop parity fix).
+// In Murphy `::Marshal` collapses to `Const{scope:None}`: `nil?`
+// covers bare + `::` (pinned by `accepts_deep_copy_idiom_cbase` +
+// `boundary_skips_csend_marshal_dump_arg`). Namespaced `Foo::Marshal` still
+// flags the outer (pinned by `boundary_flags_namespaced_marshal_dump_arg`).
+def_node_matcher!(
+    marshal_dump_match,
+    "(call (const nil? :Marshal) :dump ...)"
+);
+
 #[derive(Default)]
 pub struct MarshalLoad;
 
@@ -116,13 +131,9 @@ impl MarshalLoad {
 /// negation succeeds, making RuboCop fire. We deliberately do not unwrap here
 /// to preserve exact parity (verified against rubocop 1.87.0).
 fn is_marshal_dump(node: NodeId, cx: &Cx<'_>) -> bool {
-    if cx.method_name(node) != Some("dump") {
-        return false;
-    }
-    let Some(receiver) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    cx.is_global_const(receiver, "Marshal")
+    // `(call (const nil? :Marshal) :dump ...)` (`Marshal` / `::Marshal`,
+    // top-level only). `call` covers `Send` + `Csend`.
+    marshal_dump_match(node, cx)
 }
 
 murphy_plugin_api::submit_cop!(MarshalLoad);
@@ -236,5 +247,29 @@ mod tests {
         // pattern does not match it, and `#[on_node(kind = "send")]`
         // never dispatches on it.
         test::<MarshalLoad>().expect_no_offenses("Marshal&.load(data)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.13): pin the exact node set
+    // the hand-rolled `is_marshal_dump` (`is_global_const(Marshal)`) matches,
+    // so the verbatim `(call (const nil? :Marshal) :dump ...)` refactor can be
+    // proven equivalent. `::Marshal` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both skip the outer offense, pinned by
+    // `accepts_deep_copy_idiom_cbase`). Namespaced `Foo::Marshal.dump` is not
+    // top-level, so the outer still flags. `call` covers `Send` + `Csend`,
+    // matching the generic `method_name`+`call_receiver` dispatch (per
+    // DuplicateRequire / TallyMethod precedent: equivalence-preserving vs
+    // hand-rolled, not a RuboCop parity fix).
+
+    #[test]
+    fn boundary_flags_namespaced_marshal_dump_arg() {
+        test::<MarshalLoad>().expect_offense(indoc! {r#"
+            Marshal.load(Foo::Marshal.dump(x))
+                    ^^^^ Avoid using `Marshal.load`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_skips_csend_marshal_dump_arg() {
+        test::<MarshalLoad>().expect_no_offenses("Marshal.load(Marshal&.dump(x))\n");
     }
 }
