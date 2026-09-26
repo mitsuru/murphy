@@ -30,8 +30,26 @@
 //! Surgical rename of the selector (`loc.name`) to the preferred method.
 //! Special case: when style=`then` and receiver is nil, emits `self.then`
 //! to avoid colliding with Ruby's `then` keyword.
+//!
+//! Verbatim port of the call head `(call _ {:then :yield_self} ...)`
+//! (murphy-s1yc.27): `call` = `{send csend}` covers safe-navigation
+//! (`obj&.yield_self(&method(:foo))`), mirroring RuboCop
+//! `alias on_csend on_send` plus `RESTRICT_ON_SEND [then yield_self]`; the
+//! wildcard receiver binds an absent or present receiver per murphy-if9y;
+//! trailing `...` absorbs any argument list. The one-block-pass-arg guard
+//! below applies separately (upstream `on_send` requires exactly one
+//! block-pass argument).
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.27):
+// `(call _ {:then :yield_self} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`obj&.yield_self(&method(:foo))`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND [then yield_self]`.
+// The `_` receiver binds an absent or present receiver per murphy-if9y;
+// trailing `...` absorbs any argument list, so the one-block-pass-arg
+// guard below applies separately.
+def_node_matcher!(object_then_call, "(call _ {:then :yield_self} ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -180,31 +198,38 @@ impl ObjectThen {
     }
 
     /// Send path: `obj.yield_self(&method(:foo))` — exactly one block-pass arg.
-    #[on_node(kind = "send", methods = ["then", "yield_self"])]
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:then :yield_self} ...)` head filters to the 2
+    /// RESTRICT_ON_SEND methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<ObjectThenOptions>();
-        let args = cx.call_arguments(node);
-        if args.len() == 1 && matches!(cx.kind(args[0]), NodeKind::BlockPass(_)) {
-            check_method_node(node, cx, opts.enforced_style);
-        }
+        check(node, cx, opts.enforced_style);
     }
 
     /// Safe-navigation send path: `obj&.yield_self(&block)`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        // `methods = [...]` is not supported on csend — filter manually.
-        let name = match cx.method_name(node) {
-            Some(n) => n,
-            None => return,
-        };
-        if name != "then" && name != "yield_self" {
-            return;
-        }
         let opts = cx.options_or_default::<ObjectThenOptions>();
-        let args = cx.call_arguments(node);
-        if args.len() == 1 && matches!(cx.kind(args[0]), NodeKind::BlockPass(_)) {
-            check_method_node(node, cx, opts.enforced_style);
-        }
+        check(node, cx, opts.enforced_style);
+    }
+}
+
+/// Send-path check: flags `then`/`yield_self` calls with exactly one
+/// block-pass argument.
+fn check(node: NodeId, cx: &Cx<'_>, style: ObjectThenStyle) {
+    // Verbatim `(call _ {:then :yield_self} ...)` head: filters to the 2
+    // RESTRICT_ON_SEND methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated
+    // call with a block-pass arg (e.g. `obj.map(&method(:foo))`) would run
+    // check on every call node instead of being rejected by the method set
+    // up front.
+    if !object_then_call(node, cx) {
+        return;
+    }
+    let args = cx.call_arguments(node);
+    if args.len() == 1 && matches!(cx.kind(args[0]), NodeKind::BlockPass(_)) {
+        check_method_node(node, cx, style);
     }
 }
 
@@ -357,6 +382,60 @@ mod tests {
             "},
             "obj&.then { |x| x }\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.27): pin the exact node set the
+    // dual send(methods=[then yield_self]) + manual-csend-filter dispatch
+    // matches, so the verbatim `(call _ {:then :yield_self} ...)` port can
+    // be proven byte-identical. `call` covers safe-navigation (mirroring
+    // upstream `alias on_csend on_send` plus `RESTRICT_ON_SEND
+    // [then yield_self]`); trailing `...` absorbs any argument list, so
+    // the one-block-pass-arg guard below applies separately.
+
+    #[test]
+    fn s1yc27_flags_csend_block_pass_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port the `csend` handler
+        // filters `then`/`yield_self` manually because `methods = [...]`
+        // is only valid for `kind = "send"`; the verbatim head collapses
+        // the workaround.
+        test::<ObjectThen>().expect_correction(
+            indoc! {"
+                obj&.yield_self(&method(:foo))
+                     ^^^^^^^^^^ Prefer `then` over `yield_self`.
+            "},
+            "obj&.then(&method(:foo))\n",
+        );
+    }
+
+    #[test]
+    fn s1yc27_flags_bare_block_pass_corrects_to_self_then() {
+        // Bare receiver: `_` in `(call _ {:then :yield_self} ...)` binds an
+        // absent receiver per murphy-if9y, so a receiverless
+        // `yield_self(&method(:foo))` (implicit self) flags; autocorrect
+        // emits `self.then` to avoid colliding with Ruby's `then` keyword.
+        test::<ObjectThen>().expect_correction(
+            indoc! {"
+                yield_self(&method(:foo))
+                ^^^^^^^^^^ Prefer `then` over `yield_self`.
+            "},
+            "self.then(&method(:foo))\n",
+        );
+    }
+
+    #[test]
+    fn s1yc27_accepts_bare_no_arg() {
+        // No arguments: trailing `...` absorbs the (empty) argument list so
+        // the head matches, and the complementary one-block-pass-arg guard
+        // accepts (upstream `on_send` requires exactly one block-pass arg).
+        test::<ObjectThen>().expect_no_offenses("yield_self\n");
+    }
+
+    #[test]
+    fn s1yc27_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects
+        // (even though the one-block-pass-arg shape matches).
+        test::<ObjectThen>().expect_no_offenses("obj.map(&method(:foo))\n");
     }
 }
 
