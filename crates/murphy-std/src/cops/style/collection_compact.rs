@@ -22,6 +22,16 @@
 //!     - `select`/`select!`/`filter`/`filter!` block/numblock/itblock with `!e.nil?`
 //!     - `grep_v(nil)` / `grep_v(NilClass)` / `grep_v(::NilClass)`
 //!
+//!   Verbatim port of the call head
+//!   `(call _ {:reject :reject! :select :select! :filter :filter! :grep_v} ...)`
+//!   (murphy-s1yc.23): `call` = `{send csend}` covers safe-navigation
+//!   (`array&.reject { ... }`), mirroring RuboCop `alias on_csend on_send`
+//!   plus `RESTRICT_ON_SEND`; the wildcard receiver binds an absent or
+//!   present receiver per murphy-if9y; trailing `...` absorbs any argument
+//!   list. The block-shape, block-pass-nil, grep_v-nil-arg, and receiver
+//!   guards below apply separately (upstream dispatches on the same 7
+//!   methods and matches block/numblock/itblock parents and nil args).
+//!
 //!   Known v1 limitations (no corresponding beads issues filed):
 //!     - AllowedReceivers: implemented as a simple source-string match against
 //!       the immediate receiver. RuboCop walks chained receivers to find the
@@ -69,7 +79,19 @@
 //! Whole-range replacement is appropriate because the block/block-pass is
 //! collapsed into a single method call.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.23):
+// `(call _ {:reject :reject! :select :select! :filter :filter! :grep_v} ...)` —
+// `call` = `{send csend}` covers safe-navigation (`array&.reject { ... }`),
+// mirroring RuboCop `alias on_csend on_send` plus `RESTRICT_ON_SEND`. The `_`
+// receiver binds an absent or present receiver per murphy-if9y; trailing
+// `...` absorbs any argument list, so the block-shape, block-pass-nil,
+// grep_v-nil-arg, and receiver guards below apply separately.
+def_node_matcher!(
+    collection_compact_call,
+    "(call _ {:reject :reject! :select :select! :filter :filter! :grep_v} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -96,8 +118,9 @@ const MSG: &str = "Use `%<good>s` instead of `%<bad>s`.";
     safe_autocorrect = false,
 )]
 impl CollectionCompact {
-    /// Triggered on reject, reject!, select, select!, filter, filter!, grep_v sends.
-    #[on_node(kind = "send", methods = ["reject", "reject!", "select", "select!", "filter", "filter!", "grep_v"])]
+    /// Triggered on reject/select/filter/grep_v sends; the verbatim
+    /// `(call _ {...} ...)` head filters to the 7 RESTRICT_ON_SEND methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
@@ -105,23 +128,29 @@ impl CollectionCompact {
     /// Also handle csend (safe-navigation) versions: `array&.reject { ... }`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if matches!(
-            cx.method_name(node),
-            Some("reject" | "reject!" | "select" | "select!" | "filter" | "filter!" | "grep_v")
-        ) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:reject :reject! :select :select! :filter :filter! :grep_v} ...)`
+    // head: filters to the 7 RESTRICT_ON_SEND methods on either send or csend
+    // (safe-navigation), with any receiver (absent or present). Without this,
+    // an unrelated call (e.g. `array.map { |e| e.nil? }`) would run check on
+    // every call node instead of being rejected by the method set up front.
+    if !collection_compact_call(node, cx) {
+        return;
+    }
     let method_name = cx.method_name(node).unwrap_or("");
 
     // AllowedReceivers check: suppress if the immediate receiver source matches.
     let opts = cx.options_or_default::<CollectionCompactOptions>();
     if !opts.allowed_receivers.is_empty()
         && let Some(recv) = cx.call_receiver(node).get()
-        && opts.allowed_receivers.iter().any(|a| a == cx.raw_source(cx.range(recv)))
+        && opts
+            .allowed_receivers
+            .iter()
+            .any(|a| a == cx.raw_source(cx.range(recv)))
     {
         return;
     }
@@ -132,9 +161,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
 
     let bad = cx.raw_source(offense_range);
-    let msg = MSG
-        .replace("%<good>s", good)
-        .replace("%<bad>s", bad);
+    let msg = MSG.replace("%<good>s", good).replace("%<bad>s", bad);
 
     cx.emit_offense(offense_range, &msg, None);
     cx.emit_edit(offense_range, good);
@@ -313,8 +340,16 @@ fn itblock_matches(block_node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
 /// Returns `true` when `node` calls `nil?` on the named block parameter.
 fn is_nil_call_on_lvar(node: NodeId, lvar_name: &str, cx: &Cx<'_>) -> bool {
     let (recv, method, args_list) = match *cx.kind(node) {
-        NodeKind::Send { receiver, method, args } => (receiver.get(), method, cx.list(args)),
-        NodeKind::Csend { receiver, method, args } => (Some(receiver), method, cx.list(args)),
+        NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } => (receiver.get(), method, cx.list(args)),
+        NodeKind::Csend {
+            receiver,
+            method,
+            args,
+        } => (Some(receiver), method, cx.list(args)),
         _ => return false,
     };
     if !args_list.is_empty() {
@@ -333,8 +368,16 @@ fn is_nil_call_on_lvar(node: NodeId, lvar_name: &str, cx: &Cx<'_>) -> bool {
 fn is_negated_nil_call_on_lvar(node: NodeId, lvar_name: &str, cx: &Cx<'_>) -> bool {
     // Outer call must be `.!` with no extra args.
     let (recv, method, args_list) = match *cx.kind(node) {
-        NodeKind::Send { receiver, method, args } => (receiver.get(), method, cx.list(args)),
-        NodeKind::Csend { receiver, method, args } => (Some(receiver), method, cx.list(args)),
+        NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } => (receiver.get(), method, cx.list(args)),
+        NodeKind::Csend {
+            receiver,
+            method,
+            args,
+        } => (Some(receiver), method, cx.list(args)),
         _ => return false,
     };
     if !args_list.is_empty() {
@@ -793,6 +836,53 @@ mod tests {
                 array.reject { |e| e.nil? }
                       ^^^^^^^^^^^^^^^^^^^^^ Use `compact` instead of `reject { |e| e.nil? }`.
             "#});
+    }
+
+    // --- Characterization (murphy-s1yc.23): pin the exact node set the
+    // dual send (methods = [reject/reject!/select/select!/filter/filter!/grep_v])
+    // + manual-csend-filter dispatch matches, so the verbatim
+    // `(call _ {:reject :reject! :select :select! :filter :filter! :grep_v} ...)`
+    // port can be proven byte-identical. `call` covers safe-navigation
+    // (mirroring upstream `alias on_csend on_send` plus `RESTRICT_ON_SEND`);
+    // trailing `...` absorbs any argument list, so the block-shape,
+    // block-pass-nil, grep_v-nil-arg, and receiver guards below apply separately.
+
+    #[test]
+    fn s1yc23_flags_csend_block_pass_corrects() {
+        // Safe-navigation block-pass: `call` covers `csend` per murphy-if9y,
+        // mirroring upstream `alias on_csend on_send`. (Pre-port the `csend`
+        // handler filters the 7 methods manually because `methods = [...]`
+        // is only valid for `kind = "send"`; the verbatim head collapses
+        // the workaround.)
+        test::<CollectionCompact>().expect_correction(
+            indoc! {r#"
+                array&.reject(&:nil?)
+                       ^^^^^^^^^^^^^^ Use `compact` instead of `reject(&:nil?)`.
+            "#},
+            "array&.compact\n",
+        );
+    }
+
+    #[test]
+    fn s1yc23_accepts_bare_reject_block_pass() {
+        // Bare `reject(&:nil?)`: `_` binds an absent receiver per murphy-if9y,
+        // so the verbatim head matches, and the complementary receiver guard
+        // (upstream `!nil?` / `call_receiver(node).get()?`) accepts.
+        test::<CollectionCompact>().expect_no_offenses("reject(&:nil?)\n");
+    }
+
+    #[test]
+    fn s1yc23_accepts_grep_v_no_args() {
+        // `array.grep_v` with no args: trailing `...` absorbs the (empty)
+        // argument list so the head matches, and the complementary
+        // single-nil-arg guard accepts (upstream `grep_v_with_nil?`).
+        test::<CollectionCompact>().expect_no_offenses("array.grep_v\n");
+    }
+
+    #[test]
+    fn s1yc23_accepts_unrelated_method() {
+        // `map` is outside the verbatim method set, so the head rejects.
+        test::<CollectionCompact>().expect_no_offenses("array.map { |e| e.nil? }\n");
     }
 }
 
