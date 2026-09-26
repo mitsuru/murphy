@@ -43,7 +43,28 @@
 //! Array.new(3) { 'foo' }
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RedundantArrayConstructor` `redundant_array_constructor`
+// is `{(send (const {nil? cbase} :Array) :new $(array ...)) (send (const {nil? cbase} :Array) :[] ...) (send nil? :Array $(array ...))}`.
+// Murphy splits the const-receiver arms (`Array.new`/`Array[]`) from the bare
+// `Array(...)` Kernel arm, so the verbatim port covers the const part only:
+// `(send (const nil? :Array) {:new :[]} ...)` (send-only, matching the
+// `Send`-only dispatch; no `csend` handler).
+// In Murphy `::Array` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both flag, pinned by `boundary_flags_cbase_array_new` +
+// `boundary_flags_cbase_array_bracket`). Namespaced `Foo::Array` is not
+// top-level, so silent (pinned by `accepts_namespaced_array_new` +
+// `boundary_ignores_namespaced_array_bracket`). `send` covers `Send` only,
+// matching the `#[on_node(kind = "send")]` dispatch (csend silent, pinned by
+// `boundary_ignores_csend_array_new` + `boundary_ignores_csend_array_bracket`).
+// The `$(array ...)` capture stays hand-rolled below (single array-literal arg
+// for `new`; `is_dot` guard for `[]`); the bare `Array(...)` arm stays
+// hand-rolled.
+def_node_matcher!(
+    array_new_or_index,
+    "(send (const nil? :Array) {:new :[]} ...)"
+);
 
 const MSG: &str = "Remove the redundant `Array` constructor.";
 
@@ -87,12 +108,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     match method_name {
         "new" => {
-            // Array.new([...]) / ::Array.new([...])
-            // Receiver must be `Array` constant with nil or cbase scope.
-            let Some(recv_id) = receiver.get() else {
-                return;
-            };
-            if !is_array_const(recv_id, cx) {
+            // `(send (const nil? :Array) {:new :[]} ...)`
+            // (`Array.new` / `::Array.new`, top-level only, send-only).
+            // The `$(array ...)` capture stays hand-rolled below.
+            if !array_new_or_index(node, cx) {
                 return;
             }
             // Must have exactly one argument that is an array literal.
@@ -128,12 +147,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             );
         }
         "[]" => {
-            // Array['a', 'b'] / ::Array['a', 'b'] → ['a', 'b']
-            // Receiver must be `Array` constant with nil or cbase scope.
-            let Some(recv_id) = receiver.get() else {
-                return;
-            };
-            if !is_array_const(recv_id, cx) {
+            // `(send (const nil? :Array) {:new :[]} ...)`
+            // (`Array[...]` / `::Array[...]`, top-level only, send-only).
+            // The `is_dot` guard stays hand-rolled below.
+            if !array_new_or_index(node, cx) {
                 return;
             }
             // Guard against `Array.[]('a')` explicit dot form: autocorrecting
@@ -199,23 +216,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         }
         _ => {}
     }
-}
-
-/// Returns true if `node` is a `Const` with name `Array` and nil or cbase scope.
-fn is_array_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { scope, name } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.symbol_str(name) != "Array" {
-        return false;
-    }
-    // Allow nil scope (bare `Array`) and cbase scope (`::Array`),
-    // but reject namespaced constants like `Foo::Array`.
-    if let Some(scope_id) = scope.get()
-        && !matches!(cx.kind(scope_id), NodeKind::Cbase) {
-            return false;
-        }
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +394,47 @@ mod tests {
         // Array.[]('a') — explicit dot form: correction would produce []('a')
         // which is invalid Ruby.
         test::<RedundantArrayConstructor>().expect_no_offenses("Array.[]('a')\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.16): pin the exact node set
+    // the hand-rolled `is_array_const` (nil/cbase scope, reject namespaced) +
+    // method `new`/`[]` matches, so the verbatim
+    // `(send (const nil? :Array) {:new :[]} ...)` refactor can be proven
+    // equivalent. `::Array` collapses to `Const{scope:None}`: `nil?` covers
+    // bare + `::` (both flag). Namespaced `Foo::Array` is not top-level, so
+    // silent (pre-existing `accepts_namespaced_array_new` pins `new`; this
+    // pins `[]`). `send` covers `Send` only, matching the `Send`-only dispatch
+    // (no `csend` handler, so `&.` is silent).
+
+    #[test]
+    fn boundary_flags_cbase_array_new() {
+        test::<RedundantArrayConstructor>().expect_offense(indoc! {"
+            ::Array.new([])
+            ^^^^^^^^^^^^^^^ Remove the redundant `Array` constructor.
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_cbase_array_bracket() {
+        test::<RedundantArrayConstructor>().expect_offense(indoc! {"
+            ::Array['foo', 'bar']
+            ^^^^^^^^^^^^^^^^^^^^^ Remove the redundant `Array` constructor.
+        "});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_array_bracket() {
+        test::<RedundantArrayConstructor>().expect_no_offenses("Foo::Array['foo', 'bar']\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_array_new() {
+        test::<RedundantArrayConstructor>().expect_no_offenses("Array&.new([])\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_array_bracket() {
+        test::<RedundantArrayConstructor>().expect_no_offenses("Array&.[]('foo')\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantArrayConstructor);
