@@ -32,7 +32,16 @@
 //! Determining the correct fix (refactoring away the loop) is a semantic
 //! change that cannot be automated safely.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/UnreachableLoop` break terminator Kernel receiver is
+// `(const {nil? cbase} :Kernel)` (top-level only).
+// In Murphy `::Kernel` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_kernel_raise_break`), namespaced
+// Foo::Kernel still rejects (pinned by
+// `boundary_ignores_namespaced_kernel_raise_break`).
+// `send` head + nil-receiver + if/begin walks stay hand-rolled below.
+def_node_matcher!(is_kernel_const, "(const nil? :Kernel)");
 
 const MSG: &str = "This loop will have at most one iteration.";
 
@@ -118,11 +127,11 @@ fn is_break_statement(node: NodeId, cx: &Cx<'_>) -> bool {
             if *receiver == OptNodeId::NONE && FLOW_METHODS.contains(&method_str) {
                 return true;
             }
+            // `(const nil? :Kernel)` top-level only; preserves `::Kernel` via
+            // scope-None collapse.
             if let Some(recv_id) = receiver.get()
-                && matches!(*cx.kind(recv_id), NodeKind::Const { scope, name } if {
-                    let scope_is_root = scope.get().is_none_or(|sid| matches!(*cx.kind(sid), NodeKind::Cbase));
-                    scope_is_root && cx.symbol_str(name) == "Kernel"
-                }) && FLOW_METHODS.contains(&method_str)
+                && is_kernel_const(recv_id, cx)
+                && FLOW_METHODS.contains(&method_str)
             {
                 return true;
             }
@@ -365,6 +374,51 @@ mod tests {
             ^^^^^ This loop will have at most one iteration.
               xs.each { next if skip? }
               break
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_kernel_raise_break() {
+        // `Kernel.raise` is a flow terminator via `is_global_const`-style
+        // scope-root check; verbatim `(const nil? :Kernel)` must preserve.
+        test::<UnreachableLoop>().expect_offense(indoc! {r#"
+            while cond
+            ^^^^^ This loop will have at most one iteration.
+              Kernel.raise("boom")
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_cbase_kernel_raise_break() {
+        // `::Kernel` collapses to Const scope None, so the hand-rolled
+        // scope-root check flags it; verbatim `nil?` must preserve.
+        test::<UnreachableLoop>().expect_offense(indoc! {r#"
+            while cond
+            ^^^^^ This loop will have at most one iteration.
+              ::Kernel.raise("boom")
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_kernel_raise_break() {
+        // `Foo::Kernel` const_name is "Foo::Kernel", not "Kernel", so not a
+        // terminator; verbatim `nil?` must preserve.
+        test::<UnreachableLoop>().expect_no_offenses(indoc! {r#"
+            while cond
+              Foo::Kernel.raise("boom")
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_kernel_raise_break() {
+        // `&.` is csend, not send; is_break_statement matches Send only.
+        test::<UnreachableLoop>().expect_no_offenses(indoc! {r#"
+            while cond
+              Kernel&.raise("boom")
             end
         "#});
     }

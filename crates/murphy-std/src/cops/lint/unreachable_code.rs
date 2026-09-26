@@ -52,7 +52,16 @@
 
 use std::collections::HashSet;
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/UnreachableCode` flow terminator Kernel receiver is
+// `(const {nil? cbase} :Kernel)` (top-level only).
+// In Murphy `::Kernel` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_kernel_exit`), namespaced Foo::Kernel
+// still rejects (pinned by `boundary_ignores_namespaced_kernel_exit`).
+// `send` head + nil-receiver + Cbase + redefined/instance_eval guards stay
+// hand-rolled below.
+def_node_matcher!(is_kernel_const, "(const nil? :Kernel)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -179,16 +188,12 @@ fn is_flow_terminator(
             }
 
             // Kernel-qualified call: `Kernel.raise`, `Kernel.exit`, etc.
-            // `::Kernel.raise` uses a Cbase receiver.
+            // `(const nil? :Kernel)` top-level only; preserves `::Kernel` via
+            // scope-None collapse. Bare `::` (Cbase) receiver stays hand-rolled
+            // below to preserve equivalence.
             if let Some(recv_id) = receiver.get() {
                 let is_kernel = match cx.kind(recv_id) {
-                    NodeKind::Const { scope, name } => {
-                        let scope_is_root = match scope.get() {
-                            None => true,
-                            Some(sid) => matches!(*cx.kind(sid), NodeKind::Cbase),
-                        };
-                        scope_is_root && cx.symbol_str(*name) == "Kernel"
-                    }
+                    NodeKind::Const { .. } => is_kernel_const(recv_id, cx),
                     NodeKind::Cbase => true,
                     _ => false,
                 };
@@ -440,6 +445,43 @@ mod tests {
             Kernel.exit
             foo
             ^^^ Unreachable code detected.
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_cbase_kernel_exit() {
+        // `::Kernel` collapses to Const scope None in Murphy, so
+        // `is_global_const` flags it; verbatim `(const nil? :Kernel)` must
+        // preserve.
+        test::<UnreachableCode>().expect_offense(indoc! {r#"
+            def foo
+              ::Kernel.exit
+              bar
+              ^^^ Unreachable code detected.
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_kernel_exit() {
+        // `Foo::Kernel` const_name is "Foo::Kernel", not "Kernel", so not a
+        // terminator; verbatim `nil?` must preserve.
+        test::<UnreachableCode>().expect_no_offenses(indoc! {r#"
+            def foo
+              Foo::Kernel.exit
+              bar
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_kernel_exit() {
+        // `&.` is csend, not send; is_flow_terminator matches Send only.
+        test::<UnreachableCode>().expect_no_offenses(indoc! {r#"
+            def foo
+              Kernel&.exit
+              bar
+            end
         "#});
     }
 
