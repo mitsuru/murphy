@@ -14,6 +14,15 @@
 //!   an Enumerable. Murphy does not have a Safe/SafeAutoCorrect cop-level
 //!   attribute yet; the unsafe nature is documented here only.
 //!
+//!   Verbatim port of the call head `(call _ :to_set ...)`
+//!   (murphy-s1yc.20): `call` = `{send csend}` covers safe-navigation
+//!   (`something.map { }&.to_set`), mirroring RuboCop
+//!   `alias on_csend on_send` plus `RESTRICT_ON_SEND [to_set]`; the wildcard
+//!   receiver binds an absent or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list. The receiver plus inner
+//!   `map`/`collect` shape guards below apply separately (upstream outer is
+//!   `(call ... :to_set)` in `map_to_set?`).
+//!
 //!   Handled patterns (mirrors RuboCop's node matcher):
 //!     1. Block form:      `something.map { |i| ... }.to_set`
 //!     2. Block-pass form: `something.map(&:method).to_set`
@@ -55,7 +64,16 @@
 //! 1. Delete `.to_set` suffix (from receiver end to to_set node end).
 //! 2. Rename `map`/`collect` selector to `to_set`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.20):
+// `(call _ :to_set ...)` — `call` = `{send csend}` covers safe-navigation
+// (`something.map { }&.to_set`), mirroring RuboCop `alias on_csend on_send`
+// plus `RESTRICT_ON_SEND [to_set]`. The `_` receiver binds an absent or
+// present receiver per murphy-if9y; trailing `...` absorbs any argument
+// list, so the receiver plus inner-`map` shape guards below apply
+// separately (upstream outer is `(call ... :to_set)` in `map_to_set?`).
+def_node_matcher!(map_to_set_call, "(call _ :to_set ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -69,16 +87,14 @@ pub struct MapToSet;
     options = NoOptions,
 )]
 impl MapToSet {
-    #[on_node(kind = "send", methods = ["to_set"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) == Some("to_set") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -127,6 +143,17 @@ fn match_map_to_set(to_set_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
 }
 
 fn check(to_set_node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ :to_set ...)` head: filters to `to_set` calls on
+    // either send or csend (safe-navigation), with any receiver
+    // (absent or present). Without this, an unrelated call on a map
+    // receiver (e.g. `something.map(&:foo).to_s`) would run check
+    // on every call node instead of being rejected by the method set
+    // up front.
+    if !map_to_set_call(to_set_node, cx) {
+        return;
+    }
+    // Must have a receiver. Mirrors the pre-port hand-rolled guard;
+    // `_` binds an absent receiver, so bare `to_set` is accepted here.
     // Guard: skip if to_set already has a block attached.
     // In Murphy's AST, when `to_set { }` has a block, the parent is a Block
     // node whose `call` field == to_set_node.
@@ -271,6 +298,52 @@ mod tests {
             "#},
             "something.to_set(&:method)\n",
         );
+    }
+
+    // --- Characterization (murphy-s1yc.20): pin the exact node set the
+    // dual send (methods = ["to_set"]) + manual-csend-filter dispatch matches,
+    // so the verbatim `(call _ :to_set ...)` port can be proven byte-identical.
+    // `call` covers safe-navigation (mirroring upstream `alias on_csend
+    // on_send` plus `RESTRICT_ON_SEND [to_set]`); trailing `...` absorbs any
+    // argument list, so the receiver plus inner-`map` shape guards below
+    // apply separately.
+
+    #[test]
+    fn s1yc20_flags_csend_block_pass_corrects() {
+        // Safe navigation on outer `to_set`: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        // (Pre-port the `csend` handler filters `to_set` manually because
+        // `methods = [...]` is only valid for `kind = "send"`; the verbatim
+        // head collapses the workaround.)
+        test::<MapToSet>().expect_correction(
+            indoc! {r#"
+                something.map(&:foo)&.to_set
+                          ^^^ Pass a block to `to_set` instead of calling `map.to_set`.
+            "#},
+            "something.to_set(&:foo)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc20_accepts_bare_to_set() {
+        // Bare receiver: `_` binds an absent receiver per murphy-if9y, so
+        // the head matches and the complementary receiver guard accepts.
+        test::<MapToSet>().expect_no_offenses("to_set\n");
+    }
+
+    #[test]
+    fn s1yc20_accepts_no_arg_inner_map() {
+        // Inner `map` without arguments: trailing `...` absorbs the outer
+        // argument list so the head matches, and the complementary
+        // one-`block_pass`-arg guard accepts (upstream inner requires
+        // exactly `(block_pass sym)`).
+        test::<MapToSet>().expect_no_offenses("something.map.to_set\n");
+    }
+
+    #[test]
+    fn s1yc20_accepts_unrelated_method() {
+        // `to_s` is outside the verbatim method set, so the head rejects.
+        test::<MapToSet>().expect_no_offenses("something.map(&:foo).to_s\n");
     }
 }
 murphy_plugin_api::submit_cop!(MapToSet);
