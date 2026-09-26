@@ -51,61 +51,11 @@ mod option_key_guard {
     }
 }
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActionControllerFlashBeforeRender
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActionControllerFlashBeforeRender;
+// `ActionControllerFlashBeforeRender` promoted to real cop in
+// `cops::rails::action_controller_flash_before_render`.
 
-#[cop(
-    name = "Rails/ActionControllerFlashBeforeRender",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActionControllerFlashBeforeRender {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActionControllerFlashBeforeRender);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/ActionFilter
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct ActionFilter;
-
-#[cop(
-    name = "Rails/ActionFilter",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl ActionFilter {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(ActionFilter);
+// `ActionFilter` promoted to real cop in
+// `cops::rails::action_filter`.
 
 /// ## RuboCop parity
 ///
@@ -695,86 +645,11 @@ submit_cop!(UnusedIgnoredColumns);
 // `WhereMissing` promoted to real cop in
 // `cops::rails::where_missing`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/WhereNot
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct WhereNot;
+// `WhereNot` promoted to real cop in
+// `cops::rails::where_not`.
 
-#[cop(
-    name = "Rails/WhereNot",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl WhereNot {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(WhereNot);
+// `WhereNotWithMultipleConditions` promoted to real cop in
+// `cops::rails::where_not_with_multiple_conditions`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/WhereNotWithMultipleConditions
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct WhereNotWithMultipleConditions;
-
-#[cop(
-    name = "Rails/WhereNotWithMultipleConditions",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl WhereNotWithMultipleConditions {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(WhereNotWithMultipleConditions);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/WhereRange
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct WhereRange;
-
-#[cop(
-    name = "Rails/WhereRange",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl WhereRange {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(WhereRange);
+// `WhereRange` promoted to real cop in
+// `cops::rails::where_range`.
