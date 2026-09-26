@@ -31,7 +31,7 @@
 //!
 //! Replaces `File.open(filename, 'a') {}` with `FileUtils.touch(filename)`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -39,6 +39,25 @@ pub struct FileTouch;
 
 /// Append modes that only create a file without updating timestamps.
 const APPEND_MODES: &[&str] = &["a", "a+", "ab", "a+b", "at", "a+t"];
+
+// RuboCop parity: `Style/FileTouch` `file_open?` inner is
+// `(send (const {nil? cbase} :File) :open $(...) (str %APPEND_FILE_MODES))`
+// (send-only, top-level only, exactly 2 args). In Murphy `::File` collapses
+// to Const scope None, so `nil?` covers bare + `::` (pinned by existing
+// `flags_qualified_file_open`); namespaced `Foo::File` still rejects (pinned
+// by `boundary_ignores_namespaced_file_open`); send-only dispatch keeps `&.` inners silent (pinned by `boundary_ignores_csend_file_open`).
+// Since murphy-m4dc, `$_` captures any single filename node and `$str` is a
+// typed capture (captures the mode node AND requires Str kind), so
+// `(send (const nil? :File) :open $_ $str)` captures filename + mode Str
+// with exactly-2-args (no `...`, pinned by `boundary_ignores_single_arg` /
+// `boundary_ignores_three_args` + `boundary_ignores_sym_mode`); the
+// `%APPEND_FILE_MODES` const-set membership stays hand-rolled below (tPARAM_CONST
+// is a const pattern in Murphy, not a param lookup).
+// Capture-bearing, byte-identical offense emission.
+def_node_matcher!(
+    file_open_candidate,
+    "(send (const nil? :File) :open $_ $str)"
+);
 
 #[cop(
     name = "Style/FileTouch",
@@ -65,34 +84,14 @@ fn check(block_node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // Call must be `File.open`.
-    let NodeKind::Send { receiver, method, args } = *cx.kind(call) else {
+    // `(send (const nil? :File) :open $_ $str)` — captures filename + mode
+    // Str with exactly 2 args, send-only (csend silent), top-level File only.
+    let Some((filename_node, mode_node)) = file_open_candidate(call, cx) else {
         return;
     };
 
-    if cx.symbol_str(method) != "open" {
-        return;
-    }
-
-    // Receiver must be `File` or `::File`.
-    let recv = match receiver.get() {
-        Some(r) => r,
-        None => return,
-    };
-    if !cx.is_global_const(recv, "File") {
-        return;
-    }
-
-    // Must have exactly 2 args: (filename, mode_string).
-    let arg_list = cx.list(args);
-    if arg_list.len() != 2 {
-        return;
-    }
-
-    let filename_node = arg_list[0];
-    let mode_node = arg_list[1];
-
-    // Mode must be a string literal in the append set.
+    // Mode string must be in the append set (`%APPEND_FILE_MODES` stays
+    // hand-rolled; `$str` already ensures Str kind).
     let NodeKind::Str(mode_sid) = *cx.kind(mode_node) else {
         return;
     };
@@ -170,6 +169,50 @@ mod tests {
         test::<FileTouch>().expect_offense(indoc! {r#"
             ::File.open(filename, 'a') {}
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `FileUtils.touch(filename)` instead of `File.open` in append mode with empty block.
+        "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.22): pin the exact node set
+    // the hand-rolled `is_global_const(File)` + arity-2 + Str-mode + set
+    // check matches, so the verbatim
+    // `(send (const nil? :File) :open $_ $str)` refactor can be proven
+    // equivalent. `::File` collapses to Const scope None, so `nil?` covers
+    // bare + `::` (pinned by `flags_qualified_file_open` + new
+    // bare + `::` (pinned by `flags_qualified_file_open`); namespaced `Foo::File` still rejects;
+    // inner `&.` is csend and the cop only handles `send`, so it stays
+    // silent; exactly 2 args (no `...`) so 1-arg/3-arg stay silent; mode
+    // must be Str (sym stays silent) + APPEND_MODES set stays hand-rolled.
+
+    #[test]
+    fn boundary_ignores_namespaced_file_open() {
+        test::<FileTouch>().expect_no_offenses("Foo::File.open(filename, 'a') {}\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_file_open() {
+        test::<FileTouch>().expect_no_offenses("File&.open(filename, 'a') {}\n");
+    }
+
+    #[test]
+    fn boundary_ignores_single_arg() {
+        test::<FileTouch>().expect_no_offenses("File.open(filename) {}\n");
+    }
+
+    #[test]
+    fn boundary_ignores_three_args() {
+        test::<FileTouch>().expect_no_offenses("File.open('f', 'a', 'extra') {}\n");
+    }
+
+    #[test]
+    fn boundary_ignores_sym_mode() {
+        test::<FileTouch>().expect_no_offenses("File.open(filename, :a) {}\n");
+    }
+
+    #[test]
+    fn boundary_flags_splat_filename() {
+        test::<FileTouch>().expect_offense(indoc! {r#"
+            File.open(*args, 'a') {}
+            ^^^^^^^^^^^^^^^^^^^^^^^^ Use `FileUtils.touch(*args)` instead of `File.open` in append mode with empty block.
         "#});
     }
 
