@@ -33,7 +33,18 @@
 //! There is no safe mechanical rewrite: the fix depends on understanding
 //! how the accumulator should be modified.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.41):
+// `(call _ {:reduce :inject} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`ary&.reduce(0) { |acc, el| el }`), mirroring the
+// upstream inner `(call _ {:reduce :inject} ...)` which also matches csend.
+// The `_` receiver binds an absent or present receiver per murphy-if9y;
+// trailing `...` absorbs any call argument list.
+def_node_matcher!(
+    unmodified_reduce_accumulator_call,
+    "(call _ {:reduce :inject} ...)"
+);
 
 #[derive(Default)]
 pub struct UnmodifiedReduceAccumulator;
@@ -48,9 +59,18 @@ pub struct UnmodifiedReduceAccumulator;
 impl UnmodifiedReduceAccumulator {
     #[on_node(kind = "block")]
     fn check_block(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Block { call: _, args, body, .. } = *cx.kind(node) else { return; };
+        let NodeKind::Block { call, args, body, .. } = *cx.kind(node) else { return; };
 
-        let method = cx.method_name(node);
+        // Verbatim `(call _ {:reduce :inject} ...)` head: filters to the
+        // reduce/inject methods on either send or csend (safe-navigation),
+        // with any receiver (absent or present) and any call arguments.
+        // Without this, an unrelated call with any receiver (e.g. `ary.map`)
+        // would run the block-arg checks instead of being rejected by the
+        // method set up front.
+        if !unmodified_reduce_accumulator_call(call, cx) {
+            return;
+        }
+        let method = cx.method_name(call);
         if method != Some("reduce") && method != Some("inject") {
             return;
         }
@@ -610,6 +630,68 @@ mod tests {
               acc << el
             end
         "});
+    }
+
+    // --- Characterization (murphy-s1yc.41): pin the exact node set the
+    // block dispatch with hand-rolled method_name reduce/inject matches, so
+    // the verbatim `(call _ {:reduce :inject} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation; the `_` receiver binds
+    // an absent or present receiver per murphy-if9y; trailing `...` absorbs
+    // any call argument list.
+
+    #[test]
+    fn s1yc41_flags_csend() {
+        // Safe-navigation: `call` covers `csend`, mirroring upstream inner
+        // `(call _ {:reduce :inject} ...)` which also matches csend.
+        // Pre-port block dispatch already flags via method_name; the verbatim
+        // head collapses the workaround and keeps it byte-identical.
+        // Verified vs standalone NodePattern: `(call _ {:reduce :inject} ...)`
+        // matches csend.
+        test::<UnmodifiedReduceAccumulator>().expect_offense(indoc! {r#"
+            ary&.reduce(0) do |acc, el|
+              el
+              ^^ Ensure the accumulator `acc` will be modified by `reduce`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn s1yc41_flags_bare() {
+        // Bare `reduce(0) do |acc, el| el end` has no receiver; the `_`
+        // wildcard binds the absent receiver per murphy-if9y, so the verbatim
+        // head matches and the block-arg/body checks below flag -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:reduce :inject} ...)`
+        // matches bare send.
+        test::<UnmodifiedReduceAccumulator>().expect_offense(indoc! {r#"
+            reduce(0) do |acc, el|
+              el
+              ^^ Ensure the accumulator `acc` will be modified by `reduce`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn s1yc41_flags_with_extra_call_arg() {
+        // Extra call args: trailing `...` absorbs any argument list, so the
+        // head matches `ary.reduce(0, 1)` up front -- pinned here (pre-port
+        // ignores call args and flags; verbatim keeps it).
+        // Verified vs standalone NodePattern: `(call _ {:reduce :inject} ...)`
+        // matches multi-arg call.
+        test::<UnmodifiedReduceAccumulator>().expect_offense(indoc! {r#"
+            ary.reduce(0, 1) do |acc, el|
+              el
+              ^^ Ensure the accumulator `acc` will be modified by `reduce`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn s1yc41_accepts_unrelated() {
+        // Unrelated `map` is not in the head method set, so the verbatim head
+        // rejects it up front -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:reduce :inject} ...)`
+        // does not match `ary.map`.
+        test::<UnmodifiedReduceAccumulator>().expect_no_offenses("ary.map { |x| x }\n");
     }
 }
 
