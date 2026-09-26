@@ -57,7 +57,20 @@
 //! check (`FileTest.exist?`, `File.exist?`, `Dir.exist?`, `Shell.exist?`,
 //! or `exists?` alias), and that both operate on the same path argument.
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, def_node_matcher};
+
+// RuboCop parity: `Lint/NonAtomicFileOperation` `send_exist_node` is
+// `(send (const {nil? cbase} {:FileTest :File :Dir :Shell}) {:exist? :exists?} ...)`
+// (top-level only). In Murphy `::FileTest` collapses to `Const{scope:None}`:
+// `nil?` covers bare + `::` (both flag, pinned by `flags_cbase_exist_check`).
+// Namespaced `Foo::FileTest` still accepts (pinned by
+// `boundary_ignores_namespaced_exist_check`). The `{:exist? :exists?}` method
+// guards stay hand-rolled below.
+// Predicate-only, no captures, byte-identical offense emission.
+def_node_matcher!(
+    is_exist_receiver_const,
+    "(const nil? {:FileTest :File :Dir :Shell})"
+);
 
 // ── method sets ───────────────────────────────────────────────────────────────
 
@@ -477,19 +490,17 @@ fn as_existence_check<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(NodeId, &'a s
         }
     }
 
-    let NodeKind::Const { name, scope } = *cx.kind(id) else {
-        return None;
-    };
-
-    let receiver_name = cx.symbol_str(name);
-    if !EXIST_RECEIVERS.contains(&receiver_name) {
+    // `(const nil? {:FileTest :File :Dir :Shell})` — top-level only
+    // (`::` collapses to `Const{scope:None}`). Namespaced still accepts.
+    // Method `{:exist? :exists?}` guards stay hand-rolled above.
+    if !is_exist_receiver_const(id, cx) {
         return None;
     }
-
-    // Scope must be nil (bare `FileTest`) or cbase (`::FileTest`)
-    if let Some(s) = scope.get()
-        && !matches!(*cx.kind(s), NodeKind::Cbase)
-    {
+    let NodeKind::Const { name, .. } = *cx.kind(id) else {
+        return None;
+    };
+    let receiver_name = cx.symbol_str(name);
+    if !EXIST_RECEIVERS.contains(&receiver_name) {
         return None;
     }
 
@@ -1121,6 +1132,29 @@ mod tests {
     fn accepts_nested_constant_receiver() {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             MyApp::FileUtils.remove(path) if File.exist?(path)
+        "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.25): pin the exact node set
+    // the hand-rolled exist-receiver guard (nil/cbase scope, reject
+    // namespaced) matches, so the verbatim
+    // `(const nil? {:FileTest :File :Dir :Shell})` refactor can be proven
+    // equivalent. `::FileTest` collapses to `Const{scope:None}`: `nil?` covers
+    // bare + `::` (both flag, pinned by `flags_cbase_exist_check`).
+    // Namespaced `Foo::FileTest` still accepts (no offense). The operation
+    // stays `Send`-only, so `&.` operation is silent.
+
+    #[test]
+    fn boundary_ignores_namespaced_exist_check() {
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.remove(path) if Foo::FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_operation() {
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils&.remove(path) if FileTest.exist?(path)
         "#});
     }
 
