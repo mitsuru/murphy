@@ -18,6 +18,14 @@
 //!     - Interpolated regexps (non-Str parts) → skipped conservatively
 //!     - Autocorrect: replace the whole regexp argument with a quoted string
 //!     - both send and csend are handled (mirrors RuboCop's alias on_csend)
+//!
+//!   Verbatim port of the call head `(call _ {:byteindex :byterindex :gsub :gsub! :partition :rpartition :scan :split :start_with? :sub :sub!} ...)`
+//!   (murphy-s1yc.25): `call` = `{send csend}` covers safe-navigation
+//!   (`str&.gsub(/f/, 'x')`), mirroring RuboCop `alias on_csend on_send`
+//!   plus `RESTRICT_ON_SEND`; the wildcard receiver binds an absent or
+//!   present receiver per murphy-if9y; trailing `...` absorbs any argument
+//!   list. The first-arg-regexp plus determinism guards below apply separately
+//!   (upstream dispatches on the same 11 methods and matches `node.first_argument`).
 //!   Gaps:
 //!     - EnforcedStyle (single vs double quotes) from Style/StringLiterals
 //!       is not consulted; Murphy always prefers single quotes unless the
@@ -37,7 +45,7 @@
 //! 2. Stripping `\` from escapes that are not in `STR_SPECIAL_CHARS`.
 //! 3. Choosing appropriate quotes (single vs double) based on content.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -45,20 +53,17 @@ pub struct RedundantRegexpArgument;
 
 const MSG: &str = "Use string `%<prefer>s` as argument instead of regexp `%<current>s`.";
 
-/// Method names that trigger this cop.
-const FLAGGED_METHODS: &[&str] = &[
-    "byteindex",
-    "byterindex",
-    "gsub",
-    "gsub!",
-    "partition",
-    "rpartition",
-    "scan",
-    "split",
-    "start_with?",
-    "sub",
-    "sub!",
-];
+// Verbatim port of the call head (murphy-s1yc.25):
+// `(call _ {:byteindex :byterindex :gsub :gsub! :partition :rpartition :scan :split :start_with? :sub :sub!} ...)`
+// — `call` = `{send csend}` covers safe-navigation (`str&.gsub(/f/, 'x')`),
+// mirroring RuboCop `alias on_csend on_send` plus `RESTRICT_ON_SEND`. The `_`
+// receiver binds an absent or present receiver per murphy-if9y; trailing
+// `...` absorbs any argument list, so the first-arg-regexp plus determinism
+// guards below apply separately.
+def_node_matcher!(
+    redundant_regexp_argument_call,
+    "(call _ {:byteindex :byterindex :gsub :gsub! :partition :rpartition :scan :split :start_with? :sub :sub!} ...)"
+);
 
 /// Characters that have special meaning in strings when preceded by `\`.
 /// From RuboCop's `STR_SPECIAL_CHARS`.
@@ -82,11 +87,14 @@ const REGEXP_METACLASS_CHARS: &[u8] =
     options = NoOptions,
 )]
 impl RedundantRegexpArgument {
+    /// Triggered on regexp-argument sends; the verbatim
+    /// `(call _ {:byteindex ...} ...)` head filters to the 11 RESTRICT_ON_SEND methods.
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
+    /// Also handle csend (safe-navigation) versions: `str&.gsub(/f/, 'x')`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
@@ -94,14 +102,19 @@ impl RedundantRegexpArgument {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:byteindex :byterindex :gsub :gsub! :partition :rpartition :scan :split :start_with? :sub :sub!} ...)`
+    // head: filters to the 11 RESTRICT_ON_SEND methods on either send or csend
+    // (safe-navigation), with any receiver (absent or present). Without this,
+    // an unrelated call with a regexp argument (e.g. `'foo'.match(/f/)`) would
+    // run check on every call node instead of being rejected by the method set
+    // up front.
+    if !redundant_regexp_argument_call(node, cx) {
+        return;
+    }
     let method = match cx.method_name(node) {
         Some(m) => m,
         None => return,
     };
-
-    if !FLAGGED_METHODS.contains(&method) {
-        return;
-    }
 
     let args = cx.call_arguments(node);
     if args.is_empty() {
@@ -615,6 +628,60 @@ mod tests {
     #[test]
     fn no_offense_string_argument_already() {
         test::<RedundantRegexpArgument>().expect_no_offenses("'foo'.gsub('f', 'x')\n");
+    }
+
+    // --- Characterization (murphy-s1yc.25): pin the exact node set the
+    // unfiltered send + csend dispatch with manual FLAGGED_METHODS check
+    // matches, so the verbatim `(call _ {:byteindex ...} ...)` port can be
+    // proven byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send` plus `RESTRICT_ON_SEND`); trailing `...`
+    // absorbs any argument list, so the first-arg-regexp plus determinism
+    // guards below apply separately.
+
+    #[test]
+    fn s1yc25_flags_csend_split_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port both handlers are
+        // unfiltered `kind = "send"` / `kind = "csend"` with a manual
+        // FLAGGED_METHODS check; the verbatim head collapses the workaround.
+        test::<RedundantRegexpArgument>().expect_correction(
+            indoc! {r#"
+                str&.split(/f/)
+                           ^^^ Use string `'f'` as argument instead of regexp `/f/`.
+            "#},
+            "str&.split('f')\n",
+        );
+    }
+
+    #[test]
+    fn s1yc25_flags_bare_split_corrects() {
+        // Bare receiver: `_` in `(call _ {:byteindex ...} ...)` binds an absent
+        // receiver per murphy-if9y, so a receiverless `split(/f/)` (implicit
+        // self) flags. Upstream RESTRICT_ON_SEND triggers on the method name
+        // regardless of receiver, and the current check has no receiver guard.
+        test::<RedundantRegexpArgument>().expect_correction(
+            indoc! {r#"
+                split(/f/)
+                      ^^^ Use string `'f'` as argument instead of regexp `/f/`.
+            "#},
+            "split('f')\n",
+        );
+    }
+
+    #[test]
+    fn s1yc25_accepts_no_args() {
+        // No arguments: trailing `...` absorbs the (empty) argument list so
+        // the head matches, and the complementary first-arg guard accepts
+        // (upstream `node.first_argument` is nil).
+        test::<RedundantRegexpArgument>()
+            .expect_no_offenses("'foo'.split\n");
+    }
+
+    #[test]
+    fn s1yc25_accepts_unrelated_method() {
+        // `match` is outside the verbatim method set, so the head rejects.
+        test::<RedundantRegexpArgument>()
+            .expect_no_offenses("'foo'.match(/f/)\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantRegexpArgument);
