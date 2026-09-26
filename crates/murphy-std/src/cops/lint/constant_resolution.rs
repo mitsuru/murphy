@@ -35,7 +35,24 @@
 //! definition. The offense range is the constant node's own range — for
 //! `Foo::Bar`, only the inner unqualified `Foo` fires.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/ConstantResolution` `defined_module0` only treats
+// `Class.new` / `Module.new` (with optional block) as module definitions
+// (`(send (const {nil? cbase} {:Class :Module}) :new)`, send-only).
+// Verbatim as `(send (const nil? {:Class :Module}) :new ...)`.
+// In Murphy `::Class` / `::Module` collapse to `Const{scope:None}`: `nil?`
+// covers bare + `::` (both skip the definition const, pinned by
+// `boundary_skips_cbase_class_new_definition`). Namespaced `Foo::Class` still
+// flags (pinned by `boundary_flags_namespaced_class_new_definition`).
+// `send` covers `Send` only, matching `is_class_constructor` Send-only
+// (csend still flags, pinned by `boundary_flags_csend_class_new_definition`).
+// Block extraction (`Block`/`Numblock`/`Itblock`) + `parent_defines_module`
+// walk + `Only`/`Ignore` filter stay hand-rolled below.
+def_node_matcher!(
+    is_class_or_module_new_call,
+    "(send (const nil? {:Class :Module}) :new ...)"
+);
 
 #[derive(Default)]
 pub struct ConstantResolution;
@@ -137,13 +154,9 @@ fn is_class_or_module_new(node: NodeId, cx: &Cx<'_>) -> bool {
         NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
         _ => node,
     };
-    if cx.method_name(call) != Some("new") {
-        return false;
-    }
-    let Some(receiver) = cx.call_receiver(call).get() else {
-        return false;
-    };
-    cx.is_global_const(receiver, "Class") || cx.is_global_const(receiver, "Module")
+    // `(send (const nil? {:Class :Module}) :new ...)` (`Class`/`Module` /
+    // `::Class`/`::Module`, top-level only). `send` covers `Send` only.
+    is_class_or_module_new_call(call, cx)
 }
 
 #[cfg(test)]
@@ -267,6 +280,50 @@ mod tests {
             .with_options(&opts)
             .expect_no_offenses(indoc! {r#"
                 MY_CONST
+            "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.11): pin the exact node set
+    // the hand-rolled `is_global_const(Class/Module)` guard matches, so the
+    // verbatim `(send (const nil? {:Class :Module}) :new ...)` refactor can be
+    // proven equivalent. `::Class` collapses to `Const{scope:None}`: `nil?`
+    // covers bare + `::` (both skip the definition const). Namespaced
+    // `Foo::Class` is not top-level, so the definition const still flags.
+    // `send` covers `Send` only, matching `is_class_constructor` Send-only
+    // (csend still flags). `Only=[A]` isolates the definition const `A`
+    // from the constructor receiver consts.
+
+    fn only_a() -> Options {
+        Options {
+            only: vec!["A".to_string()],
+            ignore: vec![],
+        }
+    }
+
+    #[test]
+    fn boundary_skips_cbase_class_new_definition() {
+        test::<ConstantResolution>()
+            .with_options(&only_a())
+            .expect_no_offenses("A::B = ::Class.new\n");
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_class_new_definition() {
+        test::<ConstantResolution>()
+            .with_options(&only_a())
+            .expect_offense(indoc! {r#"
+                A::B = Foo::Class.new
+                ^ Fully qualify this constant to avoid possibly ambiguous resolution.
+            "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_class_new_definition() {
+        test::<ConstantResolution>()
+            .with_options(&only_a())
+            .expect_offense(indoc! {r#"
+                A::B = Class&.new
+                ^ Fully qualify this constant to avoid possibly ambiguous resolution.
             "#});
     }
 }
