@@ -50,7 +50,24 @@
 //! Hash[*ary]
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, SourceTokenKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/HashConversion` `hash_from_array?` is
+// `'{(send (const {nil? cbase} :Hash) :[] ...)}'` (single-alternative send).
+// Murphy splits the const-receiver check (`Hash[]` top-level) from the
+// single/multi-arg handling, so the verbatim port covers the const part only:
+// `(send (const nil? :Hash) :[] ...)` (send-only, matching the `Send`-only
+// dispatch via `#[on_node(kind = "send")]`; no `csend` handler).
+// In Murphy `::Hash` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (both flag, pinned by `flags_cbase_hash`). Namespaced `Foo::Hash`
+// is not top-level, so silent (pinned by `accepts_namespaced_hash`).
+// `send` covers `Send` only, matching the `Send`-only dispatch (csend silent,
+// pinned by `boundary_ignores_csend_hash_bracket`). The single/multi-arg +
+// splat/zip/literal handling stays hand-rolled below.
+def_node_matcher!(
+    hash_bracket,
+    "(send (const nil? :Hash) :[] ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -86,11 +103,8 @@ impl HashConversion {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // Receiver must be `Hash` constant with nil or cbase scope.
-    let Some(recv_id) = cx.call_receiver(node).get() else {
-        return;
-    };
-    if !is_hash_const(recv_id, cx) {
+    // `(send (const nil? :Hash) :[] ...)` (top-level only, send-only).
+    if !hash_bracket(node, cx) {
         return;
     }
 
@@ -206,20 +220,7 @@ fn multi_argument(node: NodeId, arg_list: &[NodeId], cx: &Cx<'_>) {
     }
 }
 
-/// Returns true if `node` is a `Const` with name `Hash` and nil or cbase scope.
-fn is_hash_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const { scope, name } = *cx.kind(node) else {
-        return false;
-    };
-    if cx.symbol_str(name) != "Hash" {
-        return false;
-    }
-    if let Some(scope_id) = scope.get()
-        && !matches!(cx.kind(scope_id), NodeKind::Cbase) {
-            return false;
-        }
-    true
-}
+// `is_hash_const` replaced by verbatim `hash_bracket` above (predicate-only).
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -366,6 +367,21 @@ mod tests {
             "#},
             "(foo :bar).to_h\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.17): pin the exact node set
+    // the hand-rolled `is_hash_const` (nil/cbase scope, reject namespaced) +
+    // method `[]` matches, so the verbatim
+    // `(send (const nil? :Hash) :[] ...)` refactor can be proven equivalent.
+    // `::Hash` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (both flag, pre-existing `flags_cbase_hash`). Namespaced `Foo::Hash`
+    // is not top-level, so silent (pre-existing `accepts_namespaced_hash`).
+    // `send` covers `Send` only, matching the `Send`-only dispatch
+    // (no `csend` handler, so `&.` is silent).
+
+    #[test]
+    fn boundary_ignores_csend_hash_bracket() {
+        test::<HashConversion>().expect_no_offenses("Hash&.[](:foo)\n");
     }
 }
 
