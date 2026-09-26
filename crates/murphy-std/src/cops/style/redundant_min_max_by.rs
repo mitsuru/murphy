@@ -67,7 +67,19 @@
 //! Whole-range replacement is appropriate because the identity block is
 //! collapsed away entirely.
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.37):
+// `(call _ {:max_by :min_by :minmax_by} ...)` — `call` = `{send csend}`
+// covers safe-navigation (`array&.max_by { |x| x }`), mirroring the upstream
+// inner `$(call _ {:max_by :min_by :minmax_by})` which also matches csend.
+// The `_` receiver binds an absent or present receiver per murphy-if9y;
+// trailing `...` absorbs any argument list, so the zero-arg and
+// identity-block guards below apply separately.
+def_node_matcher!(
+    redundant_min_max_by_call,
+    "(call _ {:max_by :min_by :minmax_by} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -81,22 +93,32 @@ pub struct RedundantMinMaxBy;
     safe_autocorrect = true,
 )]
 impl RedundantMinMaxBy {
-    /// Triggered on max_by/min_by/minmax_by sends.
-    #[on_node(kind = "send", methods = ["max_by", "min_by", "minmax_by"])]
+    /// Send path: `array.max_by { |x| x }` etc.
+    /// Triggered on all sends; the verbatim
+    /// `(call _ {:max_by :min_by :minmax_by} ...)` head filters to the
+    /// redundant-by methods.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
-    /// Also handle csend (safe-navigation): `array&.max_by { |x| x }`.
+    /// Safe-navigation send path: `array&.max_by { |x| x }`.
+    /// The verbatim head covers `csend`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if matches!(cx.method_name(node), Some("max_by" | "min_by" | "minmax_by")) {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:max_by :min_by :minmax_by} ...)` head: filters to
+    // the redundant-by methods on either send or csend (safe-navigation),
+    // with any receiver (absent or present). Without this, an unrelated call
+    // with any receiver (e.g. `array.map`) would run check on every call node
+    // instead of being rejected by the method set up front.
+    if !redundant_min_max_by_call(node, cx) {
+        return;
+    }
     let Some(method_name) = cx.method_name(node) else {
         return;
     };
@@ -104,11 +126,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // RuboCop's `(call _ {...})` pattern has no arg matcher, so it matches only
-    // zero-argument calls. `max_by(2) { |x| x }` (return the top 2 elements) is
-    // valid and must NOT be flagged — and crucially must NOT be autocorrected,
+    // Trailing `...` absorbs any argument list, so the head matches even
+    // `max_by(2) { |x| x }` (return the top 2 elements). That shape is valid
+    // and must NOT be flagged — and crucially must NOT be autocorrected,
     // since collapsing to `max` would silently drop the `(2)` and change the
-    // semantics.
+    // semantics. The zero-arg guard below rejects it separately.
     if !cx.call_arguments(node).is_empty() {
         return;
     }
@@ -437,6 +459,62 @@ mod tests {
     #[test]
     fn accepts_max_by_with_integer_arg_numblock() {
         test::<RedundantMinMaxBy>().expect_no_offenses("array.max_by(2) { _1 }\n");
+    }
+
+    // --- Characterization (murphy-s1yc.37): pin the exact node set the
+    // send-only methods=["max_by", "min_by", "minmax_by"] dispatch matches,
+    // so the verbatim `(call _ {:max_by :min_by :minmax_by} ...)` port can be
+    // proven byte-identical (plus csend coverage). `call` covers
+    // safe-navigation; the `_` receiver binds an absent or present receiver
+    // per murphy-if9y; trailing `...` absorbs any argument list, so the
+    // zero-arg and identity-block guards below apply separately.
+
+    #[test]
+    fn s1yc37_flags_csend_corrects() {
+        // Safe-navigation: `call` covers `csend`,
+        // mirroring upstream inner `$(call _ {...})` which also matches csend.
+        // Pre-port has a csend handler so this already flags; the verbatim
+        // head collapses the workaround and keeps it byte-identical.
+        // Verified vs standalone NodePattern: `(call _ {:max_by ...} ...)`
+        // matches csend.
+        test::<RedundantMinMaxBy>().expect_correction(
+            indoc! {r#"
+                array&.max_by { |x| x }
+                       ^^^^^^^^^^^^^^^^ Use `max` instead of `max_by { |x| x }`.
+            "#},
+            "array&.max\n",
+        );
+    }
+
+    #[test]
+    fn s1yc37_flags_bare() {
+        // Bare `max_by { |x| x }` has no receiver; the `_` wildcard binds the
+        // absent receiver per murphy-if9y, so the verbatim head matches and the
+        // identity-block guard below flags -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:max_by ...} ...)`
+        // matches bare send.
+        test::<RedundantMinMaxBy>().expect_offense(indoc! {r#"
+            max_by { |x| x }
+            ^^^^^^^^^^^^^^^^ Use `max` instead of `max_by { |x| x }`.
+        "#});
+    }
+
+    #[test]
+    fn s1yc37_accepts_with_args() {
+        // Extra args: trailing `...` absorbs any argument list, so the head
+        // matches and the zero-arg guard below rejects -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:max_by ...} ...)`
+        // matches `array.max_by(2)`.
+        test::<RedundantMinMaxBy>().expect_no_offenses("array.max_by(2) { |x| x }\n");
+    }
+
+    #[test]
+    fn s1yc37_accepts_unrelated() {
+        // Unrelated `map` is not in the head method set, so the verbatim head
+        // rejects it up front -- pinned here.
+        // Verified vs standalone NodePattern: `(call _ {:max_by ...} ...)`
+        // does not match `array.map`.
+        test::<RedundantMinMaxBy>().expect_no_offenses("array.map { |x| x }\n");
     }
 }
 
