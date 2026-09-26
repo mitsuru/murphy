@@ -52,10 +52,26 @@
 //! Simple form: replaces the subtraction expression (`arr.size - n`) with
 //! `-n`. Range form: replaces the whole index argument (`0..(arr.length - n)`)
 //! with `0..-n` (or `0...-n`), preserving any wrapping parentheses.
+//!
+//! Verbatim port of the call head `(call _ :[] ...)`
+//! (murphy-s1yc.28): `call` = `{send csend}` covers safe-navigation
+//! (`arr&.[](arr.size - 1)`), mirroring RuboCop `alias on_csend on_send`
+//! plus `RESTRICT_ON_SEND [[]]`; the wildcard receiver binds an absent or
+//! present receiver per murphy-if9y; trailing `...` absorbs any argument list.
+//! The single-index-arg and length-subtraction guards below apply separately
+//! (upstream `on_send` returns early on empty arguments).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
 
 const PRESERVING_METHODS: [&str; 4] = ["sort", "reverse", "shuffle", "rotate"];
+
+// Verbatim port of the call head (murphy-s1yc.28):
+// `(call _ :[] ...)` — `call` = `{send csend}` covers safe-navigation
+// (`arr&.[](arr.size - 1)`), mirroring RuboCop `alias on_csend on_send`
+// plus `RESTRICT_ON_SEND [[]]`. The `_` receiver binds an absent or present
+// receiver per murphy-if9y; trailing `...` absorbs any argument list, so the
+// single-index-arg and length-subtraction guards below apply separately.
+def_node_matcher!(negative_array_index_call, "(call _ :[] ...)");
 
 #[derive(Default)]
 pub struct NegativeArrayIndex;
@@ -68,22 +84,32 @@ pub struct NegativeArrayIndex;
     options = NoOptions,
 )]
 impl NegativeArrayIndex {
-    #[on_node(kind = "send", methods = ["[]"])]
+    /// Send path: `arr[arr.size - n]` — exactly one index argument.
+    /// Triggered on all sends; the verbatim `(call _ :[] ...)` head filters
+    /// to the `RESTRICT_ON_SEND` method.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
+    /// Safe-navigation send path: `arr&.[](arr.size - 1)`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.method_name(node) == Some("[]") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 murphy_plugin_api::submit_cop!(NegativeArrayIndex);
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ :[] ...)` head: filters to the `RESTRICT_ON_SEND`
+    // method on either send or csend (safe-navigation), with any receiver
+    // (absent or present). Without this, an unrelated call with a single
+    // index-like arg (e.g. `arr.fetch(0)`) would run check on every call node
+    // instead of being rejected by the method set up front.
+    if !negative_array_index_call(node, cx) {
+        return;
+    }
     let Some(array_receiver) = cx.call_receiver(node).get() else {
         return;
     };
@@ -561,5 +587,51 @@ mod tests {
     #[test]
     fn no_offense_range_zero_index() {
         test::<NegativeArrayIndex>().expect_no_offenses("arr[0..(arr.length - 0)]\n");
+    }
+
+    // --- Characterization (murphy-s1yc.28): pin the exact node set the
+    // dual send(methods=[[]]) + manual-csend-filter dispatch matches, so the
+    // verbatim `(call _ :[] ...)` port can be proven byte-identical. `call`
+    // covers safe-navigation (mirroring upstream `alias on_csend on_send`
+    // plus `RESTRICT_ON_SEND [[]]`); trailing `...` absorbs any argument
+    // list, so the single-index-arg and length-subtraction guards below apply
+    // separately.
+
+    #[test]
+    fn s1yc28_flags_csend_corrects() {
+        // Safe navigation: `call` covers `csend` per murphy-if9y, mirroring
+        // upstream `alias on_csend on_send`. Pre-port the `csend` handler
+        // filters `[]` manually because `methods = [...]` is only valid for
+        // `kind = "send"`; the verbatim head collapses the workaround.
+        test::<NegativeArrayIndex>().expect_correction(
+            indoc! {r#"
+                arr&.[](arr.size - 1)
+                        ^^^^^^^^^^^^ Use `arr[-1]` instead of `arr[arr.size - 1]`.
+            "#},
+            "arr&.[](-1)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc28_accepts_no_arg() {
+        // No arguments: trailing `...` absorbs the (empty) argument list so
+        // the head matches, and the complementary single-index-arg guard
+        // accepts (upstream `on_send` returns early on empty arguments).
+        test::<NegativeArrayIndex>().expect_no_offenses("arr[]\n");
+    }
+
+    #[test]
+    fn s1yc28_accepts_multi_arg() {
+        // Multiple arguments: trailing `...` absorbs the argument list so the
+        // head matches, and the complementary single-index-arg guard accepts
+        // (`let [index_arg] = args` fails on 2 args).
+        test::<NegativeArrayIndex>().expect_no_offenses("arr[0, 1]\n");
+    }
+
+    #[test]
+    fn s1yc28_accepts_unrelated_method() {
+        // `fetch` is outside the verbatim method set, so the head rejects
+        // (even though the single-arg shape matches).
+        test::<NegativeArrayIndex>().expect_no_offenses("arr.fetch(0)\n");
     }
 }
