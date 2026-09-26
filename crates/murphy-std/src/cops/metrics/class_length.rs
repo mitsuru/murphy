@@ -97,7 +97,26 @@
 use crate::cops::util::{
     FoldableType, body_code_length, classlike_code_length, parse_foldable_types,
 };
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Metrics/ClassLength` `class_definition?` block arm is
+// `(any_block (send #global_const?({:Struct :Class}) :new ...) _ $_)`
+// (send-only upstream). Murphy's `class_definition_block` uses generic
+// `method_name` + `call_receiver` dispatch (both `Send` + `Csend`), so the
+// verbatim port uses `call` to preserve the current node set (per
+// DuplicateRequire / TallyMethod precedent: equivalence-preserving vs
+// hand-rolled, not a RuboCop parity fix).
+// In Murphy `::Class` / `::Struct` collapse to `Const{scope:None}`: `nil?`
+// covers bare + `::` (Class cbase pinned by pre-existing
+// `cbase_class_new_matched` + `boundary_flags_csend_class_new` /
+// `boundary_flags_csend_struct_new`). Namespaced `Foo::Class` still accepts
+// (pinned by `boundary_accepts_namespaced_class_new`). The assignment-parent
+// walk (`node.expression` / `find_expression_within_parent`) stays hand-rolled
+// below.
+def_node_matcher!(
+    is_class_new_call,
+    "(call (const nil? {:Class :Struct}) :new ...)"
+);
 
 /// Stateless unit struct (ADR 0035).
 #[derive(Default)]
@@ -241,12 +260,9 @@ fn class_definition_block(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     })?;
     // `any_block` — Block/Numblock/Itblock; `cx.block_call` delegates each form.
     let call = cx.block_call(block).get()?;
-    // `(send #global_const?({:Struct :Class}) :new ...)`.
-    if cx.method_name(call) != Some("new") {
-        return None;
-    }
-    let recv = cx.call_receiver(call).get()?;
-    if !cx.is_global_const(recv, "Class") && !cx.is_global_const(recv, "Struct") {
+    // `(call (const nil? {:Class :Struct}) :new ...)` (`Class`/`Struct` /
+    // `::Class`/`::Struct`, top-level only). `call` covers `Send` + `Csend`.
+    if !is_class_new_call(call, cx) {
         return None;
     }
     Some(block)
@@ -787,5 +803,53 @@ mod tests {
               a = 1
             end
         "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.11): pin the exact node set
+    // the hand-rolled `is_global_const(Class/Struct)` guards match, so the
+    // verbatim `(call (const nil? {:Class :Struct}) :new ...)` refactor can be
+    // proven equivalent. `::Class` / `::Struct` collapse to
+    // `Const{scope:None}`: `nil?` covers bare + `::` (Class cbase pinned by
+    // pre-existing `cbase_class_new_matched`). Namespaced `Foo::Class` still
+    // accepts. `call` covers `Send` + `Csend`, matching the generic
+    // `method_name`+`call_receiver` dispatch (per DuplicateRequire /
+    // TallyMethod precedent).
+
+    #[test]
+    fn boundary_accepts_namespaced_class_new() {
+        test::<ClassLength>().with_options(&opts(0)).expect_no_offenses(indoc! {"
+            Foo = Foo::Class.new do
+              a = 1
+              b = 2
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_csend_class_new() {
+        let src = indoc! {"
+            Foo = Class&.new do
+              a = 1
+              b = 2
+            end
+        "};
+        assert_eq!(
+            messages(&opts(0), src),
+            vec!["Class has too many lines. [2/0]".to_string()]
+        );
+    }
+
+    #[test]
+    fn boundary_flags_csend_struct_new() {
+        let src = indoc! {"
+            Foo = Struct&.new do
+              a = 1
+              b = 2
+            end
+        "};
+        assert_eq!(
+            messages(&opts(0), src),
+            vec!["Class has too many lines. [2/0]".to_string()]
+        );
     }
 }

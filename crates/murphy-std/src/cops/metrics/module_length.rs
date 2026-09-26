@@ -74,7 +74,20 @@
 use crate::cops::util::{
     FoldableType, body_code_length, classlike_code_length, parse_foldable_types,
 };
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Metrics/ModuleLength` `module_definition?` inner is
+// `(send (const {nil? cbase} :Module) :new)` (send-only upstream).
+// Murphy's `module_new_block` uses generic `method_name` + `call_receiver`
+// dispatch (both `Send` + `Csend`), so the verbatim port uses `call` to
+// preserve the current node set (per DuplicateRequire / TallyMethod precedent:
+// equivalence-preserving vs hand-rolled, not a RuboCop parity fix).
+// In Murphy `::Module` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` (pinned by pre-existing `cbase_module_new_matched` +
+// `boundary_flags_csend_module_new`). Namespaced `Foo::Module` still accepts
+// (pinned by `boundary_accepts_namespaced_module_new`). The `casgn nil?`
+// scope + `any_block` extraction stay hand-rolled below.
+def_node_matcher!(is_module_new_call, "(call (const nil? :Module) :new ...)");
 
 /// Stateless unit struct (ADR 0035).
 #[derive(Default)]
@@ -163,12 +176,9 @@ fn module_new_block(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let block = value.get()?;
     // `any_block` — Block/Numblock/Itblock; `cx.block_call` delegates each form.
     let call = cx.block_call(block).get()?;
-    // `(send (const {nil? cbase} :Module) :new)`.
-    if cx.method_name(call) != Some("new") {
-        return None;
-    }
-    let recv = cx.call_receiver(call).get()?;
-    if !cx.is_global_const(recv, "Module") {
+    // `(call (const nil? :Module) :new ...)` (`Module` / `::Module`,
+    // top-level only). `call` covers `Send` + `Csend`.
+    if !is_module_new_call(call, cx) {
         return None;
     }
     Some(block)
@@ -543,6 +553,36 @@ mod tests {
         test::<ModuleLength>().expect_no_offenses(indoc! {"
             module M
               a = 1
+            end
+        "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.11): pin the exact node set
+    // the hand-rolled `is_global_const(Module)` guard matches, so the verbatim
+    // `(call (const nil? :Module) :new ...)` refactor can be proven equivalent.
+    // `::Module` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+    // (cbase pinned by pre-existing `cbase_module_new_matched`). Namespaced
+    // `Foo::Module` still accepts. `call` covers `Send` + `Csend`, matching
+    // the generic `method_name`+`call_receiver` dispatch (per DuplicateRequire /
+    // TallyMethod precedent).
+
+    #[test]
+    fn boundary_accepts_namespaced_module_new() {
+        test::<ModuleLength>().with_options(&opts(0)).expect_no_offenses(indoc! {"
+            Foo = Foo::Module.new do
+              a = 1
+              b = 2
+            end
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_csend_module_new() {
+        test::<ModuleLength>().with_options(&opts(0)).expect_offense(indoc! {"
+            Foo = Module&.new do
+            ^^^ Module has too many lines. [2/0]
+              a = 1
+              b = 2
             end
         "});
     }
