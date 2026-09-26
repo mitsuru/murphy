@@ -346,64 +346,14 @@ submit_cop!(BulkChangeTable);
 // `UniqBeforePluck` promoted to real cop in
 // `cops::rails::uniq_before_pluck`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/UniqueValidationWithoutIndex
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct UniqueValidationWithoutIndex;
-
-#[cop(
-    name = "Rails/UniqueValidationWithoutIndex",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl UniqueValidationWithoutIndex {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(UniqueValidationWithoutIndex);
+// `UniqueValidationWithoutIndex` promoted to real cop in
+// `cops::rails::unique_validation_without_index`.
 
 // `UnknownEnv` promoted to real cop in
 // `cops::rails::unknown_env`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/UnusedIgnoredColumns
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct UnusedIgnoredColumns;
-
-#[cop(
-    name = "Rails/UnusedIgnoredColumns",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl UnusedIgnoredColumns {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(UnusedIgnoredColumns);
+// `UnusedIgnoredColumns` promoted to real cop in
+// `cops::rails::unused_ignored_columns`.
 
 // `UnusedRenderContent` promoted to real cop in
 // `cops::rails::unused_render_content`.

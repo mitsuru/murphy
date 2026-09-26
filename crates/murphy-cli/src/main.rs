@@ -730,6 +730,17 @@ fn read_batch_sources(
     Ok(source_paths)
 }
 
+/// Rails `db/schema.rb` JSON, loaded once per process (murphy-s0vb).
+///
+/// Mirrors `RuboCop::Rails::SchemaLoader` caching (`@load` memo): the host
+/// loads `db/schema.rb` once per run by walking up from the invocation
+/// directory, extracts tables, and threads the JSON into every cop's `Cx`.
+/// Empty means "no schema" — schema-dependent cops stay silent.
+fn rails_schema_json_cached() -> &'static str {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| murphy_core::rails_schema::load_schema_json(Path::new(".")))
+}
+
 /// Run every cop in `cops` over `source` (parsed for the given `file`),
 /// applying inline-directive filtering. Syntax errors degrade to a single
 /// `Murphy/Syntax` offense; cops are skipped on a parse failure.
@@ -750,12 +761,13 @@ fn lint_source(
                 .disabled_cop_names()
                 .map(RawSlice::borrowed)
                 .collect();
-            dispatch::run_cops_with_options_and_context(
+            dispatch::run_cops_with_options_and_context_and_schema(
                 &ast,
                 &scoped_cops,
                 &mut sink,
                 config.allcops_context(),
                 &disabled_names,
+                rails_schema_json_cached(),
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();
@@ -938,12 +950,13 @@ fn lint_source_timed(
                 .disabled_cop_names()
                 .map(RawSlice::borrowed)
                 .collect();
-            dispatch::run_cops_with_options_and_context(
+            dispatch::run_cops_with_options_and_context_and_schema(
                 &ast,
                 &scoped_cops,
                 &mut sink,
                 config.allcops_context(),
                 &disabled_names,
+                rails_schema_json_cached(),
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();
@@ -1442,13 +1455,14 @@ fn lint_source_profiled(
                 .disabled_cop_names()
                 .map(RawSlice::borrowed)
                 .collect();
-            let timings = dispatch::run_cops_with_options_context_and_diagnostics_timed(
+            let timings = dispatch::run_cops_with_options_context_and_diagnostics_timed_and_schema(
                 &ast,
                 &scoped_cops,
                 &mut sink,
                 config.allcops_context(),
                 &disabled_names,
                 &[],
+                rails_schema_json_cached(),
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();
@@ -1895,7 +1909,9 @@ fn load_watch_session(no_cache: bool, preset: Option<&str>) -> Result<WatchSessi
     } else {
         Cache::open(murphy_translate::LAYER_VERSION)
     };
-    let result_cache: Option<ResultCache> = if no_cache || !mruby_cops.is_empty() {
+    // murphy-s0vb: disable when schema exists (see run_lint).
+    let has_schema = murphy_core::rails_schema::find_schema_path(Path::new(".")).is_some();
+    let result_cache: Option<ResultCache> = if no_cache || !mruby_cops.is_empty() || has_schema {
         None
     } else {
         let extra = lint_fingerprint(&registry, &config);
@@ -2455,8 +2471,14 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         Cache::open(murphy_translate::LAYER_VERSION)
     };
     let cache_ref = cache.as_ref();
+    // murphy-s0vb: schema-dependent cops (UniqueValidationWithoutIndex,
+    // UnusedIgnoredColumns) read `db/schema.rb` outside the content+path+
+    // config fingerprint, so a cached result would go stale when the schema
+    // changes. Disable the result cache when a schema file exists; without
+    // schema the cops emit nothing and the cache stays safe.
+    let has_schema = murphy_core::rails_schema::find_schema_path(Path::new(".")).is_some();
     let result_cache: Option<ResultCache> =
-        if no_cache || fix_mode.is_some() || !mruby_cops.is_empty() {
+        if no_cache || fix_mode.is_some() || !mruby_cops.is_empty() || has_schema {
             None
         } else {
             let extra = lint_fingerprint(&registry, &config);

@@ -277,6 +277,7 @@ mod tests {
             max_line_length: 120,
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
+            rails_schema_json: RawSlice::EMPTY,
         }
     }
 

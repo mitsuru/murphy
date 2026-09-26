@@ -194,6 +194,7 @@ impl DispatchIndex {
 
 /// Build the `CxRaw` template used for every dispatch call in one run. Only
 /// `cop_name` is restamped per cop (and `sink` is the host's, shared).
+#[allow(clippy::too_many_arguments)]
 fn build_cx_raw(
     ast: &Ast,
     sink: &mut OffenseSink,
@@ -202,6 +203,7 @@ fn build_cx_raw(
     ctx: AllCopsContext,
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[WireParseDiagnostic],
+    rails_schema_json: &str,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -252,6 +254,14 @@ fn build_cx_raw(
             parse_diagnostics.as_ptr()
         },
         parse_diagnostics_len: parse_diagnostics.len(),
+        rails_schema_json: if rails_schema_json.is_empty() {
+            RawSlice::EMPTY
+        } else {
+            RawSlice {
+                ptr: rails_schema_json.as_ptr(),
+                len: rails_schema_json.len(),
+            }
+        },
     }
 }
 
@@ -306,13 +316,39 @@ pub fn run_cops_with_options_and_context(
     config_disabled_cops: &[RawSlice],
     options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
-    run_cops_with_options_context_and_diagnostics(
+    run_cops_with_options_and_context_and_schema(
+        ast,
+        cops,
+        sink,
+        ctx,
+        config_disabled_cops,
+        "",
+        options_for,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+/// [`run_cops_with_options_and_context`] plus a Rails `db/schema.rb` view
+/// (murphy-s0vb). `rails_schema_json` is the host-serialized
+/// [`murphy_plugin_api::RailsSchema`] (`{"tables":[...]}`), empty when no
+/// schema file was found; the caller keeps it alive for the call.
+pub fn run_cops_with_options_and_context_and_schema(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    ctx: AllCopsContext,
+    config_disabled_cops: &[RawSlice],
+    rails_schema_json: &str,
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) {
+    run_cops_with_options_context_and_diagnostics_and_schema(
         ast,
         cops,
         sink,
         ctx,
         config_disabled_cops,
         &[],
+        rails_schema_json,
         options_for,
     );
 }
@@ -352,6 +388,32 @@ pub fn run_cops_with_options_context_and_diagnostics(
     parse_diagnostics: &[OwnedParseDiagnostic],
     options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
+    run_cops_with_options_context_and_diagnostics_and_schema(
+        ast,
+        cops,
+        sink,
+        ctx,
+        config_disabled_cops,
+        parse_diagnostics,
+        "",
+        options_for,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+/// [`run_cops_with_options_context_and_diagnostics`] plus a Rails
+/// `db/schema.rb` view (murphy-s0vb). See
+/// [`run_cops_with_options_and_context_and_schema`] for the wire contract.
+pub fn run_cops_with_options_context_and_diagnostics_and_schema(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    ctx: AllCopsContext,
+    config_disabled_cops: &[RawSlice],
+    parse_diagnostics: &[OwnedParseDiagnostic],
+    rails_schema_json: &str,
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) {
     run_cops_inner(
         ast,
         cops,
@@ -359,6 +421,7 @@ pub fn run_cops_with_options_context_and_diagnostics(
         ctx,
         config_disabled_cops,
         parse_diagnostics,
+        rails_schema_json,
         options_for,
         None,
     );
@@ -384,6 +447,31 @@ pub fn run_cops_with_options_context_and_diagnostics_timed(
     parse_diagnostics: &[OwnedParseDiagnostic],
     options_for: impl FnMut(&str) -> Vec<u8>,
 ) -> Vec<CopTiming> {
+    run_cops_with_options_context_and_diagnostics_timed_and_schema(
+        ast,
+        cops,
+        sink,
+        ctx,
+        config_disabled_cops,
+        parse_diagnostics,
+        "",
+        options_for,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Timed variant plus a Rails `db/schema.rb` view (murphy-s0vb). See
+/// [`run_cops_with_options_and_context_and_schema`] for the wire contract.
+pub fn run_cops_with_options_context_and_diagnostics_timed_and_schema(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    ctx: AllCopsContext,
+    config_disabled_cops: &[RawSlice],
+    parse_diagnostics: &[OwnedParseDiagnostic],
+    rails_schema_json: &str,
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) -> Vec<CopTiming> {
     let mut timings = Vec::with_capacity(cops.len());
     run_cops_inner(
         ast,
@@ -392,6 +480,7 @@ pub fn run_cops_with_options_context_and_diagnostics_timed(
         ctx,
         config_disabled_cops,
         parse_diagnostics,
+        rails_schema_json,
         options_for,
         Some(&mut timings),
     );
@@ -428,6 +517,7 @@ fn run_cops_inner(
     // borrowed param.
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
+    rails_schema_json: &str,
     mut options_for: impl FnMut(&str) -> Vec<u8>,
     mut timings: Option<&mut Vec<CopTiming>>,
 ) {
@@ -457,6 +547,7 @@ fn run_cops_inner(
         ctx,
         config_disabled_cops,
         &wire,
+        rails_schema_json,
     );
     for cop in cops {
         base.cop_name = cop.name;

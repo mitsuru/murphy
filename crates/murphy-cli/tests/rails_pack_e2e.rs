@@ -757,6 +757,16 @@ fn rails_pack_enforces_audited_rails_file_scopes() {
             "test/test_helper.rb",
             "app/models/foo.rb",
         ),
+        (
+            "Rails/UniqueValidationWithoutIndex",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
+        (
+            "Rails/UnusedIgnoredColumns",
+            "app/models/foo.rb",
+            "app/controllers/foo_controller.rb",
+        ),
     ];
     for (cop, in_scope, out_of_scope) in cases {
         assert!(
@@ -871,5 +881,136 @@ fn rails_pack_opt_out_disables_default_scope_through_full_lint_pipeline() {
     assert!(
         stdout2.contains("Rails/DefaultScope"),
         "explicit opt-in must re-enable DefaultScope; got:\n{stdout2}"
+    );
+}
+
+#[test]
+fn rails_schema_cops_fire_with_schema_and_silent_without() {
+    // murphy-s0vb: engine-provided `db/schema.rb` view. With a schema lacking
+    // a unique index, both cops fire; without a schema file, both stay silent
+    // (matching RuboCop's `return unless schema` — Mastodon 0 FPs).
+    // Uses `--no-cache` so the global result cache (keyed by content+path,
+    // not project root) cannot cross-contaminate the two temp projects.
+    let pack = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let schema = "ActiveRecord::Schema.define(version: 2020_02_02_075409) do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"account\", null: false\n  end\nend\n";
+    let model = "class User < ApplicationRecord\n  validates :account, uniqueness: true\n  self.ignored_columns = [:real_name]\nend\n";
+
+    // ── with schema: both cops fire ──
+    let with_schema = tempdir().expect("tempdir");
+    fs::create_dir_all(with_schema.path().join("app/models")).unwrap();
+    fs::create_dir_all(with_schema.path().join("db")).unwrap();
+    fs::write(with_schema.path().join("db/schema.rb"), schema).unwrap();
+    let rb = with_schema.path().join("app/models/user.rb");
+    fs::write(&rb, model).unwrap();
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/UniqueValidationWithoutIndex:\n  Enabled: true\nRails/UnusedIgnoredColumns:\n  Enabled: true\n",
+        pack.display().to_string(),
+    );
+    fs::write(with_schema.path().join(".murphy.yml"), yml).unwrap();
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(with_schema.path())
+        .arg("lint")
+        .arg("--no-cache")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("Rails/UniqueValidationWithoutIndex"),
+        "with schema lacking index, UniqueValidationWithoutIndex must fire; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Rails/UnusedIgnoredColumns"),
+        "with schema, UnusedIgnoredColumns must fire; got:\n{stdout}"
+    );
+
+    // ── without schema: both silent ──
+    let no_schema = tempdir().expect("tempdir");
+    fs::create_dir_all(no_schema.path().join("app/models")).unwrap();
+    let rb2 = no_schema.path().join("app/models/user.rb");
+    // Distinct content (comment) so no global-cache collision even without --no-cache;
+    // still passes --no-cache for determinism.
+    let model2 = "# no-schema fixture\n".to_owned() + model;
+    fs::write(&rb2, &model2).unwrap();
+    let yml2 = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/UniqueValidationWithoutIndex:\n  Enabled: true\nRails/UnusedIgnoredColumns:\n  Enabled: true\n",
+        pack.display().to_string(),
+    );
+    fs::write(no_schema.path().join(".murphy.yml"), yml2).unwrap();
+
+    let assert2 = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(no_schema.path())
+        .arg("lint")
+        .arg("--no-cache")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb2)
+        .assert();
+    let stdout2 = String::from_utf8_lossy(&assert2.get_output().stdout);
+    assert!(
+        !stdout2.contains("Rails/UniqueValidationWithoutIndex"),
+        "without schema, UniqueValidationWithoutIndex must stay silent; got:\n{stdout2}"
+    );
+    assert!(
+        !stdout2.contains("Rails/UnusedIgnoredColumns"),
+        "without schema, UnusedIgnoredColumns must stay silent; got:\n{stdout2}"
+    );
+}
+
+#[test]
+fn rails_schema_unique_index_suppresses_validation_offense() {
+    // murphy-s0vb: with a covering unique index, UniqueValidationWithoutIndex
+    // stays silent (no FP); UnusedIgnoredColumns still fires for the missing
+    // column (proves schema was actually loaded, not just absent).
+    let pack = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    fs::create_dir_all(dir.path().join("app/models")).unwrap();
+    fs::create_dir_all(dir.path().join("db")).unwrap();
+    fs::write(
+        dir.path().join("db/schema.rb"),
+        "ActiveRecord::Schema.define(version: 2020_02_02_075409) do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"account\", null: false\n    t.index [\"account\"], name: \"index_users_on_account\", unique: true\n  end\nend\n",
+    )
+    .unwrap();
+    let rb = dir.path().join("app/models/user.rb");
+    fs::write(
+        &rb,
+        "class User < ApplicationRecord\n  validates :account, uniqueness: true\n  self.ignored_columns = [:real_name]\nend\n",
+    )
+    .unwrap();
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/UniqueValidationWithoutIndex:\n  Enabled: true\nRails/UnusedIgnoredColumns:\n  Enabled: true\n",
+        pack.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).unwrap();
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--no-cache")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        !stdout.contains("Rails/UniqueValidationWithoutIndex"),
+        "covering unique index must suppress the offense; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Rails/UnusedIgnoredColumns"),
+        "schema-loaded run must still flag the missing column; got:\n{stdout}"
     );
 }

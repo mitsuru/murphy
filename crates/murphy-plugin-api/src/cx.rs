@@ -639,6 +639,31 @@ impl<'a> Cx<'a> {
         self.raw.parse_diagnostics_len != 0
     }
 
+    /// Rails `db/schema.rb` view for schema-dependent cops (murphy-s0vb).
+    ///
+    /// Decodes the host-threaded `rails_schema_json` (`None` when no schema
+    /// file was found — empty wire slice — or when the JSON is invalid).
+    /// Both schema-dependent cops (`Rails/UniqueValidationWithoutIndex`,
+    /// `Rails/UnusedIgnoredColumns`) return early on `None`, matching
+    /// RuboCop's `return unless schema`.
+    pub fn rails_schema(&self) -> Option<crate::RailsSchema> {
+        let bytes = unsafe { self.raw.rails_schema_json.as_bytes() };
+        if bytes.is_empty() {
+            return None;
+        }
+        let text = std::str::from_utf8(bytes).ok()?;
+        crate::RailsSchema::from_json(text)
+    }
+
+    /// Raw schema JSON text, if the host threaded any.
+    pub fn rails_schema_json(&self) -> Option<&'a str> {
+        let bytes = unsafe { self.raw.rails_schema_json.as_bytes() };
+        if bytes.is_empty() {
+            return None;
+        }
+        std::str::from_utf8(bytes).ok()
+    }
+
     /// The run-wide resolved `Layout/LineLength.Max` (default 120).
     ///
     /// RuboCop's `Style/IfUnlessModifier`, `Style/WhileUntilModifier`,
@@ -3690,6 +3715,7 @@ mod tests {
             max_line_length: 120,
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
+            rails_schema_json: RawSlice::EMPTY,
         }
     }
 

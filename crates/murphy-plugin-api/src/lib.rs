@@ -27,6 +27,7 @@ mod cx;
 pub mod method_predicates;
 mod node_cop;
 mod options;
+pub mod rails_schema;
 mod severity;
 pub mod var_semantic_model;
 
@@ -51,6 +52,7 @@ pub use cx::{
 };
 pub use node_cop::NodeCop;
 pub use options::{CopOptionEnum, CopOptions, NoOptions};
+pub use rails_schema::{RailsIndex, RailsSchema, RailsTable};
 pub use severity::{
     SEVERITY_UNSET, Severity, TRISTATE_UNSET, tristate_from_wire, tristate_to_wire,
 };

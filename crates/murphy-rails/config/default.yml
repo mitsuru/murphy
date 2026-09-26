@@ -327,6 +327,14 @@ Rails/TimeZoneAssignment:
     - '**/spec/**/*.rb'
     - '**/test/**/*.rb'
 
+Rails/UniqueValidationWithoutIndex:
+  Include:
+    - '**/app/models/**/*.rb'
+
+Rails/UnusedIgnoredColumns:
+  Include:
+    - '**/app/models/**/*.rb'
+
 Rails/Validation:
   Include:
     - '**/app/models/**/*.rb'
