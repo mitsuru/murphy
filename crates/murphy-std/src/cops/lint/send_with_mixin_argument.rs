@@ -24,7 +24,21 @@
 //! Replaces the selector-through-argument tail with the direct mixin call,
 //! preserving any receiver before the selector.
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, def_node_matcher};
+
+// RuboCop parity: `Lint/SendWithMixinArgument` const-receiver head is
+// `(send (const _ _) {:send :public_send :__send__} ...)`.
+// `(const _ _)` matches any const (any scope, any name), equivalent to the
+// prior `matches Const` guard: bare/::Foo collapse to scope None (pinned by
+// `boundary_flags_cbase_receiver`), namespaced A::Foo/B::Bar still match
+// (pinned by existing namespace test + `boundary_flags_namespaced_module_arg`).
+// `send` covers Send only (not Csend, pinned by `boundary_ignores_csend`).
+// Trailing `...` absorbs any arg list; mixin-method + const-arg checks stay
+// hand-rolled below.
+def_node_matcher!(
+    send_mixin_head,
+    "(send (const _ _) {:send :public_send :__send__} ...)"
+);
 
 const MSG: &str = "Use `%<method>s %<module_name>s` instead of `%<bad_method>s`.";
 
@@ -41,12 +55,13 @@ pub struct SendWithMixinArgument;
 impl SendWithMixinArgument {
     #[on_node(kind = "send", methods = ["send", "public_send", "__send__"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-            return;
-        };
-        if !receiver_is_allowed(receiver, cx) {
+        // `(send (const _ _) {:send :public_send :__send__} ...)` head.
+        if !send_mixin_head(node, cx) {
             return;
         }
+        let NodeKind::Send { args, .. } = *cx.kind(node) else {
+            return;
+        };
 
         let args = cx.list(args);
         let Some((&first_arg, module_args)) = args.split_first() else {
@@ -77,13 +92,6 @@ impl SendWithMixinArgument {
 
         cx.emit_offense(bad_range, &message, None);
         cx.emit_edit(bad_range, &replacement);
-    }
-}
-
-fn receiver_is_allowed(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
-    match receiver.get() {
-        Some(id) => matches!(*cx.kind(id), NodeKind::Const { .. }),
-        None => false,
     }
 }
 
@@ -197,6 +205,38 @@ mod tests {
             .expect_no_offenses("Foo.send(:do_something, Bar)\n")
             .expect_no_offenses("Foo.include Bar\n")
             .expect_no_offenses("foo.send(:include, Bar)\n");
+    }
+
+    #[test]
+    fn boundary_flags_cbase_receiver() {
+        // `::Foo` collapses to Const scope None in Murphy, so the hand-rolled
+        // `matches Const` guard flags it; verbatim `(const _ _)` must preserve.
+        test::<SendWithMixinArgument>().expect_correction(
+            indoc! {r#"
+                ::Foo.send(:include, Bar)
+                      ^^^^^^^^^^^^^^^^^^^ Use `include Bar` instead of `send(:include, Bar)`.
+            "#},
+            "::Foo.include Bar\n",
+        );
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_module_arg() {
+        // Module args accept namespaces; pinned for verbatim equivalence.
+        test::<SendWithMixinArgument>().expect_correction(
+            indoc! {r#"
+                Foo.send(:include, Foo::Bar)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^ Use `include Foo::Bar` instead of `send(:include, Foo::Bar)`.
+            "#},
+            "Foo.include Foo::Bar\n",
+        );
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is csend, not send; on_node(send) never dispatches.
+        test::<SendWithMixinArgument>()
+            .expect_no_offenses("Foo&.send(:include, Bar)\n");
     }
 }
 

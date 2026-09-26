@@ -12,7 +12,17 @@
 //!   exported and read through current `Cx` options.
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/MissingSuper` Class.new const is
+// `(const {nil? cbase} :Class)` (top-level only).
+// In Murphy `::Class` collapses to Const scope None, so `nil?` covers bare +
+// `::` (pinned by `boundary_flags_cbase_class_new`), namespaced Foo::Class
+// still rejects (pinned by `boundary_ignores_namespaced_class_new`).
+// Applied to the unwrapped receiver to preserve `(Class).new` (pinned by
+// `flags_class_new_with_parenthesized_receiver`); `send` head + block-ancestor
+// walk + first-arg handling stay hand-rolled below.
+def_node_matcher!(is_class_const, "(const nil? :Class)");
 
 use crate::cops::util::unwrap_parenthesized;
 
@@ -105,7 +115,8 @@ fn class_new_parent(block: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         return None;
     }
     let receiver = unwrap_parenthesized(receiver.get()?, cx);
-    if !matches!(cx.const_name(receiver).as_deref(), Some("Class")) {
+    // `(const nil? :Class)` top-level only; preserves `(Class).new` via unwrap.
+    if !is_class_const(receiver, cx) {
         return None;
     }
     cx.list(args).first().copied()
@@ -234,6 +245,42 @@ mod tests {
             class Foo
               def self.inherited(base)
               ^^^^^^^^^^^^^^^^^^^^^^^^ Call `super` to invoke callback defined in the parent class.
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_cbase_class_new() {
+        // `::Class` collapses to Const scope None, so const_name == "Class"
+        // flags it; verbatim `(const nil? :Class)` must preserve.
+        test::<MissingSuper>().expect_offense(indoc! {r#"
+            ::Class.new(Parent) do
+              def initialize
+              ^^^^^^^^^^^^^^ Call `super` to initialize state of the parent class.
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_class_new() {
+        // `Foo::Class` const_name is "Foo::Class", not "Class", so silent;
+        // verbatim nil? must preserve.
+        test::<MissingSuper>().expect_no_offenses(indoc! {r#"
+            Foo::Class.new(Parent) do
+              def initialize
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_csend_class_new() {
+        // `&.` is csend, not send; class_new_parent matches Send only.
+        test::<MissingSuper>().expect_no_offenses(indoc! {r#"
+            Class&.new(Parent) do
+              def initialize
               end
             end
         "#});
