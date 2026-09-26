@@ -11,9 +11,16 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the call head `(call _ {:first :[] :slice :at} ...)`
+//!   (murphy-s1yc.17): `call` = `{send csend}` covers safe-navigation
+//!   (`'foo'.unpack('h*')&.first`), mirroring RuboCop
+//!   `alias on_csend on_send` plus `RESTRICT_ON_SEND`; the wildcard
+//!   receiver binds an absent or present receiver per murphy-if9y;
+//!   trailing `...` absorbs any argument list. The outer-arg plus inner
+//!   `unpack` shape guards below apply separately (upstream inner is
+//!   `(call (...) :unpack ...)` with `(int 0)` / no-arg outer guards).
 //!   Gated at minimum_target_ruby_version = "2.4" (`String#unpack1` requires
-//!   Ruby >= 2.4).  Both `send` and `csend` (safe-navigation) outer
-//!   calls are handled, mirroring RuboCop's `alias on_csend on_send`.
+//!   Ruby >= 2.4).
 //!   The mixed case `recv&.unpack(fmt).first` (inner csend, outer plain send)
 //!   is excluded: autocorrecting it to `recv&.unpack1(fmt)` would change
 //!   behaviour when recv is nil (NoMethodError vs. silent nil).
@@ -40,7 +47,21 @@
 //! 1. Rename the inner `unpack` selector to `unpack1`.
 //! 2. Delete the outer accessor (`.first`, `[0]`, `.slice(0)`, `.at(0)`).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// Verbatim port of the call head (murphy-s1yc.17):
+// `(call _ {:first :[] :slice :at} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`'foo'.unpack('h*')&.first`), mirroring RuboCop
+// `alias on_csend on_send` plus `RESTRICT_ON_SEND`. The `_` receiver binds
+// an absent or present receiver per murphy-if9y; trailing `...` absorbs any
+// argument list, so the outer-arg plus inner-`unpack` shape guards below
+// apply separately (upstream inner is `(call (...) :unpack ...)`; the
+// mixed inner-csend/outer-send case stays excluded as a complementary
+// behaviour guard).
+def_node_matcher!(
+    unpack_first_call,
+    "(call _ {:first :[] :slice :at} ...)"
+);
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -55,21 +76,14 @@ pub struct UnpackFirst;
     options = NoOptions,
 )]
 impl UnpackFirst {
-    #[on_node(kind = "send", methods = ["first", "[]", "slice", "at"])]
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        // Filter to only the relevant methods -- `methods = [...]` is only
-        // valid for `kind = "send"` so we do the check manually here.
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(cx.symbol_str(method), "first" | "[]" | "slice" | "at") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
@@ -84,14 +98,22 @@ impl UnpackFirst {
 /// `.first` would then raise `NoMethodError`. Replacing with `&.unpack1` would
 /// silently return nil instead — a behaviour change.
 fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
-    // Outer node must be send/csend.
-    let (outer_is_csend, outer_method, outer_args) = match cx.kind(outer) {
-        NodeKind::Send { method, args, .. } => (false, cx.symbol_str(*method), cx.list(*args)),
-        NodeKind::Csend { method, args, .. } => (true, cx.symbol_str(*method), cx.list(*args)),
-        _ => return None,
-    };
+    // Outer node must be send/csend (guaranteed by the verbatim head, but
+    // re-checked here for the `is_csend` split below).
+    if !matches!(
+        cx.kind(outer),
+        NodeKind::Send { .. } | NodeKind::Csend { .. }
+    ) {
+        return None;
+    }
+    let outer_is_csend = matches!(cx.kind(outer), NodeKind::Csend { .. });
+    let outer_method = cx.method_name(outer)?;
+    let outer_args = cx.call_arguments(outer);
 
-    // Validate outer method and its arguments.
+    // Validate outer method and its arguments. The verbatim head already
+    // restricts to `first` / `[]` / `slice` / `at`; the argument shapes
+    // below apply separately (upstream outer is `:first` with no args or
+    // `{:[ ] :slice :at}` with `(int 0)`; trailing `...` absorbs the rest).
     match outer_method {
         "first" => {
             // `.first` with no arguments only.
@@ -113,13 +135,19 @@ fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
     }
 
     // Inner node (receiver of the outer call) must be a send/csend to `unpack`
-    // with exactly one argument.
+    // with exactly one argument (mirroring upstream inner
+    // `(call (...) :unpack ...)` which also covers inner csend like
+    // `recv&.unpack(fmt).first`).
     let inner = cx.call_receiver(outer).get()?;
-    let (inner_is_csend, inner_method, inner_args) = match cx.kind(inner) {
-        NodeKind::Send { method, args, .. } => (false, cx.symbol_str(*method), cx.list(*args)),
-        NodeKind::Csend { method, args, .. } => (true, cx.symbol_str(*method), cx.list(*args)),
-        _ => return None,
-    };
+    if !matches!(
+        cx.kind(inner),
+        NodeKind::Send { .. } | NodeKind::Csend { .. }
+    ) {
+        return None;
+    }
+    let inner_is_csend = matches!(cx.kind(inner), NodeKind::Csend { .. });
+    let inner_method = cx.method_name(inner)?;
+    let inner_args = cx.call_arguments(inner);
 
     if inner_method != "unpack" {
         return None;
@@ -143,6 +171,15 @@ fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
 }
 
 fn check(outer: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:first :[] :slice :at} ...)` head: filters to
+    // `first` / `[]` / `slice` / `at` calls on either send or csend
+    // (safe-navigation), with any receiver (absent or present). Without
+    // this, an unrelated call on an unpack receiver (e.g.
+    // `'foo'.unpack('h*').last`) would run check on every call node instead
+    // of being rejected by the method set up front.
+    if !unpack_first_call(outer, cx) {
+        return;
+    }
     let Some((inner, fmt_node)) = match_unpack_first(outer, cx) else {
         return;
     };
@@ -277,6 +314,62 @@ mod tests {
         // Autocorrecting to obj&.unpack1('h*') would silently return nil -- a
         // behaviour change -- so this form is not flagged.
         test::<UnpackFirst>().expect_no_offenses("obj&.unpack('h*').first\n");
+    }
+
+    // --- Characterization (murphy-s1yc.17): pin the exact node set the
+    // dual send + manual-csend-filter dispatch matches, so the verbatim
+    // `(call _ {:first :[] :slice :at} ...)` port can be proven
+    // byte-identical. `call` covers safe-navigation (mirroring upstream
+    // `alias on_csend on_send` plus `RESTRICT_ON_SEND`); trailing `...`
+    // absorbs any argument list, so the inner-`unpack` shape plus outer-arg
+    // guards below apply separately (upstream inner is
+    // `(call (...) :unpack ...)` with `(int 0)` / no-arg outer guards).
+
+    #[test]
+    fn s1yc17_flags_outer_csend_first() {
+        // Outer safe-navigation only: `call` covers `csend` per
+        // murphy-if9y, mirroring upstream `alias on_csend on_send`.
+        test::<UnpackFirst>().expect_correction(
+            indoc! {r#"
+                'foo'.unpack('h*')&.first
+                      ^^^^^^^^^^^^^^^^^^^ Use `unpack1('h*')` instead of `unpack('h*')&.first`.
+            "#},
+            "'foo'.unpack1('h*')\n",
+        );
+    }
+
+    #[test]
+    fn s1yc17_flags_outer_csend_index_zero() {
+        // Outer `&.` with `[]`: same `call`-covers-`csend` shape.
+        test::<UnpackFirst>().expect_correction(
+            indoc! {r#"
+                'foo'.unpack('h*')&.[](0)
+                      ^^^^^^^^^^^^^^^^^^^ Use `unpack1('h*')` instead of `unpack('h*')&.[](0)`.
+            "#},
+            "'foo'.unpack1('h*')\n",
+        );
+    }
+
+    #[test]
+    fn s1yc17_accepts_bare_first() {
+        // Bare receiver: `_` binds an absent receiver per murphy-if9y, so
+        // the head matches and the complementary inner-receiver guard
+        // accepts.
+        test::<UnpackFirst>().expect_no_offenses("first\n");
+    }
+
+    #[test]
+    fn s1yc17_accepts_no_arg_inner_unpack() {
+        // Inner `unpack` without arguments: trailing `...` absorbs the outer
+        // argument list so the head matches, and the complementary
+        // one-format-arg guard accepts (upstream inner requires `$(...)`).
+        test::<UnpackFirst>().expect_no_offenses("'foo'.unpack.first\n");
+    }
+
+    #[test]
+    fn s1yc17_accepts_unrelated_method() {
+        // `last` is outside the verbatim method set, so the head rejects.
+        test::<UnpackFirst>().expect_no_offenses("'foo'.unpack('h*').last\n");
     }
 
     #[test]
