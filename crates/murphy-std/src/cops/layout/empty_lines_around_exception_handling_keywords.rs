@@ -150,9 +150,8 @@ fn block_body(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
 /// exception-handling structure to collect keyword line numbers, then checks
 /// the line above and below each.
 fn check_body(construct: NodeId, body: NodeId, cx: &Cx<'_>) {
-    let def_line = line_1based(cx.range(construct).start, cx);
-    let lines = crate::cops::util::physical_lines(cx.source());
-
+    // Ordinary bodies have no exception keywords. Avoid scanning the whole
+    // file for line offsets and allocating its physical lines for each one.
     let Some(structure) = exception_structure(body, cx) else {
         return;
     };
@@ -171,6 +170,8 @@ fn check_body(construct: NodeId, body: NodeId, cx: &Cx<'_>) {
         }
     }
 
+    let def_line = line_1based(cx.range(construct).start, cx);
+    let lines = crate::cops::util::physical_lines(cx.source());
     for kw in keyword_lines(structure, cx) {
         // `next if line == line_of_def_or_kwbegin`
         if kw.line == def_line {
@@ -450,6 +451,26 @@ mod tests {
     #[test]
     fn accepts_clean_ensure() {
         test::<Cop>().expect_no_offenses("def foo\n  x\nensure\n  y\nend\n");
+    }
+
+    #[test]
+    fn ordinary_bodies_do_not_hide_later_exception_offenses_or_edits() {
+        let mut source = String::new();
+        for i in 0..32 {
+            source.push_str(&format!("def ordinary_{i}\n  call_{i}\nend\n"));
+        }
+        source.push_str("def exceptional\n  x\n\nrescue\n  y\nend\n");
+
+        let run = run_cop_with_edits::<Cop>(&source);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(
+            run.offenses[0].message,
+            "Extra empty line detected before the `rescue`."
+        );
+        assert_eq!(
+            apply(&source, &run.edits),
+            source.replace("def exceptional\n  x\n\nrescue", "def exceptional\n  x\nrescue")
+        );
     }
 
     #[test]
