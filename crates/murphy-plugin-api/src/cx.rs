@@ -903,6 +903,11 @@ impl<'a> Cx<'a> {
         self.raw.root
     }
 
+    /// All arena node IDs in insertion order, including the root and nested nodes.
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        (0..self.nodes().len()).map(|index| NodeId(index as u32))
+    }
+
     /// The node at `id`.
     pub fn node(&self, id: NodeId) -> &'a AstNode {
         &self.nodes()[id.0 as usize]
@@ -3724,6 +3729,49 @@ mod tests {
             parse_diagnostics_len: 0,
             rails_schema_json: RawSlice::EMPTY,
         }
+    }
+
+    #[test]
+    fn node_ids_include_single_root() {
+        let mut builder = AstBuilder::new("nil", "t.rb".to_string());
+        let root = builder.push(NodeKind::Nil, Range { start: 0, end: 3 });
+        let ast = builder.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.node_ids().collect::<Vec<_>>(), vec![root]);
+    }
+
+    #[test]
+    fn node_ids_include_nested_nodes_in_arena_order() {
+        let (ast, root) = fixture(); // `return nil`: child inserted before root.
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.node_ids().collect::<Vec<_>>(), vec![NodeId(0), root]);
+        assert!(matches!(cx.kind(NodeId(0)), NodeKind::Nil));
+        assert!(matches!(cx.kind(root), NodeKind::Return(_)));
+
+        // A translated nested call must not omit intermediary arena nodes.
+        with_parsed("outer(inner(1))", |cx, root| {
+            let ids: Vec<_> = cx.node_ids().collect();
+            assert_eq!(ids, (0..ids.len() as u32).map(NodeId).collect::<Vec<_>>());
+            assert!(ids.contains(&root));
+            assert_eq!(
+                ids.iter()
+                    .filter(|&&id| matches!(cx.kind(id), NodeKind::Send { .. }))
+                    .count(),
+                2
+            );
+        });
     }
 
     #[test]
