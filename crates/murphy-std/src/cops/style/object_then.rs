@@ -173,63 +173,62 @@ impl ObjectThen {
     /// Block path: `obj.yield_self { |x| ... }` or `obj.then { |x| ... }`.
     #[on_node(kind = "block")]
     fn check_block(&self, node: NodeId, cx: &Cx<'_>) {
+        let Some(send) = block_send(node, cx) else {
+            return;
+        };
         let opts = cx.options_or_default::<ObjectThenOptions>();
-        if let Some(send) = block_send(node, cx) {
-            check_method_node(send, cx, opts.enforced_style);
-        }
+        check_method_node(send, cx, opts.enforced_style);
     }
 
     /// Numbered-parameter block: `obj.yield_self { _1.foo }`.
     #[on_node(kind = "numblock")]
     fn check_numblock(&self, node: NodeId, cx: &Cx<'_>) {
+        let Some(send) = block_send(node, cx) else {
+            return;
+        };
         let opts = cx.options_or_default::<ObjectThenOptions>();
-        if let Some(send) = block_send(node, cx) {
-            check_method_node(send, cx, opts.enforced_style);
-        }
+        check_method_node(send, cx, opts.enforced_style);
     }
 
     /// `it`-parameter block: `obj.yield_self { it.foo }`.
     #[on_node(kind = "itblock")]
     fn check_itblock(&self, node: NodeId, cx: &Cx<'_>) {
+        let Some(send) = block_send(node, cx) else {
+            return;
+        };
         let opts = cx.options_or_default::<ObjectThenOptions>();
-        if let Some(send) = block_send(node, cx) {
-            check_method_node(send, cx, opts.enforced_style);
-        }
+        check_method_node(send, cx, opts.enforced_style);
     }
 
     /// Send path: `obj.yield_self(&method(:foo))` — exactly one block-pass arg.
-    /// Triggered on all sends; the verbatim
-    /// `(call _ {:then :yield_self} ...)` head filters to the 2
-    /// RESTRICT_ON_SEND methods.
-    #[on_node(kind = "send")]
+    /// The dispatcher filters sends to the 2 RESTRICT_ON_SEND methods;
+    /// `check` also handles the csend path with the verbatim call head.
+    #[on_node(kind = "send", methods = ["then", "yield_self"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let opts = cx.options_or_default::<ObjectThenOptions>();
-        check(node, cx, opts.enforced_style);
+        check(node, cx);
     }
 
     /// Safe-navigation send path: `obj&.yield_self(&block)`.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let opts = cx.options_or_default::<ObjectThenOptions>();
-        check(node, cx, opts.enforced_style);
+        check(node, cx);
     }
 }
 
 /// Send-path check: flags `then`/`yield_self` calls with exactly one
 /// block-pass argument.
-fn check(node: NodeId, cx: &Cx<'_>, style: ObjectThenStyle) {
+fn check(node: NodeId, cx: &Cx<'_>) {
     // Verbatim `(call _ {:then :yield_self} ...)` head: filters to the 2
     // RESTRICT_ON_SEND methods on either send or csend (safe-navigation),
-    // with any receiver (absent or present). Without this, an unrelated
-    // call with a block-pass arg (e.g. `obj.map(&method(:foo))`) would run
-    // check on every call node instead of being rejected by the method set
-    // up front.
+    // with any receiver (absent or present). This is still needed for csend,
+    // whose dispatcher is not filtered by method name.
     if !object_then_call(node, cx) {
         return;
     }
     let args = cx.call_arguments(node);
     if args.len() == 1 && matches!(cx.kind(args[0]), NodeKind::BlockPass(_)) {
-        check_method_node(node, cx, style);
+        let opts = cx.options_or_default::<ObjectThenOptions>();
+        check_method_node(node, cx, opts.enforced_style);
     }
 }
 
@@ -429,6 +428,23 @@ mod tests {
         // the head matches, and the complementary one-block-pass-arg guard
         // accepts (upstream `on_send` requires exactly one block-pass arg).
         test::<ObjectThen>().expect_no_offenses("yield_self\n");
+    }
+
+    #[test]
+    fn unrelated_block_and_send_do_not_hide_configured_style() {
+        test::<ObjectThen>()
+            .with_options(&ObjectThenOptions {
+                enforced_style: ObjectThenStyle::YieldSelf,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    arr.map { |item| item }
+                    obj&.map(&method(:foo))
+                    obj.then(&method(:foo))
+                        ^^^^ Prefer `yield_self` over `then`.
+                "#},
+                "arr.map { |item| item }\nobj&.map(&method(:foo))\nobj.yield_self(&method(:foo))\n",
+            );
     }
 
     #[test]
