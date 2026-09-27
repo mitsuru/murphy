@@ -120,7 +120,6 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
     }
 
     let outer_args = cx.call_arguments(outer);
-    let opts = cx.options_or_default::<Options>();
 
     for &nested in outer_args {
         // Only consider direct children that are themselves call nodes.
@@ -128,7 +127,7 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
             continue;
         }
 
-        if allowed_omission(nested, outer_args, &opts, cx) {
+        if allowed_omission(nested, outer_args, cx) {
             continue;
         }
 
@@ -142,7 +141,7 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
 }
 
 /// Mirrors RuboCop's `allowed_omission?`.
-fn allowed_omission(nested: NodeId, outer_args: &[NodeId], opts: &Options, cx: &Cx<'_>) -> bool {
+fn allowed_omission(nested: NodeId, outer_args: &[NodeId], cx: &Cx<'_>) -> bool {
     // No arguments on the nested call — nothing to parenthesize.
     if cx.call_arguments(nested).is_empty() {
         return true;
@@ -169,9 +168,11 @@ fn allowed_omission(nested: NodeId, outer_args: &[NodeId], opts: &Options, cx: &
     //   - the nested call also has exactly one argument.
     if outer_args.len() == 1
         && cx.call_arguments(nested).len() == 1
-        && cx
-            .method_name(nested)
-            .is_some_and(|name| opts.allowed_methods.iter().any(|m| m == name))
+        && cx.method_name(nested).is_some_and(|name| {
+            // Ordinary calls never need this list of default method strings.
+            let opts = cx.options_or_default::<Options>();
+            opts.allowed_methods.iter().any(|m| m == name)
+        })
     {
         return true;
     }
@@ -369,6 +370,28 @@ mod tests {
                 allowed_methods: vec!["foo".to_string()],
             })
             .expect_no_offenses("method1(foo arg)\n");
+    }
+
+    #[test]
+    fn unrelated_calls_before_custom_allowed_method_do_not_change_options() {
+        let opts = Options {
+            allowed_methods: vec!["foo".to_string()],
+        };
+        test::<NestedParenthesizedCalls>()
+            .with_options(&opts)
+            .expect_no_offenses("object.one(two).three(4)\nmethod1(bar(1))\nmethod1(foo arg)\n");
+        test::<NestedParenthesizedCalls>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                method1(eq arg)
+                        ^^^^^^ Add parentheses to nested method call `eq arg`.
+            "#});
+        test::<NestedParenthesizedCalls>()
+            .with_options(&no_allowed_opts())
+            .expect_offense(indoc! {r#"
+                method1(foo arg)
+                        ^^^^^^^ Add parentheses to nested method call `foo arg`.
+            "#});
     }
 
     // ---- default AllowedMethods entries ----
