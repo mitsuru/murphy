@@ -25,11 +25,14 @@
 //!   `%<suffix>s`.` (glob-styled suffix). Detection is at parity for the
 //!   default configuration (verified vs 3.7.0, including namespaced
 //!   constants, `CustomTransform`, `IgnoreMethods`, routing metadata,
-//!   multi-group and non-const clean cases); custom `CustomTransform` /
-//!   `IgnoreMetadata` tables are not configurable in this batch — the
-//!   `CopOptions` schema only carries scalars, so the upstream defaults
-//!   are baked in (status: partial, config as gap). Upstream ships no
-//!   autocorrect and none is added here.
+//!   multi-group and non-const clean cases). A custom `CustomTransform`
+//!   map is supported via the host-baked `CustomTransformPairs` option
+//!   (`Name=path` entries, user config merged over the upstream defaults,
+//!   mirroring `cop_config.fetch('CustomTransform', {})`; murphy-bjrg.4)
+//!   — the `CopOptions` schema carries no map type, so the host flattens
+//!   the map (no ABI bump). Custom `IgnoreMetadata` tables remain a gap
+//!   (status: partial). Upstream ships no autocorrect and none is added
+//!   here.
 //! ```
 //!
 //! ## Matched shapes
@@ -73,6 +76,12 @@ pub struct SpecFilePathFormatOptions {
         description = "Whether method-name descriptions are ignored when checking the path."
     )]
     pub ignore_methods: bool,
+    #[option(
+        name = "CustomTransformPairs",
+        default = [],
+        description = "Host-baked `CustomTransform` entries as `Name=path` pairs (the user's map merged over the upstream defaults). A namespace segment matching a name maps to its path. Absent outside host runs, where only the upstream defaults apply."
+    )]
+    pub custom_transform_pairs: Vec<String>,
 }
 
 #[cop(
@@ -129,7 +138,14 @@ impl SpecFilePathFormat {
             return;
         }
         let opts = cx.options_or_default::<SpecFilePathFormatOptions>();
-        let pattern = correct_path_pattern(cx, group, class_name, arguments, opts.ignore_methods);
+        let pattern = correct_path_pattern(
+            cx,
+            group,
+            class_name,
+            arguments,
+            opts.ignore_methods,
+            &opts.custom_transform_pairs,
+        );
         let re = Regex::new(&format!("{pattern}$")).unwrap_or_else(|_| Regex::new("$^").unwrap());
         if re.is_match(cx.file_path()) {
             return;
@@ -172,8 +188,9 @@ fn correct_path_pattern(
     class_name: NodeId,
     arguments: &[NodeId],
     ignore_methods: bool,
+    custom_pairs: &[String],
 ) -> String {
-    let expected = expected_path(cx, group, class_name);
+    let expected = expected_path(cx, group, class_name, custom_pairs);
     let method_part = arguments
         .first()
         .and_then(|&first| method_name_pattern(cx, first, ignore_methods));
@@ -184,9 +201,14 @@ fn correct_path_pattern(
 }
 
 /// `expected_path`: enclosing namespace plus the constant path, mapped
-/// through the default `CustomTransform` else `camel_to_snake_case`,
+/// through `custom_transform.fetch(name) { camel_to_snake_case(name) }`,
 /// joined with `/` (`File.join`).
-fn expected_path(cx: &Cx<'_>, group: NodeId, class_name: NodeId) -> String {
+fn expected_path(
+    cx: &Cx<'_>,
+    group: NodeId,
+    class_name: NodeId,
+    custom_pairs: &[String],
+) -> String {
     let mut parts = lexical_namespace(cx, group);
     let konst = cx.const_name(class_name).unwrap_or_default();
     for part in konst.split("::") {
@@ -196,13 +218,27 @@ fn expected_path(cx: &Cx<'_>, group: NodeId, class_name: NodeId) -> String {
     }
     parts
         .iter()
-        .map(|name| custom_transform(name).unwrap_or_else(|| camel_to_snake_case(name)))
+        .map(|name| {
+            custom_transform(name, custom_pairs).unwrap_or_else(|| camel_to_snake_case(name))
+        })
         .collect::<Vec<_>>()
         .join("/")
 }
 
-/// Default `CustomTransform: {RuboCop: rubocop, RSpec: rspec}`.
-fn custom_transform(name: &str) -> Option<String> {
+/// Upstream `custom_transform` (`cop_config.fetch('CustomTransform', {})`)
+/// with the defaults (`RuboCop→rubocop`, `RSpec→rspec`) underneath: the
+/// host-baked `Name=path` pairs (the user's map merged over the defaults)
+/// win on exact name match; entries without `=` never match. Outside host
+/// runs the pairs are empty and only the defaults apply.
+fn custom_transform(name: &str, custom_pairs: &[String]) -> Option<String> {
+    for entry in custom_pairs {
+        let Some((key, value)) = entry.split_once('=') else {
+            continue;
+        };
+        if !key.is_empty() && key == name {
+            return Some(value.to_owned());
+        }
+    }
     match name {
         "RuboCop" => Some("rubocop".to_owned()),
         "RSpec" => Some("rspec".to_owned()),
@@ -387,12 +423,83 @@ mod tests {
     fn ignores_method_when_ignoring_methods() {
         let opts = SpecFilePathFormatOptions {
             ignore_methods: true,
+            ..Default::default()
         };
         test::<SpecFilePathFormat>()
             .with_options(&opts)
             .with_file_path("my_class_spec.rb")
             .expect_no_offenses(indoc! {r#"
                 describe MyClass, '#method' do
+                end
+            "#});
+    }
+
+    // ── Host-baked custom `CustomTransform` (murphy-bjrg.4) ──────────────
+    // Mastodon `.rubocop/rspec.yml` maps ActivityPub→activitypub (etc.);
+    // the host bakes the merged map as `Name=path` pairs. Each shape below
+    // is verified against rubocop-rspec 3.10.2 with that config (0 offenses).
+
+    #[test]
+    fn accepts_host_baked_custom_transform() {
+        let opts = SpecFilePathFormatOptions {
+            custom_transform_pairs: vec!["ActivityPub=activitypub".to_owned()],
+            ..Default::default()
+        };
+        test::<SpecFilePathFormat>()
+            .with_options(&opts)
+            .with_file_path("activitypub/accept_spec.rb")
+            .expect_no_offenses(indoc! {r#"
+                describe ActivityPub::Accept do
+                end
+            "#});
+    }
+
+    #[test]
+    fn custom_pair_overrides_default_transform() {
+        // User config wins over the upstream defaults (`RuboCop→rubocop`).
+        let opts = SpecFilePathFormatOptions {
+            custom_transform_pairs: vec!["RuboCop=custom".to_owned()],
+            ..Default::default()
+        };
+        test::<SpecFilePathFormat>()
+            .with_options(&opts)
+            .with_file_path("custom_spec.rb")
+            .expect_no_offenses(indoc! {r#"
+                describe RuboCop do
+                end
+            "#});
+    }
+
+    #[test]
+    fn ignores_malformed_custom_pair() {
+        // Entries without `=` never match; default snake_case still applies.
+        let opts = SpecFilePathFormatOptions {
+            custom_transform_pairs: vec!["NoEqualsSign".to_owned()],
+            ..Default::default()
+        };
+        test::<SpecFilePathFormat>()
+            .with_options(&opts)
+            .with_file_path("my_class_spec.rb")
+            .expect_no_offenses(indoc! {r#"
+                describe MyClass do
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_wrong_path_under_custom_transform() {
+        // True pin: the custom map only renames the segment; a genuinely
+        // wrong path still flags with the transformed suffix.
+        let opts = SpecFilePathFormatOptions {
+            custom_transform_pairs: vec!["ActivityPub=activitypub".to_owned()],
+            ..Default::default()
+        };
+        test::<SpecFilePathFormat>()
+            .with_options(&opts)
+            .with_file_path("whatever_spec.rb")
+            .expect_offense(indoc! {r#"
+                describe ActivityPub::Accept do
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Spec path should end with `activitypub/accept*_spec.rb`.
                 end
             "#});
     }

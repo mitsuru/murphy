@@ -26,3 +26,14 @@ RSpec/BeforeAfterAll:
     - "**/spec/spec_helper.rb"
     - "**/spec/rails_helper.rb"
     - "**/spec/support/**/*.rb"
+# - `RSpec/SpecFilePathFormat: CustomTransform`: mirrors rubocop-rspec's
+#   `config/default.yml` defaults (`RuboCop→rubocop`, `RSpec→rspec`). The
+#   host merges user entries over these per-key (RuboCop deep-merge) and
+#   bakes the result as `CustomTransformPairs` for the cop (murphy-bjrg.4);
+#   without this layer a project relying on the defaults would still pass
+#   (the cop hardcodes them as a backstop), but the layer keeps the
+#   source of truth in config, matching upstream.
+RSpec/SpecFilePathFormat:
+  CustomTransform:
+    RuboCop: rubocop
+    RSpec: rspec
