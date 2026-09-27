@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-25T19:04:33Z",
-  "commit": "d86c63a77b3bf1cc89d90e3db9aebb53142296c5",
+  "updated_at": "2026-09-27T20:26:58Z",
+  "commit": "49270c4a75579c8c9295a5e8386df5cf595db7a4",
   "runner": "ubuntu-latest",
   "method": {
     "tool": "hyperfine",
@@ -15,25 +15,25 @@
   },
   "scales": {
     "1": {
-      "murphy_mean_s": 0.01383212364097561,
-      "murphy_stddev_s": 0.00043234841399209374,
-      "rubocop_mean_s": 0.98793502278,
-      "rubocop_stddev_s": 0.01774067259008925,
-      "speedup": 71.42323539195307
+      "murphy_mean_s": 0.017387464234082835,
+      "murphy_stddev_s": 0.0003274094903646853,
+      "rubocop_mean_s": 1.21461447664,
+      "rubocop_stddev_s": 0.015383948234100418,
+      "speedup": 69.85575701482207
     },
     "20": {
-      "murphy_mean_s": 0.015664308777021293,
-      "murphy_stddev_s": 0.0011641707396181698,
-      "rubocop_mean_s": 1.05728547126,
-      "rubocop_stddev_s": 0.00836986215437136,
-      "speedup": 67.49646513678161
+      "murphy_mean_s": 0.018851636826666667,
+      "murphy_stddev_s": 0.0008869512433229465,
+      "rubocop_mean_s": 1.19714023078,
+      "rubocop_stddev_s": 0.006995088134759886,
+      "speedup": 63.50325129787033
     },
     "100": {
-      "murphy_mean_s": 0.02027222515783784,
-      "murphy_stddev_s": 0.007786493893240626,
-      "rubocop_mean_s": 1.08647138152,
-      "rubocop_stddev_s": 0.008544987380469994,
-      "speedup": 53.594086147959835
+      "murphy_mean_s": 0.024623148628888897,
+      "murphy_stddev_s": 0.0014376748057080013,
+      "rubocop_mean_s": 1.24065455614,
+      "rubocop_stddev_s": 0.020515207442009447,
+      "speedup": 50.385699036248056
     }
   }
 }
