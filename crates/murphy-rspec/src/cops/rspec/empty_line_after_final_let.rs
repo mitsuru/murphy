@@ -15,13 +15,14 @@
 //!   `block_pass` send form) and applies
 //!   `EmptyLineSeparation#missing_separating_line_offense` to it. A
 //!   trailing `let` that is not the last child flags when the line after
-//!   its final `end` / `}` is not blank. The offense range is the final
-//!   line's content (`offending_loc`), rebuilt here from the `let` range
-//!   end line trimmed of leading whitespace. Detection is at parity for
-//!   the common shapes; comment / `rubocop:enable` directive skipping,
-//!   heredoc-aware `FinalEndLocation`, and `Numblock` handling are not
-//!   ported in this batch (status: partial, autocorrect as gap — upstream
-//!   inserts `\n`).
+//!   its final `end` / `}` / heredoc-end is not blank (`FinalEndLocation`:
+//!   the max over the `let` end and FIFO-paired `HeredocEnd` labels for
+//!   openers inside the `let`). The offense range is the final line's
+//!   content (`offending_loc`), rebuilt here from the final end line trimmed
+//!   of leading whitespace. Detection is at parity for the common shapes;
+//!   comment / `rubocop:enable` directive skipping and `Numblock` handling
+//!   are not ported in this batch (status: partial, autocorrect as gap —
+//!   upstream inserts `\n`).
 //! ```
 //!
 //! ## Matched shapes
@@ -40,7 +41,7 @@
 //!
 //! Upstream inserts a newline after the offense. This batch reports only.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, SourceTokenKind, cop};
 
 use crate::cops::rspec_helpers::{is_example_group_name, is_rspec_or_bare_receiver};
 
@@ -183,20 +184,55 @@ fn is_last_child(cx: &Cx<'_>, node: NodeId) -> bool {
     children.last() == Some(&node)
 }
 
-/// `true` when the source line immediately after the node's end line is
-/// blank (empty or whitespace-only) or the node ends at EOF.
-fn has_blank_line_after(cx: &Cx<'_>, node: NodeId) -> bool {
+/// 0-based line index of the node's final end (`FinalEndLocation`):
+/// max over the `let` range end and FIFO-paired `HeredocEnd` labels for
+/// `HeredocStart` openers inside the `let` (same pairing as
+/// `Layout/BlockEndNewline`). Falls back to the range-end line when no
+/// heredoc opener is present (murphy-bjrg.5: heredoc `let(:html) { <<~HTML }`
+/// ends at the `HTML` label line, not the opener line).
+fn final_end_line_idx(cx: &Cx<'_>, node: NodeId) -> usize {
     let range = cx.range(node);
     let src = cx.source();
     let bytes = src.as_bytes();
     let Ok(end) = usize::try_from(range.end) else {
-        return false;
+        return 0;
     };
-    if end >= bytes.len() {
-        return true;
+    let mut idx = line_of_offset(bytes, end.saturating_sub(1));
+    let toks = cx.sorted_tokens();
+    let openers: Vec<_> = toks
+        .iter()
+        .filter(|t| {
+            t.kind == SourceTokenKind::HeredocStart
+                && t.range.start >= range.start
+                && t.range.end <= range.end
+        })
+        .collect();
+    for opener in openers {
+        let opener_index = toks
+            .iter()
+            .filter(|t| t.kind == SourceTokenKind::HeredocStart)
+            .take_while(|t| t.range.start < opener.range.start)
+            .count();
+        if let Some(term) = toks
+            .iter()
+            .filter(|t| t.kind == SourceTokenKind::HeredocEnd)
+            .nth(opener_index)
+        {
+            let term_idx = line_of_offset(bytes, term.range.start as usize);
+            if term_idx > idx {
+                idx = term_idx;
+            }
+        }
     }
+    idx
+}
+
+/// `true` when the source line immediately after the node's final end line
+/// (heredoc-aware) is blank (empty or whitespace-only) or the node ends at EOF.
+fn has_blank_line_after(cx: &Cx<'_>, node: NodeId) -> bool {
+    let src = cx.source();
     let raw: Vec<&str> = src.split('\n').collect();
-    let containing = line_of_offset(bytes, end);
+    let containing = final_end_line_idx(cx, node);
     let next_idx = containing + 1;
     if next_idx >= raw.len() {
         return true;
@@ -213,18 +249,14 @@ fn line_of_offset(bytes: &[u8], offset: usize) -> usize {
 }
 
 /// Range of the node's final line content, trimmed of leading whitespace
-/// — mirrors `EmptyLineSeparation#offending_loc`.
+/// — mirrors `EmptyLineSeparation#offending_loc` (heredoc-aware: the
+/// `HTML` label line for heredoc `let`, not the opener line).
 fn final_line_content_range(
     cx: &Cx<'_>,
     node: NodeId,
 ) -> Option<murphy_plugin_api::Range> {
-    let range = cx.range(node);
     let src = cx.source();
-    let bytes = src.as_bytes();
-    let Ok(end) = usize::try_from(range.end) else {
-        return None;
-    };
-    let line_idx = line_of_offset(bytes, end.saturating_sub(1));
+    let line_idx = final_end_line_idx(cx, node);
     let mut offset = 0usize;
     let raw: Vec<&str> = src.split('\n').collect();
     if line_idx >= raw.len() {
@@ -308,6 +340,52 @@ mod tests {
                 it 'x' do
                   let(:foo) { bar }
                   foo
+                end
+            "#});
+    }
+
+    // ── Heredoc-aware final end (murphy-bjrg.5) ──────────────────────────
+    // Mastodon `spec/lib/link_details_extractor_spec.rb`: 10 FPs, all
+    // `let(:html) { <<~HTML }` + heredoc body + `HTML` + blank + example.
+    // Upstream `FinalEndLocation` ends at the `HTML` label line, so the
+    // blank after it satisfies the cop. Verified vs rubocop 1.91.0
+    // full-config (TargetRubyVersion 3.3): 0 offenses.
+
+    #[test]
+    fn does_not_flag_heredoc_let_with_blank_after_end_label() {
+        test::<EmptyLineAfterFinalLet>().expect_no_offenses(indoc! {r#"
+                describe 'x' do
+                  let(:html) { <<~HTML }
+                    hello
+                  HTML
+
+                  it { does_something }
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_missing_blank_after_heredoc_end_label() {
+        test::<EmptyLineAfterFinalLet>().expect_offense(indoc! {r#"
+                describe 'x' do
+                  let(:html) { <<~HTML }
+                    hello
+                  HTML
+                  ^^^^ Add an empty line after the last `let`.
+                  it { does_something }
+                end
+            "#});
+    }
+
+    #[test]
+    fn does_not_flag_do_end_let_with_blank() {
+        test::<EmptyLineAfterFinalLet>().expect_no_offenses(indoc! {r#"
+                describe 'x' do
+                  let(:ld_json) do
+                    { a: 1 }.to_json
+                  end
+
+                  it { does_something }
                 end
             "#});
     }

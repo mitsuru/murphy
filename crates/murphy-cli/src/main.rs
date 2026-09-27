@@ -987,6 +987,8 @@ enum InlineDirectiveKind {
     Disable,
     Enable,
     Todo,
+    DisableNext,
+    TodoNext,
 }
 
 #[derive(Debug, Clone)]
@@ -1007,6 +1009,13 @@ struct DirectiveState {
     enabled_exceptions: BTreeSet<String>,
     todo_all: bool,
     todo_cops: BTreeSet<String>,
+    /// Next-line suppression from a full-line `# rubocop:disable-next` /
+    /// `# rubocop:todo-next` on the immediately preceding line. `next_all`
+    /// covers a bare directive (or `all`); otherwise `next_cops` lists the
+    /// suppressed cops (slashless entries match whole departments, mirroring
+    /// `cop_set_matches`). Only the next line is affected (murphy-bjrg.5).
+    next_all: bool,
+    next_cops: BTreeSet<String>,
     line_start: usize,
     line_end: usize,
 }
@@ -1045,15 +1054,31 @@ fn parse_inline_directive(comment_src: &str) -> Option<InlineDirective> {
     let (keyword, tail) = rest
         .split_once(char::is_whitespace)
         .map_or((rest, ""), |(keyword, tail)| (keyword, tail));
+    // `push`/`pop`/`next`/`enable-next` parse as directives for
+    // `Lint/CopDirectiveSyntax` validation but carry no suppression here yet
+    // (murphy-bjrg.5 scoped the engine to the modes Mastodon uses); an
+    // unrecognised mode returns `None` and suppresses nothing.
     let kind = match keyword {
         "disable" => InlineDirectiveKind::Disable,
         "enable" => InlineDirectiveKind::Enable,
         "todo" => InlineDirectiveKind::Todo,
+        "disable-next" => InlineDirectiveKind::DisableNext,
+        "todo-next" => InlineDirectiveKind::TodoNext,
         _ => return None,
     };
     // The cop list ends at a `-- reason` suffix; an empty list or `all` means
-    // every cop.
+    // every cop — except for the `-next` modes, where a bare directive (no
+    // list, no `all`) is malformed upstream ("cop name is missing",
+    // `Lint/CopDirectiveSyntax`) and suppresses nothing. Return `None` for
+    // those so the malformed directive never silences the next line.
     let cops_text = tail.split_once("--").map_or(tail, |(cops, _)| cops).trim();
+    if matches!(
+        kind,
+        InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext
+    ) && cops_text.is_empty()
+    {
+        return None;
+    }
     let cops = if cops_text.is_empty() || cops_text.eq_ignore_ascii_case("all") {
         Vec::new()
     } else {
@@ -1072,6 +1097,10 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
     let mut disable_all = false;
     let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
     let mut enabled_exceptions: BTreeSet<String> = BTreeSet::new();
+    // Pending next-line suppression set by a full-line `disable-next` /
+    // `todo-next` on the previous line; applied to exactly one line.
+    let mut pending_next_all = false;
+    let mut pending_next_cops: BTreeSet<String> = BTreeSet::new();
 
     let mut offset = 0usize;
     for line in source.split_inclusive('\n') {
@@ -1079,6 +1108,8 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
         let line_end = offset + line.len();
         let mut todo_all = false;
         let mut todo_cops: BTreeSet<String> = BTreeSet::new();
+        let next_all = std::mem::replace(&mut pending_next_all, false);
+        let next_cops = std::mem::take(&mut pending_next_cops);
 
         // Only a real comment token on this line can carry a directive — a `#`
         // inside a string/heredoc is not a comment and must be ignored.
@@ -1139,6 +1170,18 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
                 (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, false, false) => {
                     todo_cops.extend(directive.cops);
                 }
+                // A full-line `disable-next`/`todo-next` suppresses its cops on
+                // the immediately following line only (RuboCop next-statement
+                // scope, line-granular). A trailing one (code before the `#`)
+                // attaches to nothing and is ignored, mirroring RuboCop's
+                // comment-only-line requirement.
+                (InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext, true, true) => {
+                    pending_next_all = true;
+                }
+                (InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext, true, false) => {
+                    pending_next_cops.extend(directive.cops);
+                }
+                (InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext, false, _) => {}
             }
         }
 
@@ -1148,6 +1191,8 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
             enabled_exceptions: enabled_exceptions.clone(),
             todo_all,
             todo_cops,
+            next_all,
+            next_cops,
             line_start,
             line_end,
         });
@@ -1189,7 +1234,9 @@ fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
             return blanket_disabled
                 || cop_set_matches(&state.disabled_cops, &offense.cop_name)
                 || state.todo_all
-                || cop_set_matches(&state.todo_cops, &offense.cop_name);
+                || cop_set_matches(&state.todo_cops, &offense.cop_name)
+                || state.next_all
+                || cop_set_matches(&state.next_cops, &offense.cop_name);
         }
     }
     false
