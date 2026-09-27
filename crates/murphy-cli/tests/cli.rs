@@ -611,6 +611,118 @@ fn lint_todo_next_suppresses_next_line() {
         .stdout("[]\n");
 }
 
+/// A full-line `disable-next` scopes to the whole next STATEMENT, not just
+/// the next line (RuboCop 1.91 next-statement scope, murphy-bjrg.6): the
+/// `debugger` inside the `def` is suppressed. Mastodon shape:
+/// `push_notification_worker_spec.rb` carries
+/// `# rubocop:disable-next RSpec/SubjectStub` above an `it` block whose
+/// `allow(subject)` sits lines deeper.
+#[test]
+fn lint_disable_next_suppresses_whole_statement() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("stmt_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next Lint/Debugger\ndef foo\n  debugger\nend\n",
+    )
+    .expect("write stmt_next.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// The statement scope ends where the statement ends: a second `debugger`
+/// after the `def` still flags (verified vs rubocop 1.91.0).
+#[test]
+fn lint_disable_next_scope_ends_with_statement() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("stmt_end.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next Lint/Debugger\ndef foo\n  debugger\nend\ndebugger\n",
+    )
+    .expect("write stmt_end.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "only the post-statement debugger must flag, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
+}
+
+/// A blank line between the directive and the code detaches it (suppresses
+/// nothing), mirroring RuboCop 1.91 `attached_code_line`.
+#[test]
+fn lint_disable_next_blank_line_detaches() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("blank_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next Lint/Debugger\n\ndebugger\n",
+    )
+    .expect("write blank_next.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "a blank-detached disable-next must suppress nothing, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
+}
+
+/// Comment-only lines between the directive and the code chain (stacked
+/// directives share the target), mirroring RuboCop 1.91.
+#[test]
+fn lint_disable_next_chains_through_comment_lines() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("chain_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next Lint/Debugger\n# a plain comment\ndebugger\n",
+    )
+    .expect("write chain_next.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
 /// A department directive must NOT suppress cops in a different department:
 /// `# rubocop:disable Lint` leaves a `Style/*` offense reported.
 #[test]

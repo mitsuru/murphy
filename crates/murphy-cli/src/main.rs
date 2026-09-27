@@ -41,7 +41,7 @@ mod since;
 mod watch;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use murphy_ast::content_hash;
+use murphy_ast::{Ast, NodeId, NodeKind, content_hash};
 use murphy_cache::{Cache, ResultCache};
 #[cfg(feature = "mruby-user-cops")]
 use murphy_core::{AstContext, run_mruby_cop_isolated};
@@ -752,7 +752,7 @@ fn lint_source(
     config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
-    let (mut offenses, comments) = match parse_with_cache(source, file, cache) {
+    match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
@@ -772,21 +772,17 @@ fn lint_source(
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
-            (offenses, comment_ranges(ast.sorted_tokens()))
+            let comments = comment_ranges(ast.sorted_tokens());
+            apply_inline_directive_filter(offenses, source, &comments, Some(&ast))
         }
-        Err(err) => (
-            vec![Offense::new(
-                file,
-                SYNTAX_COP_NAME,
-                err.range,
-                Severity::Error,
-                &err.message,
-            )],
-            Vec::new(),
-        ),
-    };
-    offenses = apply_inline_directive_filter(offenses, source, &comments);
-    offenses
+        Err(err) => vec![Offense::new(
+            file,
+            SYNTAX_COP_NAME,
+            err.range,
+            Severity::Error,
+            &err.message,
+        )],
+    }
 }
 
 #[cfg(feature = "mruby-user-cops")]
@@ -941,7 +937,7 @@ fn lint_source_timed(
     let parsed = parse_with_cache(source, file, cache);
     let parse_micros = parse_started.elapsed().as_micros();
     let cops_started = Instant::now();
-    let (offenses, comments) = match parsed {
+    let offenses = match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
@@ -961,22 +957,20 @@ fn lint_source_timed(
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
-            (offenses, comment_ranges(ast.sorted_tokens()))
+            let comments = comment_ranges(ast.sorted_tokens());
+            apply_inline_directive_filter(offenses, source, &comments, Some(&ast))
         }
-        Err(err) => (
-            vec![Offense::new(
-                file,
-                SYNTAX_COP_NAME,
-                err.range,
-                Severity::Error,
-                &err.message,
-            )],
-            Vec::new(),
-        ),
+        Err(err) => vec![Offense::new(
+            file,
+            SYNTAX_COP_NAME,
+            err.range,
+            Severity::Error,
+            &err.message,
+        )],
     };
     let cops_micros = cops_started.elapsed().as_micros();
     TimedOffenses {
-        offenses: apply_inline_directive_filter(offenses, source, &comments),
+        offenses,
         parse_micros,
         cops_micros,
     }
@@ -1092,24 +1086,28 @@ fn parse_inline_directive(comment_src: &str) -> Option<InlineDirective> {
     Some(InlineDirective { kind, cops })
 }
 
-fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveState> {
+fn directive_states_by_line(
+    source: &str,
+    comments: &[Range],
+    ast: Option<&Ast>,
+) -> Vec<DirectiveState> {
     let mut states = Vec::new();
     let mut disable_all = false;
     let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
     let mut enabled_exceptions: BTreeSet<String> = BTreeSet::new();
-    // Pending next-line suppression set by a full-line `disable-next` /
-    // `todo-next` on the previous line; applied to exactly one line.
-    let mut pending_next_all = false;
-    let mut pending_next_cops: BTreeSet<String> = BTreeSet::new();
+    // Full-line `disable-next` / `todo-next` directives collected with their
+    // 1-based line numbers; resolved to statement ranges after the loop
+    // (RuboCop 1.91 next-statement scope, murphy-bjrg.6).
+    let mut next_directives: Vec<(usize, bool, Vec<String>)> = Vec::new();
 
     let mut offset = 0usize;
+    let mut line_no = 0usize;
     for line in source.split_inclusive('\n') {
+        line_no += 1;
         let line_start = offset;
         let line_end = offset + line.len();
         let mut todo_all = false;
         let mut todo_cops: BTreeSet<String> = BTreeSet::new();
-        let next_all = std::mem::replace(&mut pending_next_all, false);
-        let next_cops = std::mem::take(&mut pending_next_cops);
 
         // Only a real comment token on this line can carry a directive — a `#`
         // inside a string/heredoc is not a comment and must be ignored.
@@ -1170,16 +1168,17 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
                 (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, false, false) => {
                     todo_cops.extend(directive.cops);
                 }
-                // A full-line `disable-next`/`todo-next` suppresses its cops on
-                // the immediately following line only (RuboCop next-statement
-                // scope, line-granular). A trailing one (code before the `#`)
-                // attaches to nothing and is ignored, mirroring RuboCop's
-                // comment-only-line requirement.
+                // A full-line `disable-next`/`todo-next` suppresses its cops
+                // over the whole statement starting on the attached code
+                // line (RuboCop 1.91 next-statement scope, murphy-bjrg.6;
+                // resolved to line ranges after the loop). A trailing one
+                // (code before the `#`) attaches to nothing and is ignored,
+                // mirroring RuboCop's comment-only-line requirement.
                 (InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext, true, true) => {
-                    pending_next_all = true;
+                    next_directives.push((line_no, true, Vec::new()));
                 }
                 (InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext, true, false) => {
-                    pending_next_cops.extend(directive.cops);
+                    next_directives.push((line_no, false, directive.cops));
                 }
                 (InlineDirectiveKind::DisableNext | InlineDirectiveKind::TodoNext, false, _) => {}
             }
@@ -1191,15 +1190,152 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
             enabled_exceptions: enabled_exceptions.clone(),
             todo_all,
             todo_cops,
-            next_all,
-            next_cops,
+            next_all: false,
+            next_cops: BTreeSet::new(),
             line_start,
             line_end,
         });
 
         offset = line_end;
     }
+    // Resolve next-statement directives to statement line ranges: the
+    // attached code line is the first non-comment-only line below the
+    // directive (stacked directives share it); a blank line or EOF detaches
+    // (suppresses nothing). The range covers the whole statement starting
+    // on that line, mirroring RuboCop 1.91 `DisableNext`.
+    let starts = line_starts(source);
+    for (dir_line, all, cops) in next_directives {
+        let Some(code_line) = attached_code_line(&starts, source, comments, dir_line) else {
+            continue;
+        };
+        let end_line = statement_end_line(code_line, ast, &starts);
+        let n = states.len();
+        for state in states
+            .iter_mut()
+            .take(end_line.min(n))
+            .skip(code_line.saturating_sub(1))
+        {
+            if all {
+                state.next_all = true;
+            } else {
+                state.next_cops.extend(cops.iter().cloned());
+            }
+        }
+    }
     states
+}
+
+/// Byte offset where each 1-based line starts (`starts[0] == 0`; a
+/// trailing newline opens a final empty line).
+fn line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// 1-based line containing byte `offset`.
+fn line_of(starts: &[usize], offset: usize) -> usize {
+    starts.partition_point(|&s| s <= offset)
+}
+
+/// True when 1-based `line` holds only whitespace.
+fn is_blank_line(source: &str, starts: &[usize], line: usize) -> bool {
+    let Some(&ls) = starts.get(line - 1) else {
+        return true;
+    };
+    let le = starts.get(line).copied().unwrap_or(source.len());
+    source.as_bytes()[ls..le]
+        .iter()
+        .all(u8::is_ascii_whitespace)
+}
+
+/// True when 1-based `line` holds only whitespace plus a real comment token
+/// (a `#` inside a string/heredoc is not a comment and never counts).
+fn is_comment_only_line(source: &str, comments: &[Range], starts: &[usize], line: usize) -> bool {
+    let Some(&ls) = starts.get(line - 1) else {
+        return false;
+    };
+    let le = starts.get(line).copied().unwrap_or(source.len());
+    let Some(first) = comments
+        .iter()
+        .find(|r| (r.start as usize) >= ls && (r.start as usize) < le)
+        .map(|r| r.start as usize)
+    else {
+        return false;
+    };
+    source.as_bytes()[ls..first]
+        .iter()
+        .all(u8::is_ascii_whitespace)
+}
+
+/// The code line a next-statement directive on 1-based `dir_line` attaches
+/// to: comment-only lines chain (stacked directives share the target) while
+/// a blank line or EOF detaches (`None`, suppresses nothing).
+fn attached_code_line(
+    starts: &[usize],
+    source: &str,
+    comments: &[Range],
+    dir_line: usize,
+) -> Option<usize> {
+    let mut line = dir_line + 1;
+    loop {
+        if line > starts.len() {
+            return None;
+        }
+        if is_comment_only_line(source, comments, starts, line) {
+            line += 1;
+            continue;
+        }
+        if is_blank_line(source, starts, line) {
+            return None;
+        }
+        return Some(line);
+    }
+}
+
+/// 1-based end line of the statement starting on 1-based `code_line`: the
+/// largest non-`Begin` AST node starting there, extended over its subtree
+/// (heredoc ends included), mirroring RuboCop 1.91 `statement_bounds_at`.
+/// Without an AST, or when no statement starts there (e.g. a lone `end`),
+/// the scope is that line alone.
+fn statement_end_line(code_line: usize, ast: Option<&Ast>, starts: &[usize]) -> usize {
+    let Some(ast) = ast else {
+        return code_line;
+    };
+    let mut best: Option<(u32, NodeId)> = None;
+    for i in 0..ast.len() {
+        let id = NodeId(i as u32);
+        let range = ast.range(id);
+        if range.start >= range.end {
+            continue;
+        }
+        if line_of(starts, range.start as usize) != code_line {
+            continue;
+        }
+        // `Begin` nodes are statement sequences, not statements (taking one
+        // would scope the directive to the whole sequence).
+        if matches!(ast.kind(id), NodeKind::Begin(_)) {
+            continue;
+        }
+        if best.is_none_or(|(end, _)| range.end > end) {
+            best = Some((range.end, id));
+        }
+    }
+    let Some((_, stmt)) = best else {
+        return code_line;
+    };
+    let mut end = ast.range(stmt).end as usize;
+    for desc in ast.descendants(stmt) {
+        let r = ast.range(desc);
+        if r.start < r.end {
+            end = end.max(r.end as usize);
+        }
+    }
+    line_of(starts, end.saturating_sub(1)).max(code_line)
 }
 
 /// Cops that validate inline directives themselves. RuboCop never lets a
@@ -1259,11 +1395,12 @@ fn apply_inline_directive_filter(
     mut offenses: Vec<Offense>,
     source: &str,
     comments: &[Range],
+    ast: Option<&Ast>,
 ) -> Vec<Offense> {
     if offenses.is_empty() {
         return Vec::new();
     }
-    let states = directive_states_by_line(source, comments);
+    let states = directive_states_by_line(source, comments, ast);
     offenses.retain(|offense| !is_directive_disabled(offense, &states));
     offenses
 }
@@ -1521,6 +1658,7 @@ fn lint_source_profiled(
                     offenses,
                     source,
                     &comment_ranges(ast.sorted_tokens()),
+                    Some(&ast),
                 ),
                 parse_micros,
                 cop_timings: timings

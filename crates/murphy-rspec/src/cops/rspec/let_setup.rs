@@ -24,8 +24,11 @@
 //!   group subtree, so uses in nested groups, hooks, or sibling `let`s
 //!   count, but `self.name` and `name(args)` do not) flags the `let!`
 //!   send per `add_offense(let)` with `Do not use `let!` to setup
-//!   objects not referenced in tests.` Detection is at parity;
-//!   upstream ships no autocorrect and none is added here.
+//!   objects not referenced in tests.` A `let!` shadowing an outer group's
+//!   `let!` of the same name is skipped (`overrides_outer_let_bang?`,
+//!   murphy-bjrg.6). Shorthand kwargs (`new(config:)`) count as a use via
+//!   the translator's `ImplicitNode(Call)` → `Send` lowering. Detection is
+//!   at parity; upstream ships no autocorrect and none is added here.
 //! ```
 //!
 //! ## Matched shapes
@@ -73,6 +76,9 @@ impl LetSetup {
             return;
         }
         for (send, name) in scoped_let_bangs(cx, node) {
+            if overrides_outer_let_bang(cx, node, &name) {
+                continue;
+            }
             if is_called(cx, node, &name) {
                 continue;
             }
@@ -193,6 +199,22 @@ fn is_example_name(name: &str) -> bool {
             | "skip"
             | "pending"
     )
+}
+
+/// Mirrors `overrides_outer_let_bang?` (verified vs rubocop-rspec 3.10.2):
+/// a `let!` that redefines an outer investigated group's `let!` of the same
+/// name is never reported (the shadowing definition is setup for the nested
+/// scope, e.g. Mastodon murphy-bjrg.6 `create_spec.rb` nested
+/// `let!(:status)`). Only outer `let!` definitions count (`outer_let_bang?`
+/// reuses the `let_bang` matcher, so plain `let` never shields).
+fn overrides_outer_let_bang(cx: &Cx<'_>, group: NodeId, name: &str) -> bool {
+    cx.ancestors(group).any(|anc| {
+        let NodeKind::Block { call, .. } = *cx.kind(anc) else {
+            return false;
+        };
+        is_investigated_group(cx, call)
+            && scoped_let_bangs(cx, anc).iter().any(|(_, n)| n == name)
+    })
 }
 
 /// The `(send, name)` pair when `id` is a `let_bang` node, else `None`.
@@ -403,6 +425,72 @@ mod tests {
                   ^^^^^^^^^^^^^ Do not use `let!` to setup objects not referenced in tests.
                   it 'counts' do
                     expect(1).to eq(1)
+                  end
+                end
+            "#});
+    }
+
+    #[test]
+    fn does_not_flag_shadowing_outer_let_bang() {
+        // `overrides_outer_let_bang?` (verified vs rubocop-rspec 3.10.2):
+        // the nested `let!(:status)` redefines the outer one, so neither
+        // the inner (unreferenced in its scope) nor the outer (referenced
+        // only in its own `it`, which the shadowing does not disturb)
+        // flags. Mastodon murphy-bjrg.6
+        // `spec/lib/activitypub/activity/create_spec.rb`.
+        test::<LetSetup>().expect_no_offenses(indoc! {r#"
+                describe 'x' do
+                  let!(:status) { create(:status) }
+
+                  it 'keeps the status intact' do
+                    expect(perform).to eq status
+                  end
+
+                  context 'when known' do
+                    let!(:status) { create(:other) }
+
+                    it 'returns nil' do
+                      expect(perform).to be_nil
+                    end
+                  end
+                end
+            "#});
+    }
+
+    #[test]
+    fn does_not_flag_plain_let_shield() {
+        // Only an outer `let!` shields: a nested `let!` over a plain
+        // outer `let` still flags when unreferenced (verified vs
+        // rubocop-rspec 3.10.2).
+        test::<LetSetup>().expect_offense(indoc! {r#"
+                describe 'x' do
+                  let(:widget) { create(:widget) }
+
+                  context 'y' do
+                    let!(:widget) { create(:other) }
+                    ^^^^^^^^^^^^^ Do not use `let!` to setup objects not referenced in tests.
+                    it 'counts' do
+                      expect(1).to eq(1)
+                    end
+                  end
+                end
+            "#});
+    }
+
+    #[test]
+    fn does_not_flag_shorthand_kwarg_use() {
+        // Ruby 3.1 shorthand `new(config:)` reads `config` (parser-gem:
+        // `(pair (sym :config) (send nil :config))`; murphy-bjrg.6 lowers
+        // prism's `ImplicitNode(Call)` to that shape). Mastodon
+        // murphy-bjrg.6 `spec/lib/vite/dev_server_spec.rb`.
+        test::<LetSetup>().expect_no_offenses(indoc! {r#"
+                describe 'x' do
+                  subject { described_class.new(config:) }
+
+                  let!(:config) { make_config }
+
+                  it 'runs' do
+                    expect(subject.running?).to be(true)
                   end
                 end
             "#});

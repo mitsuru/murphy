@@ -17,7 +17,7 @@ pub use translate::translate;
 /// **`NodeKind` の variant 追加・削除・並べ替えに伴って必ず bump。**
 /// バイナリ形式そのものを変える場合は代わりに
 /// [`murphy_ast::FORMAT_VERSION`] を bump する。
-pub const LAYER_VERSION: u32 = 9;
+pub const LAYER_VERSION: u32 = 10;
 
 #[cfg(test)]
 mod lib_tests {
@@ -29,7 +29,9 @@ mod lib_tests {
         // mapping change so cache invalidation kicks in. Bumped to 6 when
         // parenthesized patterns started using pattern-context lowering, to 7
         // for UndefNode, to 8 for constant-path op-assignments and destructured
-        // parameters, and to 9 for block-local parameters and ShareableConstantNode.
-        assert_eq!(LAYER_VERSION, 9);
+        // parameters, to 9 for block-local parameters and ShareableConstantNode,
+        // and to 10 for expression-position shorthand-kwarg `ImplicitNode(Call)`
+        // lowering to `Send` (murphy-bjrg.6).
+        assert_eq!(LAYER_VERSION, 10);
     }
 }

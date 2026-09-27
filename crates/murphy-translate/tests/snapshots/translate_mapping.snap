@@ -2,7 +2,7 @@
 # Regenerate with: BLESS=1 cargo test -p murphy-translate --test layer_version_gate
 # When prism->NodeKind mapping changes: bump murphy_translate::LAYER_VERSION
 # in crates/murphy-translate/src/lib.rs, then re-bless and commit both.
-LAYER_VERSION=9
+LAYER_VERSION=10
 ---
 case: nil_literal
 source: "nil"
