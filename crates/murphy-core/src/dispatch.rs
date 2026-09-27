@@ -292,11 +292,14 @@ pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
     run_cops_with_options(ast, cops, sink, |_| b"{}".to_vec());
 }
 
-pub fn run_cops_with_options(
+/// The callback can return owned JSON (`Vec<u8>`) or borrowed precomputed
+/// bytes (`&[u8]`). The dispatcher holds each value through that cop's last
+/// callback, so `CxRaw::options_json` never outlives its backing bytes.
+pub fn run_cops_with_options<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) {
     // Default context: this option-only entry point carries no resolved config;
     // the native SymbolProc consumer reaches the flag via the cli path that
@@ -304,7 +307,7 @@ pub fn run_cops_with_options(
     run_cops_with_options_and_context(ast, cops, sink, AllCopsContext::default(), &[], options_for);
 }
 
-pub fn run_cops_with_options_and_context(
+pub fn run_cops_with_options_and_context<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
@@ -314,7 +317,7 @@ pub fn run_cops_with_options_and_context(
     // `Copy`/`Default` `AllCopsContext`, which a `&[RawSlice]` would burden with
     // a lifetime parameter. Bundle here if the positional list grows further.
     config_disabled_cops: &[RawSlice],
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) {
     run_cops_with_options_and_context_and_schema(
         ast,
@@ -332,14 +335,14 @@ pub fn run_cops_with_options_and_context(
 /// (murphy-s0vb). `rails_schema_json` is the host-serialized
 /// [`murphy_plugin_api::RailsSchema`] (`{"tables":[...]}`), empty when no
 /// schema file was found; the caller keeps it alive for the call.
-pub fn run_cops_with_options_and_context_and_schema(
+pub fn run_cops_with_options_and_context_and_schema<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
     ctx: AllCopsContext,
     config_disabled_cops: &[RawSlice],
     rails_schema_json: &str,
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) {
     run_cops_with_options_context_and_diagnostics_and_schema(
         ast,
@@ -367,7 +370,7 @@ pub fn run_cops_with_options_and_context_and_schema(
 /// [`run_cops_with_options_context_and_diagnostics_timed`]; the CLI's
 /// `--profile` path (Phase 9 B6) aggregates these into the cop x file matrix.
 /// The span covers the cop's full dispatch loop over its matched nodes plus
-/// its per-cop `options_json` build. The shared arena index / `CxRaw` setup
+/// its per-cop options lookup. The shared arena index / `CxRaw` setup
 /// is unattributed, so per-cop numbers sum to slightly less than the file's
 /// total dispatch wall time (same accounting as `--debug` totals).
 pub struct CopTiming {
@@ -377,7 +380,7 @@ pub struct CopTiming {
     pub wall_micros: u64,
 }
 
-pub fn run_cops_with_options_context_and_diagnostics(
+pub fn run_cops_with_options_context_and_diagnostics<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
@@ -386,7 +389,7 @@ pub fn run_cops_with_options_context_and_diagnostics(
     // borrowed param.
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) {
     run_cops_with_options_context_and_diagnostics_and_schema(
         ast,
@@ -404,7 +407,7 @@ pub fn run_cops_with_options_context_and_diagnostics(
 /// [`run_cops_with_options_context_and_diagnostics`] plus a Rails
 /// `db/schema.rb` view (murphy-s0vb). See
 /// [`run_cops_with_options_and_context_and_schema`] for the wire contract.
-pub fn run_cops_with_options_context_and_diagnostics_and_schema(
+pub fn run_cops_with_options_context_and_diagnostics_and_schema<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
@@ -412,7 +415,7 @@ pub fn run_cops_with_options_context_and_diagnostics_and_schema(
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
     rails_schema_json: &str,
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) {
     run_cops_inner(
         ast,
@@ -436,7 +439,7 @@ pub fn run_cops_with_options_context_and_diagnostics_and_schema(
 /// above delegates to the same inner loop with timing disabled, so there is
 /// exactly one dispatch implementation and no behavior drift between
 /// profiled and normal runs.
-pub fn run_cops_with_options_context_and_diagnostics_timed(
+pub fn run_cops_with_options_context_and_diagnostics_timed<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
@@ -445,7 +448,7 @@ pub fn run_cops_with_options_context_and_diagnostics_timed(
     // borrowed param.
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) -> Vec<CopTiming> {
     run_cops_with_options_context_and_diagnostics_timed_and_schema(
         ast,
@@ -462,7 +465,7 @@ pub fn run_cops_with_options_context_and_diagnostics_timed(
 #[allow(clippy::too_many_arguments)]
 /// Timed variant plus a Rails `db/schema.rb` view (murphy-s0vb). See
 /// [`run_cops_with_options_and_context_and_schema`] for the wire contract.
-pub fn run_cops_with_options_context_and_diagnostics_timed_and_schema(
+pub fn run_cops_with_options_context_and_diagnostics_timed_and_schema<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
@@ -470,7 +473,7 @@ pub fn run_cops_with_options_context_and_diagnostics_timed_and_schema(
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
     rails_schema_json: &str,
-    options_for: impl FnMut(&str) -> Vec<u8>,
+    options_for: impl FnMut(&str) -> O,
 ) -> Vec<CopTiming> {
     let mut timings = Vec::with_capacity(cops.len());
     run_cops_inner(
@@ -508,7 +511,7 @@ fn push_cop_timing(
 // out-param; bundling into a params struct would churn every dispatch caller
 // for no behavior gain.
 #[allow(clippy::too_many_arguments)]
-fn run_cops_inner(
+fn run_cops_inner<O: AsRef<[u8]>>(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
@@ -518,7 +521,7 @@ fn run_cops_inner(
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[OwnedParseDiagnostic],
     rails_schema_json: &str,
-    mut options_for: impl FnMut(&str) -> Vec<u8>,
+    mut options_for: impl FnMut(&str) -> O,
     mut timings: Option<&mut Vec<CopTiming>>,
 ) {
     let var_model = VarSemanticModel::build(ast);
@@ -555,10 +558,12 @@ fn run_cops_inner(
         // Zero-cost when untimed: no `Instant::now` unless the caller asked
         // for timings (`--profile`).
         let cop_started = timings.is_some().then(Instant::now);
+        // Keep the returned owner/borrow alive for every dispatch of this cop.
         let options_json = options_for(name);
+        let options_bytes = options_json.as_ref();
         base.options_json = RawSlice {
-            ptr: options_json.as_ptr(),
-            len: options_json.len(),
+            ptr: options_bytes.as_ptr(),
+            len: options_bytes.len(),
         };
         // Per-cop kind list. **Empty `KINDS` means file-visit**: the cop
         // is invoked exactly once with `ast.root()` instead of being
@@ -1615,6 +1620,54 @@ mod tests {
                 ("Test/OptionsB".to_string(), r#"{"style":"b"}"#.to_string()),
             ],
         );
+    }
+
+    static BORROWED_OPTION_PTR: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn borrowed_options_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let options = unsafe { &(*cx).options_json };
+        assert_eq!(
+            unsafe { options.as_bytes() },
+            br#"{"EnforcedStyle":"single_quotes"}"#
+        );
+        BORROWED_OPTION_PTR.store(options.ptr as usize, Ordering::SeqCst);
+        0
+    }
+
+    static BORROWED_OPTIONS_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/BorrowedOptions"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        maximum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: borrowed_options_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_borrows_precomputed_option_bytes_without_copying() {
+        let mut b = AstBuilder::new("nil", "t.rb");
+        let n = b.push(NodeKind::Nil, murphy_ast::Range { start: 0, end: 3 });
+        let ast = b.finish(n);
+        let options = br#"{"EnforcedStyle":"single_quotes"}"#.to_vec();
+        for _ in 0..2 {
+            let mut sink = OffenseSink::new("t.rb");
+            run_cops_with_options(&ast, &[&BORROWED_OPTIONS_COP], &mut sink, |_| {
+                options.as_slice()
+            });
+            assert_eq!(
+                BORROWED_OPTION_PTR.load(Ordering::SeqCst),
+                options.as_ptr() as usize
+            );
+        }
     }
 
     // (5) A cop whose dispatch returns non-zero is disabled for the rest of

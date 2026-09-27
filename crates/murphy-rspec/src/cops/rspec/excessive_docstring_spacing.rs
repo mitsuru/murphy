@@ -39,6 +39,8 @@
 //!
 //! Upstream collapses whitespace. This batch reports only.
 
+use std::sync::LazyLock;
+
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, regex::Regex};
 
 use crate::cops::rspec_helpers::is_rspec_or_bare_receiver;
@@ -174,16 +176,38 @@ fn dstr_text(cx: &Cx<'_>, node: NodeId) -> String {
     }
 }
 
+static EXCESSIVE_WHITESPACE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\A[[:blank:]]|[[:blank:]]\z|[^[[:space:]]][[:blank:]]{2,}[^[[:blank:]]]")
+        .expect("valid whitespace regex")
+});
+
 fn has_excessive_whitespace(text: &str) -> bool {
-    let re = Regex::new(r"\A[[:blank:]]|[[:blank:]]\z|[^[[:space:]]][[:blank:]]{2,}[^[[:blank:]]]")
-        .expect("valid whitespace regex");
-    re.is_match(text)
+    EXCESSIVE_WHITESPACE_REGEX.is_match(text)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ExcessiveDocstringSpacing;
+    use super::{ExcessiveDocstringSpacing, has_excessive_whitespace};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn whitespace_regex_preserves_blank_boundaries_and_runs() {
+        let cases = [
+            (" leading", true),
+            ("trailing\t", true),
+            ("two  spaces", true),
+            ("mixed \tblanks", true),
+            ("single space", false),
+            ("single\tblank", false),
+            ("clean", false),
+            ("", false),
+        ];
+        for _ in 0..2 {
+            for (description, expected) in cases {
+                assert_eq!(has_excessive_whitespace(description), expected, "{description:?}");
+            }
+        }
+    }
 
     #[test]
     fn flags_leading_trailing_double() {

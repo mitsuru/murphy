@@ -44,6 +44,8 @@
 //! Upstream rewrites the docstring (`Wording#rewrite`, `CustomTransform`).
 //! This batch reports only.
 
+use std::sync::LazyLock;
+
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, regex::Regex};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
@@ -132,22 +134,29 @@ impl ExampleWording {
     }
 }
 
+// Upstream match order remains should, will, it, then insufficient.
+static SHOULD_PREFIX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\Ashould(?:n't|n’t)?\b").expect("valid should regex")
+});
+static WILL_PREFIX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\A(?:will|won't|won’t)\b").expect("valid will regex")
+});
+static IT_PREFIX_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\Ait ").expect("valid it regex"));
+
 fn matches_should(text: &str) -> bool {
     // /\Ashould(?:n't|n’t)?\b/i — ASCII + curly apostrophe.
-    let re = Regex::new(r"(?i)\Ashould(?:n't|n’t)?\b").expect("valid should regex");
-    re.is_match(text)
+    SHOULD_PREFIX_REGEX.is_match(text)
 }
 
 fn matches_will(text: &str) -> bool {
     // /\A(?:will|won't|won’t)\b/i
-    let re = Regex::new(r"(?i)\A(?:will|won't|won’t)\b").expect("valid will regex");
-    re.is_match(text)
+    WILL_PREFIX_REGEX.is_match(text)
 }
 
 fn matches_it(text: &str) -> bool {
     // /\Ait /i
-    let re = Regex::new(r"(?i)\Ait ").expect("valid it regex");
-    re.is_match(text)
+    IT_PREFIX_REGEX.is_match(text)
 }
 
 fn preprocess(s: &str) -> String {
@@ -166,8 +175,43 @@ fn is_insufficient(text: &str, opts: &ExampleWordingOptions) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ExampleWording;
+    use super::{ExampleWording, matches_it, matches_should, matches_will};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn prefix_regexes_preserve_case_apostrophes_and_boundaries() {
+        for _ in 0..2 {
+            assert!(matches_should("SHOULD do x"));
+            assert!(matches_should("shouldn't do x"));
+            assert!(matches_should("shouldn’t do x"));
+            assert!(!matches_should("shoulder"));
+            assert!(!matches_should("not should"));
+            assert!(matches_will("WILL do x"));
+            assert!(matches_will("won't do x"));
+            assert!(matches_will("won’t do x"));
+            assert!(!matches_will("willow"));
+            assert!(!matches_will("not will"));
+            assert!(matches_it("IT does things"));
+            assert!(!matches_it("itself"));
+            assert!(!matches_it("it\tdoes things"));
+        }
+    }
+
+    #[test]
+    fn should_takes_precedence_over_will_it_and_insufficient() {
+        test::<ExampleWording>().expect_offense(indoc! {r#"
+                it 'should will it works' do; end
+                   ^^^^^^^^^^^^^^^^^^^^^^ Do not use should when describing your tests.
+            "#});
+    }
+
+    #[test]
+    fn will_takes_precedence_over_it() {
+        test::<ExampleWording>().expect_offense(indoc! {r#"
+                it 'will it works' do; end
+                   ^^^^^^^^^^^^^^^ Do not use the future tense when describing your tests.
+            "#});
+    }
 
     #[test]
     fn flags_should() {
