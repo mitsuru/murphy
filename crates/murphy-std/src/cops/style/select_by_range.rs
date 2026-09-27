@@ -73,6 +73,9 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop, def
 // `boundary_accepts_csend_hash_new`); the `Block` arm stays hand-rolled.
 def_node_matcher!(env_const, "(const nil? :ENV)");
 def_node_matcher!(hash_new_or_index, "(call (const _ :Hash) {:new :[]} ...)");
+// RuboCop parity: `creates_hash?` block-arm inner `(const _ :Hash)` (any
+// scope) -- true verbatim, predicate-only, byte-identical suppression.
+def_node_matcher!(is_hash_const, "(const _ :Hash)");
 
 const MSG: &str = "Prefer `%<replacement>s` to `%<original_method>s` with a range check.";
 
@@ -230,17 +233,16 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
             matches!(cx.method_name(receiver), Some("to_h" | "to_hash"))
         }
         // `Hash.new { ... }.select { ... }` — the receiver is a block whose
-        // call is `Hash.new` (upstream `creates_hash?` block arm).
+        // call is `Hash.new` (upstream `creates_hash?` block arm
+        // `(block (call (const _ :Hash) :new ...) ...)`).
+        // `(const _ :Hash)` — any scope (bare + `::` + namespaced suppress);
+        // `:new`-only guard stays hand-rolled.
         NodeKind::Block { call, .. } => {
             cx.method_name(call) == Some("new")
-                && cx.call_receiver(call).get().is_some_and(|r| is_const_named(r, "Hash", cx))
+                && cx.call_receiver(call).get().is_some_and(|r| is_hash_const(r, cx))
         }
         _ => false,
     }
-}
-
-fn is_const_named(node: NodeId, name: &str, cx: &Cx<'_>) -> bool {
-    matches!(*cx.kind(node), NodeKind::Const { name: n, .. } if cx.symbol_str(n) == name)
 }
 
 /// Extract `(block_arg_symbol, body_node)` from the block. Returns `None` if
@@ -709,6 +711,41 @@ mod tests {
         // `Send`/`Csend` arms suppress, so it stays suppressed.
         test::<SelectByRange>()
             .expect_no_offenses("Hash&.new.select { |x| x.between?(1, 10) }\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.30): pin the exact node set
+    // the hand-rolled `Block`-arm `is_const_named(r, "Hash")` guard matches,
+    // so the verbatim `(const _ :Hash)` inner refactor can be proven
+    // equivalent. Upstream `creates_hash?` block arm is
+    // `(block (call (const _ :Hash) :new ...) ...)` — `:new`-only, any scope.
+    // `_` covers bare + `::` + namespaced (all suppress); `call` covers
+    // `send` + `csend` for the inner `Hash.new` (pinned by
+    // `boundary_accepts_csend_hash_new_block`).
+
+    #[test]
+    fn boundary_accepts_cbase_hash_new_block() {
+        // `::Hash` collapses to scope-less `Const`, so wildcard `_` matches.
+        test::<SelectByRange>().expect_no_offenses(
+            "::Hash.new { |h, k| h[k] = 0 }.select { |x| x.between?(1, 10) }\n",
+        );
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_hash_new_block() {
+        // Upstream `(const _ :Hash)` matches any scope, so `Foo::Hash` still
+        // suppresses.
+        test::<SelectByRange>().expect_no_offenses(
+            "Foo::Hash.new { |h, k| h[k] = 0 }.select { |x| x.between?(1, 10) }\n",
+        );
+    }
+
+    #[test]
+    fn boundary_accepts_csend_hash_new_block() {
+        // `Hash&.new { ... }` inner is `csend`; `call` covers it, so it stays
+        // suppressed.
+        test::<SelectByRange>().expect_no_offenses(
+            "Hash&.new { |h, k| h[k] = 0 }.select { |x| x.between?(1, 10) }\n",
+        );
     }
 }
 

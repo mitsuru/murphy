@@ -27,7 +27,18 @@
 //!       Downstream `String#<<` calls could raise FrozenError after the correction.
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RedundantFormat` `format_without_additional_args?`
+// inner is `(const {nil? cbase} :Kernel)` (top-level only, send-only). In
+// Murphy `::Kernel` collapses to `Const{scope:None}`: `_` covers bare + `::`
+// + namespaced (all flag, pinned by `boundary_flags_cbase_kernel_format` +
+// `boundary_flags_namespaced_kernel_format`), preserving the current gap vs
+// upstream which would not flag namespaced. Predicate-only, no captures,
+// byte-identical offense emission. `Send`-only dispatch stays hand-rolled
+// (`Kernel&.format` silent, pinned by `boundary_accepts_csend_kernel_format`,
+// matching upstream send-only).
+def_node_matcher!(is_kernel_const, "(const _ :Kernel)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -86,10 +97,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 fn is_nil_or_kernel_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
     match receiver.get() {
         None => true, // nil receiver (implicit call)
-        Some(recv) => {
-            // Kernel or ::Kernel
-            matches!(cx.kind(recv), NodeKind::Const { name, .. } if cx.symbol_str(*name) == "Kernel")
-        }
+        // `(const _ :Kernel)` — any scope (bare + `::` + namespaced flag).
+        Some(recv) => is_kernel_const(recv, cx),
     }
 }
 
@@ -178,6 +187,44 @@ mod tests {
             Kernel.sprintf('hello')
             ^^^^^^^^^^^^^^^^^^^^^^^ Use `'hello'` directly instead of `sprintf`.
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.30): pin the exact node set
+    // the hand-rolled `Const{ name == "Kernel" }` guard (any scope, no scope
+    // check) matches, so the verbatim `(const _ :Kernel)` inner refactor can
+    // be proven equivalent. Upstream `format_without_additional_args?` is
+    // `(send {(const {nil? cbase} :Kernel) nil?} %RESTRICT_ON_SEND ...)`
+    // (top-level only, send-only): `_` preserves the current gap (namespaced
+    // `Foo::Kernel` still flags, pinned by
+    // `boundary_flags_namespaced_kernel_format`). `::Kernel` collapses to
+    // `Const{scope:None}` so `_` covers bare + `::`. Murphy stays send-only
+    // (`Kernel&.format` silent, pinned by `boundary_accepts_csend_kernel_format`,
+    // matching upstream send-only).
+
+    #[test]
+    fn boundary_flags_cbase_kernel_format() {
+        // `::Kernel` collapses to scope-less `Const`, so wildcard `_` matches.
+        test::<RedundantFormat>().expect_offense(indoc! {r#"
+            ::Kernel.format('hello')
+            ^^^^^^^^^^^^^^^^^^^^^^^^ Use `'hello'` directly instead of `format`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_kernel_format() {
+        // Hand-rolled has no scope check, so `Foo::Kernel` still flags
+        // (gap vs upstream top-level-only which would not flag).
+        test::<RedundantFormat>().expect_offense(indoc! {r#"
+            Foo::Kernel.format('hello')
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `'hello'` directly instead of `format`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_csend_kernel_format() {
+        // Murphy is `Send`-only (`#[on_node(kind = "send")]`); `&.` is
+        // `Csend` so it stays silent (matching upstream send-only).
+        test::<RedundantFormat>().expect_no_offenses("Kernel&.format('hello')\n");
     }
 
     // --- Autocorrect ---
