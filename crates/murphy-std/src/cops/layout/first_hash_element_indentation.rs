@@ -110,52 +110,13 @@ impl FirstHashElementIndentation {
         cx: &Cx<'_>,
         options: &FirstHashElementIndentationOptions,
     ) {
-        // Plain hash literal: no surrounding `(` to measure against.
-        check(node, None, cx, options);
-    }
-
-    #[on_node(kind = "send")]
-    fn check_send(
-        &self,
-        node: NodeId,
-        cx: &Cx<'_>,
-        options: &FirstHashElementIndentationOptions,
-    ) {
-        check_call_args(node, cx, options);
-    }
-
-    #[on_node(kind = "csend")]
-    fn check_csend(
-        &self,
-        node: NodeId,
-        cx: &Cx<'_>,
-        options: &FirstHashElementIndentationOptions,
-    ) {
-        check_call_args(node, cx, options);
-    }
-}
-
-/// RuboCop's `each_argument_node(node, :hash)`: for every hash argument whose
-/// `{` shares a line with the call's `(`, check it against that `(` column.
-/// Such hashes are then ignored by `on_hash`.
-fn check_call_args(
-    node: NodeId,
-    cx: &Cx<'_>,
-    options: &FirstHashElementIndentationOptions,
-) {
-    let lparen = cx.loc(node).begin();
-    if lparen == Range::ZERO {
-        return;
-    }
-    for &arg in cx.call_arguments(node) {
-        if !is_braced_hash(arg, cx) {
-            continue;
+        if !is_braced_hash(node, cx) {
+            return;
         }
-        let lbrace_start = cx.range(arg).start;
-        // The `{` must be on the same line as the `(`.
-        if same_line(cx, lparen.start, lbrace_start) {
-            check(arg, Some(lparen.start), cx, options);
-        }
+        // Parenthesized hash arguments use the `(` column for the special
+        // style. Inspect their parent here rather than visiting every call.
+        let left_paren_start = parent_call_left_paren(node, cx);
+        check(node, left_paren_start, cx, options);
     }
 }
 
@@ -181,16 +142,6 @@ fn check(
     cx: &Cx<'_>,
     options: &FirstHashElementIndentationOptions,
 ) {
-    if !is_braced_hash(node, cx) {
-        return;
-    }
-    // When called from `on_hash`, a same-line parenthesized hash is also
-    // covered by `check_call_args`; skip the hash-only pass for those so the
-    // offense is not emitted twice.
-    if left_paren_start.is_none() && covered_by_parent_call(node, cx) {
-        return;
-    }
-
     let node_range = cx.range(node);
     let left_brace_start = node_range.start;
     // `}` is the final byte of the hash's source range.
@@ -218,20 +169,22 @@ fn check(
     );
 }
 
-/// True when `node`'s parent is a call whose `(` is on the same line as the
-/// hash's `{`, meaning `check_call_args` already handles it.
-fn covered_by_parent_call(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(parent) = cx.parent(node).get() else {
-        return false;
-    };
+/// Find the `(` of a parent call only when this hash is its direct argument
+/// and the `(` shares the hash's opening line.
+fn parent_call_left_paren(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    let parent = cx.parent(node).get()?;
     if !cx.call_arguments(parent).contains(&node) {
-        return false;
+        return None;
     }
     let lparen = cx.loc(parent).begin();
     if lparen == Range::ZERO {
-        return false;
+        return None;
     }
-    same_line(cx, lparen.start, cx.range(node).start)
+    if same_line(cx, lparen.start, cx.range(node).start) {
+        Some(lparen.start)
+    } else {
+        None
+    }
 }
 
 /// Check the first key's column against the expected indentation.
