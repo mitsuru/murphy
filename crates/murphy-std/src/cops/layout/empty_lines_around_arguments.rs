@@ -64,7 +64,9 @@ fn check_call(node: NodeId, cx: &Cx<'_>) {
     }
     // `node.single_line?` — the whole call fits on one line.
     let node_range = cx.range(node);
-    if line_of(node_range.start, cx) == line_of(node_range.end.saturating_sub(1), cx) {
+    // Line equality needs only the bytes between the two offsets. Do not
+    // count newlines in the source prefix for every ordinary one-line call.
+    if same_line(node_range.start, node_range.end.saturating_sub(1), cx) {
         return;
     }
     if receiver_and_method_call_on_different_lines(node, cx) {
@@ -99,7 +101,19 @@ fn receiver_and_method_call_on_different_lines(node: NodeId, cx: &Cx<'_>) -> boo
         // is nil, so `receiver.last_line != nil` is always true.
         return true;
     }
-    line_of(cx.range(receiver).end.saturating_sub(1), cx) != line_of(selector.start, cx)
+    !same_line(cx.range(receiver).end.saturating_sub(1), selector.start, cx)
+}
+
+/// Compare line numbers without repeatedly scanning the source prefix.
+/// The end offset is excluded, matching `line_of(end)` (which counts only
+/// newlines strictly before that offset).
+fn same_line(start: u32, end: u32, cx: &Cx<'_>) -> bool {
+    let src = cx.source_bytes();
+    let lo = start.min(end) as usize;
+    let hi = start.max(end) as usize;
+    // `line_of` clamps offsets to the source length. Preserve that behavior
+    // even for a zero-width or overlapping node/receiver range.
+    !src[lo.min(src.len())..hi.min(src.len())].contains(&b'\n')
 }
 
 /// Port of RuboCop's `empty_range_for_starting_point`:
@@ -197,6 +211,39 @@ mod tests {
         let src = "obj&.do_something(\n  foo\n\n)\n";
         let offenses = run_cop::<EmptyLinesAroundArguments>(src);
         assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
+    }
+
+    #[test]
+    fn accepts_single_line_calls_after_crlf_and_utf8_prefix() {
+        test::<EmptyLinesAroundArguments>()
+            .expect_no_offenses("# 日本語\r\nfoo('雪')\r\nfoo(bar)\r\n");
+    }
+
+    #[test]
+    fn corrects_crlf_blank_line_after_utf8_prefix() {
+        let src = "# 日本語\r\nfoo(\r\n  bar\r\n\r\n)\r\n";
+        let result = run_cop_with_edits::<EmptyLinesAroundArguments>(src);
+        assert_eq!(result.offenses.len(), 1);
+        assert_eq!(result.edits.len(), 1);
+        let range = result.edits[0].range;
+        assert_eq!(&src[range.start as usize..range.end as usize], "\r\n");
+        assert_eq!(result.edits[0].replacement, "");
+    }
+
+    #[test]
+    fn nested_single_line_call_does_not_hide_multiline_blank_line() {
+        let src = "outer(inner(雪),\n\n  bar)\n";
+        let result = run_cop_with_edits::<EmptyLinesAroundArguments>(src);
+        assert_eq!(result.offenses.len(), 1);
+        assert_eq!(result.edits.len(), 1);
+        let range = result.edits[0].range;
+        assert_eq!(&src[range.start as usize..range.end as usize], "\n");
+    }
+
+    #[test]
+    fn ignores_receiver_and_selector_on_different_lines() {
+        test::<EmptyLinesAroundArguments>()
+            .expect_no_offenses("obj\n  .foo(\n    bar\n\n  )\n");
     }
 }
 

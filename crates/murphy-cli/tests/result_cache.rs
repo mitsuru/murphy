@@ -186,6 +186,59 @@ fn disabling_cop_via_config_changes_output_no_stale_hit() {
 }
 
 #[test]
+fn scoped_cops_cache_results_per_path() {
+    let proj = tempdir().expect("tempdir");
+    let included = proj.path().join("included.rb");
+    let excluded = proj.path().join("excluded.rb");
+    fs::write(&included, DIRTY).expect("write included");
+    fs::write(&excluded, DIRTY).expect("write excluded");
+    fs::write(
+        proj.path().join(".murphy.yml"),
+        "Lint/Debugger:\n  Include:\n    - '**/included.rb'\n",
+    )
+    .expect("write config");
+    let cache_root = proj.path().join("cache");
+    let run = |no_cache: bool| {
+        let mut cmd = Command::cargo_bin("murphy").expect("builds");
+        cmd.current_dir(proj.path())
+            .env_remove("MURPHY_NO_CACHE")
+            .env("XDG_CACHE_HOME", &cache_root)
+            .args(["lint", "--format", "json"]);
+        if no_cache {
+            cmd.arg("--no-cache");
+        }
+        cmd.args(["included.rb", "excluded.rb"]);
+        cmd.assert().code(1).get_output().stdout.clone()
+    };
+
+    let cold = run(false);
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(&cold).expect("json");
+    assert_eq!(offenses.len(), 1, "scoped cop must inspect only one path");
+    assert_eq!(offenses[0]["file"], "included.rb");
+    let v1 = cache_root.join("murphy").join("v1");
+    assert_eq!(
+        result_files_in(&v1).len(),
+        2,
+        "both paths need cache entries"
+    );
+    assert_eq!(run(false), cold, "warm result must match cold output");
+    assert_eq!(run(true), cold, "cache must not change scoped output");
+
+    // A new content hash for one path must not return its stale offense.
+    fs::write(&included, format!("{DIRTY}debugger\n")).expect("change included source");
+    let changed = run(false);
+    assert_ne!(
+        changed, cold,
+        "changed source must not return a stale result"
+    );
+    assert_eq!(changed, run(true));
+    assert!(
+        result_files_in(&v1).len() >= 3,
+        "changed source gets a new key"
+    );
+}
+
+#[test]
 fn cache_stat_and_clean_work() {
     let dir = tempdir().expect("tempdir");
     let file = dir.path().join("clean.rb");

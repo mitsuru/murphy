@@ -117,7 +117,11 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &FirstArgumentIndentationOptions) {
     let first_arg_start = cx.range(first_arg).start;
 
     // Skip if the call and the first argument share a line.
-    if line_of(cx, node_start) == line_of(cx, first_arg_start) {
+    // Compare only the call-to-argument interval, not both source prefixes.
+    // Offsets are bytes; `line_of` counts `\n` bytes strictly before each.
+    let lo = node_start.min(first_arg_start) as usize;
+    let hi = node_start.max(first_arg_start) as usize;
+    if !cx.source_bytes()[lo..hi].contains(&b'\n') {
         return;
     }
 
@@ -286,7 +290,7 @@ fn line_of(cx: &Cx<'_>, offset: u32) -> usize {
 
 /// True when only whitespace precedes `offset` on its line.
 fn begins_its_line(cx: &Cx<'_>, offset: u32) -> bool {
-    let src = cx.source().as_bytes();
+    let src = cx.source_bytes();
     let mut i = offset as usize;
     while i > 0 {
         match src[i - 1] {
@@ -335,5 +339,47 @@ fn reindent_line(offset: u32, expected_column: usize, cx: &Cx<'_>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod interval_tests {
+    use super::FirstArgumentIndentation;
+    use murphy_plugin_api::test_support::{run_cop_with_edits, test};
+
+    #[test]
+    fn accepts_single_line_calls_after_crlf_and_utf8_prefix() {
+        test::<FirstArgumentIndentation>()
+            .expect_no_offenses("# 日本語\r\nfoo('雪')\r\nfoo(bar)\r\n");
+    }
+
+    #[test]
+    fn corrects_multiline_call_after_utf8_prefix() {
+        let src = "# 日本語\nfoo(\nbar\n)\n";
+        let result = run_cop_with_edits::<FirstArgumentIndentation>(src);
+        assert_eq!(result.offenses.len(), 1);
+        assert_eq!(result.edits.len(), 1);
+        let edit = &result.edits[0];
+        assert_eq!(edit.range.start, "# 日本語\nfoo(\n".len() as u32);
+        assert_eq!(edit.range.start, edit.range.end);
+        assert_eq!(edit.replacement, "  ");
+    }
+
+    #[test]
+    fn corrects_multiline_crlf_call() {
+        let src = "foo(\r\nbar\r\n)\r\n";
+        let result = run_cop_with_edits::<FirstArgumentIndentation>(src);
+        assert_eq!(result.offenses.len(), 1);
+        assert_eq!(result.edits.len(), 1);
+        let edit = &result.edits[0];
+        assert_eq!(edit.range.start, "foo(\r\n".len() as u32);
+        assert_eq!(edit.range.start, edit.range.end);
+        assert_eq!(edit.replacement, "  ");
+    }
+
+    #[test]
+    fn accepts_nested_single_line_call_in_multiline_parent() {
+        test::<FirstArgumentIndentation>()
+            .expect_no_offenses("outer(\n  inner(雪)\n)\n");
+    }
+}
 
 murphy_plugin_api::submit_cop!(FirstArgumentIndentation);
