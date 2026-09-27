@@ -744,12 +744,27 @@ fn rails_schema_json_cached() -> &'static str {
 /// Run every cop in `cops` over `source` (parsed for the given `file`),
 /// applying inline-directive filtering. Syntax errors degrade to a single
 /// `Murphy/Syntax` offense; cops are skipped on a parse failure.
+/// Single-file entry point for the LSP. CLI batches prepare the table once
+/// per session and call `lint_source_with_options` for every file instead.
 fn lint_source(
     source: &str,
     file: &str,
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
+    cache: Option<&Cache>,
+) -> Vec<Offense> {
+    let options = prepare_cop_options(cops, config);
+    lint_source_with_options(source, file, cops, mruby_cops, config, &options, cache)
+}
+
+fn lint_source_with_options(
+    source: &str,
+    file: &str,
+    cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
+    options: &CopOptionsJson,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
     match parse_with_cache(source, file, cache) {
@@ -768,7 +783,7 @@ fn lint_source(
                 config.allcops_context(),
                 &disabled_names,
                 rails_schema_json_cached(),
-                |name| config.cop_options_json(name),
+                |name| cop_options_bytes(options, name),
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
@@ -874,6 +889,27 @@ fn plugin_cop_name(cop: &PluginCopV1) -> &str {
     std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("")
 }
 
+/// Serialized only once per resolved config, after pack defaults are layered.
+/// The map is immutable during parallel file dispatch and fixpoint passes;
+/// file-specific Include/Exclude selection still happens in `scoped_native_cops`.
+type CopOptionsJson = BTreeMap<String, Vec<u8>>;
+
+fn prepare_cop_options(cops: &[&PluginCopV1], config: &MurphyConfig) -> CopOptionsJson {
+    cops.iter()
+        .map(|cop| {
+            let name = plugin_cop_name(cop);
+            (name.to_owned(), config.cop_options_json(name))
+        })
+        .collect()
+}
+
+fn cop_options_bytes<'a>(options: &'a CopOptionsJson, name: &str) -> &'a [u8] {
+    options
+        .get(name)
+        .expect("registry cop must have precomputed options")
+        .as_slice()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FixMode {
     Safe,
@@ -931,6 +967,7 @@ fn lint_source_timed(
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
+    options: &CopOptionsJson,
     cache: Option<&Cache>,
 ) -> TimedOffenses {
     let parse_started = Instant::now();
@@ -953,7 +990,7 @@ fn lint_source_timed(
                 config.allcops_context(),
                 &disabled_names,
                 rails_schema_json_cached(),
-                |name| config.cop_options_json(name),
+                |name| cop_options_bytes(options, name),
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
@@ -1459,9 +1496,10 @@ fn lint_closure_edits<'a>(
     cops: &'a [&'a PluginCopV1],
     mruby_cops: &'a [MrubyCopSource],
     config: &'a MurphyConfig,
+    options: &'a CopOptionsJson,
     cache: Option<&'a Cache>,
 ) -> Vec<murphy_core::Edit> {
-    let offenses = lint_source(source, file, cops, mruby_cops, config, cache);
+    let offenses = lint_source_with_options(source, file, cops, mruby_cops, config, options, cache);
     aggregate_with_config(offenses, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
@@ -1498,6 +1536,7 @@ fn lint_files_memoized(
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
+    options: &CopOptionsJson,
     cache: Option<&Cache>,
     result_cache: Option<&ResultCache>,
 ) -> Vec<Offense> {
@@ -1515,13 +1554,17 @@ fn lint_files_memoized(
                     {
                         return cached;
                     }
-                    let offenses = lint_source(content, path, cops, mruby_cops, config, cache);
+                    let offenses = lint_source_with_options(
+                        content, path, cops, mruby_cops, config, options, cache,
+                    );
                     if let Ok(bytes) = serde_json::to_vec(&offenses) {
                         rc.put(&hash, path, &bytes);
                     }
                     offenses
                 } else {
-                    lint_source(content, path, cops, mruby_cops, config, cache)
+                    lint_source_with_options(
+                        content, path, cops, mruby_cops, config, options, cache,
+                    )
                 }
             })
             .collect();
@@ -1567,7 +1610,15 @@ fn lint_files_memoized(
             // miss path, fan out with `file` rewritten, and populate
             // each miss path's own entry (pre-aggregate, pre-B4).
             let representative = misses[0];
-            let base = lint_source(content, representative, cops, mruby_cops, config, cache);
+            let base = lint_source_with_options(
+                content,
+                representative,
+                cops,
+                mruby_cops,
+                config,
+                options,
+                cache,
+            );
             if let Some(rc) = result_cache {
                 let hash = content_hash(content.as_bytes());
                 for &path in &misses {
@@ -1610,6 +1661,7 @@ fn lint_files_memoized_debug(
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
+    options: &CopOptionsJson,
     cache: Option<&Cache>,
 ) -> (Vec<Offense>, Vec<(String, u128, u128)>) {
     // Debug variant: keep per-file (parse, cops) timings. No memoization
@@ -1618,7 +1670,7 @@ fn lint_files_memoized_debug(
     let mut all: Vec<Offense> = Vec::new();
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
     for (path, content) in sources {
-        let t = lint_source_timed(content, path, cops, mruby_cops, config, cache);
+        let t = lint_source_timed(content, path, cops, mruby_cops, config, options, cache);
         timings.push((path.clone(), t.parse_micros, t.cops_micros));
         all.extend(t.offenses);
     }
@@ -1642,6 +1694,7 @@ fn lint_source_profiled(
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
+    options: &CopOptionsJson,
     cache: Option<&Cache>,
 ) -> ProfiledFile {
     let parse_started = Instant::now();
@@ -1664,7 +1717,7 @@ fn lint_source_profiled(
                 &disabled_names,
                 &[],
                 rails_schema_json_cached(),
-                |name| config.cop_options_json(name),
+                |name| cop_options_bytes(options, name),
             );
             let mut offenses = sink.into_offenses();
             let (mruby_offenses, mruby_timings) =
@@ -1714,6 +1767,7 @@ fn lint_files_profiled(
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
+    options: &CopOptionsJson,
     cache: Option<&Cache>,
 ) -> (Vec<Offense>, ProfileSummary, Vec<(String, u128, u128)>) {
     struct FileProfile {
@@ -1727,7 +1781,7 @@ fn lint_files_profiled(
     let files: Vec<FileProfile> = sources
         .par_iter()
         .map(|(path, content)| {
-            let t = lint_source_profiled(content, path, cops, mruby_cops, config, cache);
+            let t = lint_source_profiled(content, path, cops, mruby_cops, config, options, cache);
             FileProfile {
                 path: path.clone(),
                 offenses: t.offenses,
@@ -2079,6 +2133,7 @@ struct WatchSession {
     mruby_cops: Vec<MrubyCopSource>,
     cache: Option<Cache>,
     result_cache: Option<ResultCache>,
+    options: CopOptionsJson,
 }
 
 /// Load config + registry + caches for `murphy watch` (mirrors the
@@ -2097,6 +2152,7 @@ fn load_watch_session(no_cache: bool, preset: Option<&str>) -> Result<WatchSessi
     let registry = CopRegistry::discover_with_config(Path::new("."), &config, builtin_pack())
         .map_err(|e| AppError::setup(e.to_string()))?;
     config.apply_pack_default_layers(&registry.pack_default_configs());
+    let options = prepare_cop_options(&registry.cops(), &config);
     cops::warn_user_enabled_disabled(&config, &registry);
     #[cfg(feature = "mruby-user-cops")]
     let mruby_cop_sources = load_mruby_cop_sources(registry.mruby_cop_paths())?;
@@ -2125,6 +2181,7 @@ fn load_watch_session(no_cache: bool, preset: Option<&str>) -> Result<WatchSessi
         mruby_cops,
         cache,
         result_cache,
+        options,
     })
 }
 
@@ -2196,6 +2253,7 @@ fn lint_and_print_watch_pass(
         cops,
         &session.mruby_cops,
         &session.config,
+        &session.options,
         session.cache.as_ref(),
         session.result_cache.as_ref(),
     );
@@ -2649,6 +2707,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     // borrowed references stay live across the dispatch + fixpoint loop.
     let cops_vec = registry.cops();
     let cops: &[&PluginCopV1] = &cops_vec;
+    let options = prepare_cop_options(cops, &config);
     #[cfg(feature = "mruby-user-cops")]
     let mruby_cop_sources = load_mruby_cop_sources(registry.mruby_cop_paths())?;
     #[cfg(not(feature = "mruby-user-cops"))]
@@ -2714,7 +2773,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         for (path, source) in &sources_for_lint {
             let outcome = run_to_fixpoint(
                 source,
-                |s| lint_closure_edits(s, path, fix_cops, mruby_cops, &config, cache_ref),
+                |s| lint_closure_edits(s, path, fix_cops, mruby_cops, &config, &options, cache_ref),
                 MAX_FIX_ITERATIONS,
             );
             if outcome.corrected != *source {
@@ -2756,8 +2815,14 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     // cop x file matrix for the stdout profile JSON below.
     let mut profile_summary: Option<ProfileSummary> = None;
     let flat_offenses: Vec<Offense> = if args.profile {
-        let (offenses, summary, timings) =
-            lint_files_profiled(&sources_for_lint, cops, mruby_cops, &config, cache_ref);
+        let (offenses, summary, timings) = lint_files_profiled(
+            &sources_for_lint,
+            cops,
+            mruby_cops,
+            &config,
+            &options,
+            cache_ref,
+        );
         if debug {
             for (path, parse_us, cops_us) in &timings {
                 eprintln!(
@@ -2769,8 +2834,14 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         profile_summary = Some(summary);
         offenses
     } else if debug {
-        let (offenses, timings) =
-            lint_files_memoized_debug(&sources_for_lint, cops, mruby_cops, &config, cache_ref);
+        let (offenses, timings) = lint_files_memoized_debug(
+            &sources_for_lint,
+            cops,
+            mruby_cops,
+            &config,
+            &options,
+            cache_ref,
+        );
         for (path, parse_us, cops_us) in &timings {
             eprintln!(
                 "murphy: debug: lint {} parse_us={} cops_us={}",
@@ -2784,6 +2855,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             cops,
             mruby_cops,
             &config,
+            &options,
             cache_ref,
             result_cache_ref,
         )
@@ -2920,6 +2992,29 @@ mod tests {
     static SAFE_FIX_COP: PluginCopV1 = test_cop("Test/SafeFix", tristate_to_wire(Some(true)));
     static UNSAFE_FIX_COP: PluginCopV1 = test_cop("Test/UnsafeFix", tristate_to_wire(Some(false)));
     static UNSPECIFIED_FIX_COP: PluginCopV1 = test_cop("Test/UnspecifiedFix", TRISTATE_UNSET);
+
+    #[test]
+    fn prepared_cop_options_keep_overrides_and_path_scoping() {
+        let cfg = MurphyConfig::from_yaml_str(
+            "Test/SafeFix:\n  Include: ['spec/**/*.rb']\n  EnforcedStyle: compact\n  MaxLength: 120\n",
+        )
+        .expect("config parses");
+        let cops = [&SAFE_FIX_COP];
+        let options = prepare_cop_options(&cops, &cfg);
+        assert_eq!(
+            cop_options_bytes(&options, "Test/SafeFix"),
+            cfg.cop_options_json("Test/SafeFix")
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_slice(cop_options_bytes(&options, "Test/SafeFix")).unwrap();
+        assert_eq!(parsed["EnforcedStyle"], "compact");
+        assert_eq!(parsed["MaxLength"], 120);
+        assert_eq!(
+            scoped_native_cops(&cops, &cfg, "spec/models/user_spec.rb").len(),
+            1
+        );
+        assert!(scoped_native_cops(&cops, &cfg, "app/models/user.rb").is_empty());
+    }
 
     #[test]
     fn safe_fix_mode_skips_unsafe_autocorrect_cops() {
