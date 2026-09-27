@@ -4,14 +4,16 @@
 //! ```murphy-parity
 //! upstream: rubocop-rails
 //! upstream_cop: Rails/DefaultScope
-//! upstream_version_checked: 2.35.0
+//! upstream_version_checked: 2.38.0
 //! version_added: "0.0"
 //! safe: true
 //! supports_autocorrect: false
 //! status: verified
 //! gap_issues: []
 //! notes: >
-//!   Mirrors rubocop-rails 2.35.0: RESTRICT_ON_SEND [:default_scope] gating,
+//!   Upstream ships `Enabled: false` (opt-in); that default lives in the
+//!   rails pack's bundled `config/default.yml` layer, not in this file.
+//!   Mirrors rubocop-rails 2.38.0: RESTRICT_ON_SEND [:default_scope] gating,
 //!   bare `(send nil? :default_scope ...)` shape with selector-only offense
 //!   range, `defs :default_scope` (singleton `def self.default_scope`) with
 //!   name-only range, and `sclass (self) (def :default_scope ...)` eigenclass

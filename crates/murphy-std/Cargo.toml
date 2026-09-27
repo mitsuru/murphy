@@ -28,6 +28,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # an indentation prefix counts as width 2, not 1. Third-party dep, permitted by
 # the single-surface boundary gate (only Murphy-internal crates are forbidden).
 unicode-width = "0.2"
+# Glob matching for `Naming/FileName` `allowed_camel_case_file?` parity
+# (match the linted path against the baked uppercase Include patterns with
+# the same library the host uses for discovery). Third-party dep, permitted
+# by the single-surface boundary gate.
+globset = "0.4"
 
 [dev-dependencies]
 murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"] }

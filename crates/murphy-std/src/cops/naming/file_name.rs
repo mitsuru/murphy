@@ -93,6 +93,12 @@ pub struct Options {
         description = "Don't report offending filenames for executable scripts (i.e. source files with a shebang in the first line)."
     )]
     pub ignore_executable_scripts: bool,
+    #[option(
+        name = "AllowedCamelCaseIncludePatterns",
+        default = [],
+        description = "Host-baked AllCops:Include patterns containing an uppercase letter (e.g. `**/Gemfile`); a file matching any of them is exempt from the snake_case check (RuboCop `allowed_camel_case_file?`). Absent outside host runs (unit tests, other hosts), where the check is strict."
+    )]
+    pub allowed_camel_case_include_patterns: Vec<String>,
 }
 
 #[cop(
@@ -113,6 +119,17 @@ impl FileName {
         // (e.g. stdin). RuboCop never lints a pathless source, so guard against
         // emitting a nonsense offense on an empty basename.
         if basename.is_empty() {
+            return;
+        }
+
+        // RuboCop `on_new_investigation` pre-checks (in order):
+        // `config.file_to_exclude?` is covered by the host's per-file
+        // `cop_applies_to_file` gate; `config.allowed_camel_case_file?` is
+        // ported here: `.gemspec` files are unconditionally exempt, and a
+        // file matching an uppercase AllCops:Include pattern (host-baked
+        // into `AllowedCamelCaseIncludePatterns`, e.g. `**/Gemfile`) is
+        // exempt — Mastodon's `Gemfile`/`Rakefile` (murphy-bjrg.3).
+        if is_gemspec(basename) || allowed_camel_case_file(file_path, basename, &opts.allowed_camel_case_include_patterns) {
             return;
         }
 
@@ -164,6 +181,36 @@ impl FileName {
         };
         cx.emit_offense(global_offense_range(cx), &message, None);
     }
+}
+
+/// Ruby's `File.extname(file) == '.gemspec'`: the basename has a non-leading
+/// dot and ends with `.gemspec` (`File.extname` is `''` for dotfiles and
+/// extensionless names).
+fn is_gemspec(basename: &str) -> bool {
+    basename
+        .rfind('.')
+        .is_some_and(|dot| dot > 0 && &basename[dot..] == ".gemspec")
+}
+
+/// RuboCop's `allowed_camel_case_file?` (minus the unconditional `.gemspec`
+/// arm above): true when `file_path` (or its basename, covering `./`-prefixed
+/// and bare lint targets) matches any baked uppercase Include pattern.
+/// Invalid patterns never match (mirrors the host's globset convention of
+/// skipping uncompilable patterns).
+fn allowed_camel_case_file(file_path: &str, basename: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        if let Ok(glob) = globset::Glob::new(pattern) {
+            builder.add(glob);
+        }
+    }
+    let Ok(set) = builder.build() else {
+        return false;
+    };
+    set.is_match(file_path) || set.is_match(basename)
 }
 
 /// Last path component of `path`, mirroring Ruby's `File.basename` for the
@@ -624,6 +671,55 @@ mod tests {
                 "#!/usr/bin/env ruby\n\
                  ^ The name of this source file (`BadName.rb`) should use snake_case.\n\
                  x = 1\n",
+            );
+    }
+
+    // --- Mastodon bjrg.3: RuboCop `allowed_camel_case_file?` — a file
+    //     matching an uppercase AllCops:Include entry (e.g. `**/Gemfile`)
+    //     is never flagged, nor is any `.gemspec`. The host bakes those
+    //     patterns into `AllowedCamelCaseIncludePatterns`. ---
+
+    #[test]
+    fn accepts_gemfile_allowed_by_camel_case_include() {
+        test::<FileName>()
+            .with_options(&Options {
+                allowed_camel_case_include_patterns: vec!["**/Gemfile".to_string()],
+                ..Default::default()
+            })
+            .with_file_path("./Gemfile")
+            .expect_no_offenses("source 'https://rubygems.org'\n");
+    }
+
+    #[test]
+    fn accepts_rakefile_allowed_by_camel_case_include() {
+        test::<FileName>()
+            .with_options(&Options {
+                allowed_camel_case_include_patterns: vec![
+                    "**/Gemfile".to_string(),
+                    "**/Rakefile".to_string(),
+                ],
+                ..Default::default()
+            })
+            .with_file_path("Rakefile")
+            .expect_no_offenses("task default: :spec\n");
+    }
+
+    #[test]
+    fn accepts_gemspec_by_extension() {
+        // `File.extname(file) == '.gemspec'` is unconditionally allowed.
+        test::<FileName>()
+            .with_file_path("bundler-console.gemspec")
+            .expect_no_offenses("Gem::Specification.new { }\n");
+    }
+
+    #[test]
+    fn flags_camel_case_without_allowance() {
+        // No baked patterns (non-host context) → strict: still flags.
+        test::<FileName>()
+            .with_file_path("./Gemfile")
+            .expect_offense(
+                "source 'x'\n\
+                 ^ The name of this source file (`Gemfile`) should use snake_case.\n",
             );
     }
 
