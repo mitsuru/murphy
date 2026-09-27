@@ -58,6 +58,8 @@
 //! Upstream ships no autocorrect; renaming the file needs human
 //! judgement.
 
+use std::sync::LazyLock;
+
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, regex::Regex};
 
 use crate::cops::rspec_helpers::{
@@ -266,10 +268,14 @@ fn method_name_pattern(cx: &Cx<'_>, method_name: NodeId, ignore_methods: bool) -
 
 /// `camel_to_snake_case` per upstream's two substitutions, lowercased.
 fn camel_to_snake_case(name: &str) -> String {
-    let step1 = Regex::new(r"([^A-Z])([A-Z]+)").unwrap();
-    let step2 = Regex::new(r"([A-Z])([A-Z][^A-Z\d]+)").unwrap();
-    step2
-        .replace_all(&step1.replace_all(name, "${1}_${2}"), "${1}_${2}")
+    // Constant conversion runs for each namespace component in every spec;
+    // compile its two fixed patterns once, not for each component.
+    static STEP1: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"([^A-Z])([A-Z]+)").unwrap());
+    static STEP2: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][^A-Z\d]+)").unwrap());
+    STEP2
+        .replace_all(&STEP1.replace_all(name, "${1}_${2}"), "${1}_${2}")
         .to_lowercase()
 }
 
@@ -361,6 +367,22 @@ mod tests {
             .with_file_path("foo/bar_baz_spec.rb")
             .expect_no_offenses(indoc! {r#"
                 describe Foo::BarBaz do
+                end
+            "#});
+    }
+
+    #[test]
+    fn preserves_acronyms_and_digits_in_namespaced_paths() {
+        test::<SpecFilePathFormat>()
+            .with_file_path("foo/http_server_spec.rb")
+            .expect_no_offenses(indoc! {r#"
+                describe Foo::HTTPServer do
+                end
+            "#});
+        test::<SpecFilePathFormat>()
+            .with_file_path("api2_client_spec.rb")
+            .expect_no_offenses(indoc! {r#"
+                describe API2Client do
                 end
             "#});
     }
