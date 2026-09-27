@@ -13,7 +13,30 @@
 //! notes: >
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Symbol, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/UselessConstantScoping`
+// `class_or_module_definition_assignment?` is
+// `{(send (const {nil? cbase} {:Class :Module :Struct}) :new ...)`
+// `(send (const {nil? cbase} :Data) :define ...)`
+// `(any_block {(send (const {nil? cbase} {:Class :Module :Struct}) :new ...)`
+// `(send (const {nil? cbase} :Data) :define ...)} ...)}`
+// (top-level only, send-only). In Murphy `::Class` collapses to
+// `Const{scope:None}`: `nil?` covers bare + `::` (both suppress, pinned by
+// `boundary_accepts_cbase_class_new_definition`). Namespaced `Foo::Class`
+// still flags (pinned by `boundary_flags_namespaced_class_new_definition`).
+// Predicate-only, no captures, byte-identical except for the intended
+// suppression fix (parity-provable FP fix: upstream explicitly documents
+// `MyClass = Class.new` etc as allowed after `private`). `send` covers
+// `Send` only (matching upstream send-only; `Class&.new` still flags,
+// pinned by `boundary_flags_csend_class_new_definition`). Block forms via
+// hand-rolled `block_call` unwrap (covers `Block`/`Numblock`/`Itblock`,
+// matching upstream `any_block`).
+def_node_matcher!(
+    is_class_module_struct_new,
+    "(send (const nil? {:Class :Module :Struct}) :new ...)"
+);
+def_node_matcher!(is_data_define_call, "(send (const nil? :Data) :define ...)");
 
 #[derive(Default)]
 pub struct UselessConstantScoping;
@@ -28,7 +51,7 @@ pub struct UselessConstantScoping;
 impl UselessConstantScoping {
     #[on_node(kind = "casgn")]
     fn check_casgn(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Casgn { name, .. } = *cx.kind(node) else {
+        let NodeKind::Casgn { name, value, .. } = *cx.kind(node) else {
             return;
         };
 
@@ -51,6 +74,14 @@ impl UselessConstantScoping {
         if private_constantize(right_siblings, name, cx) {
             return;
         }
+        // `class_or_module_definition_assignment?`: `MyClass = Class.new`
+        // etc are class/module definitions (allowed after `private`,
+        // matching upstream). Predicate-only via verbatim const inners.
+        if let Some(val) = value.get()
+            && is_class_or_module_definition_assignment(val, cx)
+        {
+            return;
+        }
 
         cx.emit_offense(
             cx.range(node),
@@ -58,6 +89,19 @@ impl UselessConstantScoping {
             None,
         );
     }
+}
+
+/// RuboCop `class_or_module_definition_assignment?` verbatim (predicate-only):
+/// `(send (const nil? {:Class :Module :Struct}) :new ...)` +
+/// `(send (const nil? :Data) :define ...)` + block forms via `block_call`
+/// unwrap (covers `Block`/`Numblock`/`Itblock`, matching upstream `any_block`).
+/// `send` covers `Send` only (matching upstream send-only; `Class&.new`
+/// still flags).
+fn is_class_or_module_definition_assignment(node: NodeId, cx: &Cx<'_>) -> bool {
+    // Unwrap block forms: `MyClass = Class.new do ... end` etc.
+    // `block_call` covers all three block kinds.
+    let target = cx.block_call(node).get().unwrap_or(node);
+    is_class_module_struct_new(target, cx) || is_data_define_call(target, cx)
 }
 
 fn after_private_modifier(left_siblings: &[NodeId], cx: &Cx<'_>) -> bool {
@@ -178,6 +222,104 @@ mod tests {
               CONST_A = 1
               CONST_B = 2
               private_constant :CONST_A, :CONST_B
+            end
+        "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.31): pin the exact node set
+    // for the verbatim `class_or_module_definition_assignment?` suppression
+    // fix (parity-provable FP fix: upstream explicitly documents
+    // `MyClass = Class.new` etc as allowed after `private`, verified with
+    // rubocop 1.91.0 `Lint/UselessConstantScoping` = no offense).
+    // `(const nil? {:Class :Module :Struct})` + `(const nil? :Data)`
+    // top-level only (bare + `::` suppress, namespaced flags); `send`
+    // send-only (csend flags); block forms via `block_call` suppress.
+
+    #[test]
+    fn boundary_accepts_class_new_definition() {
+        test::<UselessConstantScoping>().expect_no_offenses(indoc! {r#"
+            class Foo
+              private
+              MyClass = Class.new
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_module_new_definition() {
+        test::<UselessConstantScoping>().expect_no_offenses(indoc! {r#"
+            class Foo
+              private
+              MyModule = Module.new
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_struct_new_definition() {
+        test::<UselessConstantScoping>().expect_no_offenses(indoc! {r#"
+            class Foo
+              private
+              MyStruct = Struct.new(:name)
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_data_define_definition() {
+        test::<UselessConstantScoping>().expect_no_offenses(indoc! {r#"
+            class Foo
+              private
+              MyData = Data.define(:name)
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_class_new_definition() {
+        // `::Class` collapses to scope-less `Const`, so `nil?` covers it.
+        test::<UselessConstantScoping>().expect_no_offenses(indoc! {r#"
+            class Foo
+              private
+              MyClass = ::Class.new
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_class_new_definition() {
+        // Upstream `(const {nil? cbase} ...)` top-level only: `Foo::Class`
+        // still flags (not suppressed).
+        test::<UselessConstantScoping>().expect_offense(indoc! {r#"
+            class Foo
+              private
+              MyClass = Foo::Class.new
+              ^^^^^^^^^^^^^^^^^^^^^^^^ Useless `private` access modifier for constant scope.
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_class_new_definition() {
+        // Upstream send-only: `Class&.new` still flags (not suppressed).
+        test::<UselessConstantScoping>().expect_offense(indoc! {r#"
+            class Foo
+              private
+              MyClass = Class&.new
+              ^^^^^^^^^^^^^^^^^^^^ Useless `private` access modifier for constant scope.
+            end
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_block_class_new_definition() {
+        // Block form `Class.new do ... end` also suppresses (via `block_call`).
+        test::<UselessConstantScoping>().expect_no_offenses(indoc! {r#"
+            class Foo
+              private
+              MyClass = Class.new do
+                def foo; end
+              end
             end
         "#});
     }

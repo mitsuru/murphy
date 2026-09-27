@@ -28,7 +28,18 @@
 //!
 //! Transforms `class Foo < Data.define(...)` to `Foo = Data.define(...) do`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RangeSide, SpaceRangeOptions, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RangeSide, SpaceRangeOptions, SourceTokenKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/DataInheritance` `data_define?` inner is
+// `(const {nil? cbase} :Data)` (top-level only, send-only). In Murphy
+// `::Data` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+// (both flag, pinned by `flags_data_with_cbase_notation`). Namespaced
+// `Foo::Data` still accepts (pinned by `accepts_namespaced_data_define`).
+// Predicate-only, no captures, byte-identical offense emission. `call`
+// covers `Send` + `Csend` for the outer check (preserving the current gap
+// vs upstream send-only: `Data&.define` still flags, pinned by
+// `boundary_flags_csend_data_define`).
+def_node_matcher!(is_data_const, "(const nil? :Data)");
 
 const MSG: &str = "Don't extend an instance initialized by `Data.define`. \
                    Use a block to customize the class.";
@@ -51,13 +62,17 @@ impl DataInheritance {
 }
 
 fn is_data_send(node: NodeId, cx: &Cx<'_>) -> bool {
+    // `(const nil? :Data)` — top-level only (bare + `::` flag, namespaced
+    // silent). `call_receiver` + `method_name` cover `Send` + `Csend`
+    // (preserving the gap vs upstream send-only).
     if cx.method_name(node) != Some("define") {
         return false;
     }
     let Some(recv_id) = cx.call_receiver(node).get() else {
         return false;
     };
-    cx.is_global_const(recv_id, "Data")
+    // `(const nil? :Data)` — any `::` collapses to scope-less `Const`.
+    is_data_const(recv_id, cx)
 }
 
 fn is_data_define(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -352,6 +367,27 @@ mod tests {
         // MyNamespace::Data.define is not the built-in Data — must not flag.
         test::<DataInheritance>().expect_no_offenses(indoc! {"
             class Foo < MyNamespace::Data.define(:x)
+            end
+        "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.31): pin the exact node set
+    // the hand-rolled `is_global_const(Data)` guard matches, so the
+    // verbatim `(const nil? :Data)` inner refactor can be proven
+    // equivalent. Upstream `data_define?` is
+    // `(send (const {nil? cbase} :Data) :define ...)` (top-level only,
+    // send-only): `nil?` preserves the scope gap (namespaced silent, pinned
+    // above), and Murphy stays `call` (send+csend) preserving the gap vs
+    // upstream which would not flag csend.
+
+    #[test]
+    fn boundary_flags_csend_data_define() {
+        // Murphy is `call_receiver` + `method_name` (no `Send`/`Csend`
+        // discrimination); `&.` is `Csend` so it still flags (gap vs
+        // upstream send-only which would not flag).
+        test::<DataInheritance>().expect_offense(indoc! {"
+            class Foo < Data&.define(:x)
+                        ^^^^^^^^^^^^^^^^ Don't extend an instance initialized by `Data.define`. Use a block to customize the class.
             end
         "});
     }

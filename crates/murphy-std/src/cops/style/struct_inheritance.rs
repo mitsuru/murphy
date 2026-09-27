@@ -26,7 +26,18 @@
 //!
 //! Transforms `class Foo < Struct.new(...)` to `Foo = Struct.new(...) do`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/StructInheritance` `struct_constructor?` inner is
+// `(const {nil? cbase} :Struct)` (top-level only, send-only). In Murphy
+// `::Struct` collapses to `Const{scope:None}`: `nil?` covers bare + `::`
+// (both flag, pinned by `flags_struct_with_cbase_notation`). Namespaced
+// `Foo::Struct` still accepts (pinned by `accepts_namespaced_struct_new`).
+// Predicate-only, no captures, byte-identical offense emission. `call`
+// covers `Send` + `Csend` for the outer check (preserving the current gap
+// vs upstream send-only: `Struct&.new` still flags, pinned by
+// `boundary_flags_csend_struct_new`).
+def_node_matcher!(is_struct_const, "(const nil? :Struct)");
 
 const MSG: &str =
     "Don't extend an instance initialized by `Struct.new`. Use a block to customize the struct.";
@@ -49,15 +60,17 @@ impl StructInheritance {
 }
 
 fn is_struct_send(node: NodeId, cx: &Cx<'_>) -> bool {
-    // Use cx.method_name and cx.is_global_const for cleaner, API-consistent matching.
+    // `(const nil? :Struct)` — top-level only (bare + `::` flag, namespaced
+    // silent). `call_receiver` + `method_name` cover `Send` + `Csend`
+    // (preserving the gap vs upstream send-only).
     if cx.method_name(node) != Some("new") {
         return false;
     }
     let Some(recv_id) = cx.call_receiver(node).get() else {
         return false;
     };
-    // is_global_const accepts nil scope (Struct) and Cbase scope (::Struct).
-    cx.is_global_const(recv_id, "Struct")
+    // `(const nil? :Struct)` — any `::` collapses to scope-less `Const`.
+    is_struct_const(recv_id, cx)
 }
 
 fn is_struct_new(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -398,6 +411,27 @@ mod tests {
         // MyNamespace::Struct.new is not the built-in Struct — must not flag.
         test::<StructInheritance>().expect_no_offenses(indoc! {"
             class Foo < MyNamespace::Struct.new(:x)
+            end
+        "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.31): pin the exact node set
+    // the hand-rolled `is_global_const(Struct)` guard matches, so the
+    // verbatim `(const nil? :Struct)` inner refactor can be proven
+    // equivalent. Upstream `struct_constructor?` is
+    // `(send (const {nil? cbase} :Struct) :new ...)` (top-level only,
+    // send-only): `nil?` preserves the scope gap (namespaced silent, pinned
+    // above), and Murphy stays `call` (send+csend) preserving the gap vs
+    // upstream which would not flag csend.
+
+    #[test]
+    fn boundary_flags_csend_struct_new() {
+        // Murphy is `call_receiver` + `method_name` (no `Send`/`Csend`
+        // discrimination); `&.` is `Csend` so it still flags (gap vs
+        // upstream send-only which would not flag).
+        test::<StructInheritance>().expect_offense(indoc! {"
+            class Foo < Struct&.new(:x)
+                        ^^^^^^^^^^^^^^^ Don't extend an instance initialized by `Struct.new`. Use a block to customize the struct.
             end
         "});
     }
