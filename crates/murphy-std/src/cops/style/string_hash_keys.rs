@@ -29,7 +29,19 @@
 //! (`NodeKind::Str`). Skips pairs that are arguments to environment-accepting
 //! methods.
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/StringHashKeys` `receive_environments_method?` const
+// inners are `(const {nil? cbase} :Kernel)` (spawn/system),
+// `(const {nil? cbase} :IO)` (popen), `(const {nil? cbase} :Open3)`
+// (capture/pipeline) — all top-level only. In Murphy `::X` collapses to
+// `Const{scope:None}`: `_` covers bare + `::` + namespaced (all suppress,
+// pinned by `boundary_accepts_cbase_*` + `boundary_accepts_namespaced_*`),
+// preserving the current gap vs upstream which would flag namespaced.
+// Predicate-only, no captures, byte-identical suppression.
+def_node_matcher!(is_kernel_const, "(const _ :Kernel)");
+def_node_matcher!(is_io_const, "(const _ :IO)");
+def_node_matcher!(is_open3_const, "(const _ :Open3)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -177,17 +189,20 @@ fn is_send_named(
         None => true,
         Some(ReceiverFilter::KernelOrNil) => match receiver.get() {
             None => true, // nil receiver (implicit)
-            Some(recv) => {
-                // Kernel (with or without cbase)
-                matches!(*cx.kind(recv), NodeKind::Const { name, .. } if cx.symbol_str(name) == "Kernel")
-            }
+            // `(const _ :Kernel)` — any scope (bare + `::` + namespaced suppress).
+            Some(recv) => is_kernel_const(recv, cx),
         },
-        Some(ReceiverFilter::Const(name)) => match receiver.get() {
+        // `(const _ :IO)` / `(const _ :Open3)` — any scope (bare + `::` +
+        // namespaced suppress).
+        Some(ReceiverFilter::Const("IO")) => match receiver.get() {
             None => false,
-            Some(recv) => {
-                matches!(*cx.kind(recv), NodeKind::Const { name: n, .. } if cx.symbol_str(n) == name)
-            }
+            Some(recv) => is_io_const(recv, cx),
         },
+        Some(ReceiverFilter::Const("Open3")) => match receiver.get() {
+            None => false,
+            Some(recv) => is_open3_const(recv, cx),
+        },
+        Some(ReceiverFilter::Const(_)) => false,
     }
 }
 
@@ -410,6 +425,84 @@ mod tests {
     fn no_offense_for_open3_popen3_with_string_hash() {
         test::<StringHashKeys>().expect_no_offenses("Open3.popen3('ls', 'HOME' => '/tmp')\n");
     }
+
+    // --- Boundary characterization (murphy-ft88.29): pin the exact node set
+    // the hand-rolled `ReceiverFilter::Const` guards (any scope, no scope
+    // check) match, so the verbatim `(const _ :Kernel)` / `(const _ :IO)` /
+    // `(const _ :Open3)` refactor can be proven equivalent. `_` covers any
+    // scope: bare + `::` + namespaced all suppress (no offense, preserving
+    // the current gap vs upstream `(const {nil? cbase} ...)` which would flag
+    // namespaced). `Send`-only `is_send_named` keeps csend flagging (pinned
+    // by `boundary_flags_csend_io_popen`).
+
+    #[test]
+    fn boundary_accepts_kernel_spawn() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("Kernel.spawn('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_kernel_spawn() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("::Kernel.spawn('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_kernel_spawn() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("Foo::Kernel.spawn('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_io_popen() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("::IO.popen('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_io_popen() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("Foo::IO.popen('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_open3_capture() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("::Open3.capture2('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_open3_capture() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("Foo::Open3.capture2('ls', 'HOME' => '/tmp')\n");
+    }
+
+    #[test]
+    fn boundary_accepts_open3_pipeline() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("Open3.pipeline([{ 'HOME' => '/tmp' }, 'ls'])\n");
+    }
+
+    #[test]
+    fn boundary_accepts_cbase_open3_pipeline() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("::Open3.pipeline([{ 'HOME' => '/tmp' }, 'ls'])\n");
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_open3_pipeline() {
+        test::<StringHashKeys>()
+            .expect_no_offenses("Foo::Open3.pipeline([{ 'HOME' => '/tmp' }, 'ls'])\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_io_popen() {
+        test::<StringHashKeys>().expect_offense(indoc! {r#"
+            IO&.popen('ls', 'HOME' => '/tmp')
+                            ^^^^^^ Prefer symbols instead of strings as hash keys.
+        "#});
+    }
+
     #[test]
     fn parse_string_content_simple_returns_safe() {
         // "foo" -> body "foo", safe=true (no backslashes)
