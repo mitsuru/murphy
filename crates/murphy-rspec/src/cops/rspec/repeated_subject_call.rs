@@ -74,9 +74,23 @@ impl RepeatedSubjectCall {
         let Some(body_id) = body.get() else {
             return;
         };
+        let calls = bare_calls_in_order(cx, body_id);
+        // A repeated subject offense requires two bare sends of the same
+        // method in this example. Most examples need no whole-file subject
+        // definition scan at all.
+        let mut seen = HashSet::new();
+        if !calls.iter().any(|&call| {
+            let NodeKind::Send { method, .. } = *cx.kind(call) else {
+                return false;
+            };
+            !seen.insert(method)
+        }) {
+            return;
+        }
+
         let names = subject_names_in_scope(cx, node);
         let mut used: HashSet<String> = HashSet::new();
-        for call in bare_calls_in_order(cx, body_id) {
+        for call in calls {
             let NodeKind::Send { method, .. } = *cx.kind(call) else {
                 continue;
             };
@@ -279,6 +293,44 @@ mod tests {
                   expect { subject }.to change { A.count }
                 end
             "#});
+    }
+
+    #[test]
+    fn flags_chained_first_call_when_second_is_bare_expect() {
+        test::<RepeatedSubjectCall>().expect_offense(indoc! {r#"
+                it do
+                  subject.a
+                  expect { subject }.to change { A.count }
+                  ^^^^^^^^^^^^^^^^^^ Calls to subject are memoized, this block is misleading
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_named_subject_defined_after_example_in_outer_group() {
+        test::<RepeatedSubjectCall>().expect_offense(indoc! {r#"
+                describe Foo do
+                  describe Bar do
+                    it do
+                      admin
+                      expect { admin }.to change { A.count }
+                      ^^^^^^^^^^^^^^^^ Calls to subject are memoized, this block is misleading
+                    end
+                  end
+                  subject(:admin) { create(:admin) }
+                end
+            "#});
+    }
+
+    #[test]
+    fn distinct_calls_skip_scope_scan_after_utf8_crlf_prefix() {
+        for ending in ["\n", "\r\n"] {
+            let prefix = format!("# コメント{ending}").repeat(800);
+            let source = format!(
+                "{prefix}describe Foo do{ending}  subject(:admin) {{ create(:admin) }}{ending}  it do{ending}    admin{ending}    expect {{ other }}.to change {{ A.count }}{ending}  end{ending}end{ending}"
+            );
+            test::<RepeatedSubjectCall>().expect_no_offenses(&source);
+        }
     }
 
     #[test]
