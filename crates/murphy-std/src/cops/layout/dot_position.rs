@@ -104,14 +104,8 @@ impl DotPosition {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // The host wires `[cops.rules."Layout/DotPosition"]` (and in
-    // particular `EnforcedStyle`) through `CxRaw::options_json` —
-    // see `murphy_cli::main::dispatch_lint` calling
-    // `dispatch::run_cops_with_options` with `config.cop_options_json`.
-    // `cx.options_or_default::<DotPositionOptions>()` decodes it and
-    // falls back to the `Default` (`leading`) when no override is set.
-    let opts = cx.options_or_default::<DotPositionOptions>();
-    let style = opts.enforced_style;
+    // Decode configured style only after the dot and multiline guards.
+    // Ordinary Send/Csend nodes never need the options JSON.
 
     // Detect implicit-call nodes: `loc.name == Range::ZERO` means the
     // call has no method-name token (e.g. `l.(1)` or `l\n.(1)`).
@@ -121,7 +115,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // and use its start as the "name_start" proxy.
     let name_loc = cx.loc(node).name;
     if name_loc == Range::ZERO {
-        check_implicit_call(node, cx, style);
+        check_implicit_call(node, cx);
         return;
     }
 
@@ -162,6 +156,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if count_newlines(pivot_to_selector) >= 2 {
         return;
     }
+
+    let style = cx.options_or_default::<DotPositionOptions>().enforced_style;
 
     // Is the dot sitting on the selector's line? (No newlines between
     // dot end and selector start => same line.)
@@ -207,7 +203,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 /// `SourceTokenKind::LeftParen` token whose start is >= receiver_end and
 /// < node_end, then scan between receiver_end and paren_start for the dot,
 /// and use paren_start as the name_start proxy for all subsequent checks.
-fn check_implicit_call(node: NodeId, cx: &Cx<'_>, style: DotPositionStyle) {
+fn check_implicit_call(node: NodeId, cx: &Cx<'_>) {
     let receiver = match *cx.kind(node) {
         NodeKind::Send {
             receiver: OptNodeId(idx),
@@ -256,6 +252,8 @@ fn check_implicit_call(node: NodeId, cx: &Cx<'_>, style: DotPositionStyle) {
     if count_newlines(pivot_to_paren) >= 2 {
         return;
     }
+
+    let style = cx.options_or_default::<DotPositionOptions>().enforced_style;
 
     // Is the dot on the paren's line?
     let dot_on_paren_line = !contains_newline(slice_or_empty(source, dot_range.end, paren_start));
@@ -802,6 +800,19 @@ mod tests {
         test::<DotPosition>()
             .with_options(&trailing())
             .expect_no_offenses("something.method_name\n");
+    }
+
+    #[test]
+    fn custom_trailing_style_after_ordinary_calls_with_utf8_crlf_prefix() {
+        for ending in ["\n", "\r\n"] {
+            let prefix = format!("# コメント{ending}").repeat(800);
+            let source = format!(
+                "{prefix}puts(:ok){ending}object.call(1){ending}l.(1){ending}something.{ending}  method_name{ending}"
+            );
+            test::<DotPosition>()
+                .with_options(&trailing())
+                .expect_no_offenses(&source);
+        }
     }
 
     #[test]
