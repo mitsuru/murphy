@@ -121,6 +121,15 @@ impl FileName {
         if basename.is_empty() {
             return;
         }
+        // With the default snake_case check and no definition requirement,
+        // ordinary names cannot need the uppercase Include exemptions below.
+        // Keep those exemptions for custom Regex and definition checks.
+        if !opts.expect_matching_definition
+            && opts.regex.is_none()
+            && filename_good(basename, None)
+        {
+            return;
+        }
 
         // RuboCop `on_new_investigation` pre-checks (in order):
         // `config.file_to_exclude?` is covered by the host's per-file
@@ -746,6 +755,55 @@ mod tests {
             .with_file_path("./Gemfile")
             .expect_offense(
                 "source 'x'\n\
+                 ^ The name of this source file (`Gemfile`) should use snake_case.\n",
+            );
+    }
+
+    #[test]
+    fn normal_name_fast_path_preserves_custom_exemptions_and_checks() {
+        let path = "lib/UpperDir/foo_bar.rb";
+        let exempt = Options {
+            expect_matching_definition: true,
+            check_definition_path_hierarchy: false,
+            allowed_camel_case_include_patterns: vec!["**/UpperDir/foo_bar.rb".to_string()],
+            ..Default::default()
+        };
+        test::<FileName>()
+            .with_options(&exempt)
+            .with_file_path(path)
+            .expect_no_offenses("x = 1\n");
+
+        let not_exempt = Options {
+            allowed_camel_case_include_patterns: vec![],
+            ..exempt
+        };
+        test::<FileName>()
+            .with_options(&not_exempt)
+            .with_file_path(path)
+            .expect_offense(
+                "x = 1\n\
+                 ^ `foo_bar.rb` should define a class or module called `FooBar`.\n",
+            );
+        test::<FileName>()
+            .with_options(&Options {
+                regex: Some("^zz$".to_string()),
+                ..Default::default()
+            })
+            .with_file_path(path)
+            .expect_offense("x = 1\n^ `foo_bar.rb` should match `^zz$`.\n");
+
+        let gemfile_options = Options {
+            allowed_camel_case_include_patterns: vec!["**/Gemfile".to_string()],
+            ..Default::default()
+        };
+        test::<FileName>()
+            .with_options(&gemfile_options)
+            .with_file_path("Gemfile")
+            .expect_no_offenses("x = 1\n");
+        test::<FileName>()
+            .with_file_path("Gemfile")
+            .expect_offense(
+                "x = 1\n\
                  ^ The name of this source file (`Gemfile`) should use snake_case.\n",
             );
     }
