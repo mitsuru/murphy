@@ -1481,6 +1481,38 @@ impl MurphyConfig {
             .map(|(name, _)| name.as_str())
     }
 
+    /// RuboCop's `config.for_cop('RSpec/SpecFilePathFormat')`
+    /// `['CustomTransform']` resolved as sorted `Name=path` pairs: the
+    /// pack-bundled upstream defaults (`RuboCop→rubocop`, `RSpec→rspec`)
+    /// under the user's entries (per-key user-wins, mirroring RuboCop's
+    /// config merge). Non-string values are skipped. Baked into the
+    /// cop's `options_json` as `CustomTransformPairs` (murphy-bjrg.4)
+    /// because the `CopOptions` schema carries no map type.
+    fn resolved_spec_file_path_format_custom_transform(&self) -> Vec<String> {
+        const COP: &str = "RSpec/SpecFilePathFormat";
+        let mut merged: BTreeMap<String, String> = BTreeMap::new();
+        for opts in [
+            self.base_defaults.cop_rules.get(COP).map(|r| &r.options),
+            self.cops.rules.get(COP).map(|r| &r.options),
+        ] {
+            let Some(map) = opts
+                .and_then(|o| o.get("CustomTransform"))
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            for (key, value) in map {
+                if let Some(path) = value.as_str() {
+                    merged.insert(key.clone(), path.to_owned());
+                }
+            }
+        }
+        merged
+            .into_iter()
+            .map(|(name, path)| format!("{name}={path}"))
+            .collect()
+    }
+
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
         // murphy-ilrx (option 2, no ABI bump): host-bake the sibling
         // `EnforcedStyle` the running cop needs but cannot read via `CxRaw`.
@@ -1494,6 +1526,21 @@ impl MurphyConfig {
             "Layout/SpaceAfterComma" => Some((
                 "SpaceInsideHashLiteralBracesEnforcedStyle".to_string(),
                 serde_json::Value::String(self.resolved_space_inside_hash_literal_braces_style()),
+            )),
+            // murphy-bjrg.4 (no ABI bump): the `CopOptions` schema carries
+            // no map type, so the merged `CustomTransform` map (pack-bundled
+            // upstream defaults under the user's entries, mirroring RuboCop's
+            // `cop_config.fetch('CustomTransform', {})`) is baked as sorted
+            // `Name=path` pairs. The baked key always wins over any
+            // same-named user key, mirroring the sibling-style bakings.
+            "RSpec/SpecFilePathFormat" => Some((
+                "CustomTransformPairs".to_string(),
+                serde_json::Value::Array(
+                    self.resolved_spec_file_path_format_custom_transform()
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
             )),
             _ => None,
         };
@@ -2828,6 +2875,57 @@ Style/StringLiterals:
         assert_eq!(
             parsed["SpaceInsideHashLiteralBracesEnforcedStyle"],
             "no_space"
+        );
+    }
+
+    #[test]
+    fn cop_options_json_bakes_custom_transform_pairs_for_spec_path() {
+        // murphy-bjrg.4: no pack layer and no user config bakes an empty
+        // array (the cop falls back to its hardcoded upstream defaults).
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("RSpec/SpecFilePathFormat"))
+                .expect("valid JSON");
+        assert_eq!(parsed["CustomTransformPairs"], serde_json::json!([]));
+
+        // Pack-bundled upstream defaults flow through sorted.
+        let cfg = MurphyConfig::with_defaults(
+            "",
+            "RSpec/SpecFilePathFormat:
+  CustomTransform:
+    RuboCop: rubocop
+    RSpec: rspec
+",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("RSpec/SpecFilePathFormat"))
+                .expect("valid JSON");
+        assert_eq!(
+            parsed["CustomTransformPairs"],
+            serde_json::json!(["RSpec=rspec", "RuboCop=rubocop"])
+        );
+
+        // User entries merge over the defaults per-key (Mastodon shape).
+        let cfg = MurphyConfig::with_defaults(
+            "RSpec/SpecFilePathFormat:
+  CustomTransform:
+    ActivityPub: activitypub
+    RuboCop: custom
+",
+            "RSpec/SpecFilePathFormat:
+  CustomTransform:
+    RuboCop: rubocop
+    RSpec: rspec
+",
+        )
+        .expect("config parses");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("RSpec/SpecFilePathFormat"))
+                .expect("valid JSON");
+        assert_eq!(
+            parsed["CustomTransformPairs"],
+            serde_json::json!(["ActivityPub=activitypub", "RSpec=rspec", "RuboCop=custom"])
         );
     }
 
