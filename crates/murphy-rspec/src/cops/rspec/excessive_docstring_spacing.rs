@@ -13,7 +13,8 @@
 //!   (`(send #rspec? {#Examples.all #ExampleGroups.all} ${$str
 //!   $(dstr ...)} ...)`): RSpec-or-bare receiver, example / group selector,
 //!   first arg is `Str` / `Dstr` / `Sym`. `Dstr` text concatenates `Str` /
-//!   `Sym` parts (interpolations skipped); `Sym` uses the symbol name.
+//!   `Sym` parts plus interpolation source (`#{x}`, mirroring upstream
+//!   `text(node)` → `node.source` for non-str/sym); `Sym` uses the symbol name.
 //!   Excessive whitespace mirrors `excessive_whitespace?` (leading /
 //!   trailing blank, or 2+ consecutive blanks surrounded by non-blanks).
 //!   Offense range is the description node (upstream trims quotes to the
@@ -105,17 +106,7 @@ impl ExcessiveDocstringSpacing {
         let text = match *cx.kind(first) {
             NodeKind::Str(id) => cx.string_str(id).to_owned(),
             NodeKind::Sym(sym) => cx.symbol_str(sym).to_owned(),
-            NodeKind::Dstr(parts) => {
-                let mut out = String::new();
-                for &part in cx.list(parts) {
-                    match *cx.kind(part) {
-                        NodeKind::Str(id) => out.push_str(cx.string_str(id)),
-                        NodeKind::Sym(sym) => out.push_str(cx.symbol_str(sym)),
-                        _ => {}
-                    }
-                }
-                out
-            }
+            NodeKind::Dstr(_) => dstr_text(cx, first),
             _ => return,
         };
         if !has_excessive_whitespace(&text) {
@@ -155,6 +146,32 @@ fn is_example_or_group(name: &str) -> bool {
             | "skip"
             | "pending"
     )
+}
+
+/// Interpolated docstring text (murphy-bjrg.5): mirrors upstream `text(node)`
+/// (`dstr → node_parts.map(text).join`, `str/sym → value`, else `node.source`).
+/// Skipping interpolations would leave a trailing blank (`"of #{x}"` → `"of "`)
+/// and false-flag Mastodon's 7 interpolated docstrings; using the interpolation
+/// source (`#{x}`) avoids the false trailing/leading blank.
+fn dstr_text(cx: &Cx<'_>, node: NodeId) -> String {
+    match *cx.kind(node) {
+        NodeKind::Str(id) => cx.string_str(id).to_owned(),
+        NodeKind::Sym(sym) => cx.symbol_str(sym).to_owned(),
+        NodeKind::Dstr(parts) => {
+            let mut out = String::new();
+            for &part in cx.list(parts) {
+                out.push_str(&dstr_text(cx, part));
+            }
+            out
+        }
+        _ => {
+            let range = cx.range(node);
+            let src = cx.source();
+            let start = range.start as usize;
+            let end = range.end as usize;
+            src.get(start..end).unwrap_or("").to_owned()
+        }
+    }
 }
 
 fn has_excessive_whitespace(text: &str) -> bool {
@@ -212,6 +229,26 @@ mod tests {
     fn does_not_flag_clean() {
         test::<ExcessiveDocstringSpacing>().expect_no_offenses(indoc! {r#"
                 it 'has excessive spacing' do; end
+            "#});
+    }
+
+    #[test]
+    fn does_not_flag_interpolated_docstring() {
+        // murphy-bjrg.5: Mastodon 7 FPs, all interpolated (`"of #{error}"`).
+        // Skipping the interpolation leaves `"of "` (trailing blank); upstream
+        // uses `node.source` (`#{error}`) so no excessive whitespace.
+        // Verified vs rubocop 1.91.0 full-config (TargetRubyVersion 3.3).
+        test::<ExcessiveDocstringSpacing>().expect_no_offenses(indoc! {r#"
+                it "Handles error class of #{error}" do; end
+            "#});
+    }
+
+    #[test]
+    fn flags_interpolated_with_double_space() {
+        // True pin: double space outside interpolation still flags.
+        test::<ExcessiveDocstringSpacing>().expect_offense(indoc! {r#"
+                it "has  double #{x}" do; end
+                   ^^^^^^^^^^^^^^^^^^ Excessive whitespace.
             "#});
     }
 

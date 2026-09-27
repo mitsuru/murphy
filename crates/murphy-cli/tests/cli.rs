@@ -490,6 +490,127 @@ fn lint_department_directive_suppresses_cop_in_department() {
         .stdout("[]\n");
 }
 
+/// A full-line `# rubocop:disable-next <Cop>` suppresses that cop on the
+/// immediately following line only (murphy-bjrg.5: Mastodon
+/// `disable-next Rails/OutputSafety` / `Layout/LineLength` /
+/// `Style/MissingRespondToMissing` / `RSpec/SubjectStub`).
+#[test]
+fn lint_disable_next_suppresses_only_next_line() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next Lint/Debugger\ndebugger\ndebugger\n",
+    )
+    .expect("write next.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "disable-next must suppress only the next line, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
+}
+
+/// A trailing `code # rubocop:disable-next <Cop>` attaches to nothing and is
+/// ignored (RuboCop comment-only-line requirement).
+#[test]
+fn lint_trailing_disable_next_is_ignored() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("trailing_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable-next Lint/Debugger\ndebugger\n",
+    )
+    .expect("write trailing_next.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        2,
+        "a trailing disable-next must suppress nothing, got {parsed:?}"
+    );
+}
+
+/// A bare `# rubocop:disable-next` (no cop list) is malformed upstream
+/// ("cop name is missing") and suppresses nothing.
+#[test]
+fn lint_bare_disable_next_suppresses_nothing() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("bare_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next\ndebugger\n",
+    )
+    .expect("write bare_next.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed.iter().any(|o| o["cop_name"] == "Lint/Debugger"),
+        "bare disable-next must not silence the next line, got {parsed:?}"
+    );
+    assert!(
+        parsed
+            .iter()
+            .any(|o| o["cop_name"] == "Lint/CopDirectiveSyntax"),
+        "bare disable-next is malformed upstream and must flag CopDirectiveSyntax, got {parsed:?}"
+    );
+}
+
+/// `# rubocop:todo-next <Cop>` suppresses like `disable-next` (RuboCop
+/// treats `todo` as an alias of `disable`).
+#[test]
+fn lint_todo_next_suppresses_next_line() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("todo_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:todo-next Lint/Debugger\ndebugger\n",
+    )
+    .expect("write todo_next.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
 /// A department directive must NOT suppress cops in a different department:
 /// `# rubocop:disable Lint` leaves a `Style/*` offense reported.
 #[test]
