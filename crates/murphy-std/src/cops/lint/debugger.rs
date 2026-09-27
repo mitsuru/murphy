@@ -14,13 +14,12 @@
 //!   Cbase handling not needed: Murphy translates ::X to Const{scope:None}
 //!   same as X, so ::Pry.rescue and ::Kernel.debugger already match.
 //!   assumed_usage_context guard implemented (closed gap: murphy-rjwo).
-//!   DebuggerMethods/DebuggerRequires are read live via `cx.options_or_default`.
-//!   murphy-ch9j closed: (1) `DebuggerMethods` now accepts both a flat array
-//!   and RuboCop's hash-of-arrays (`category => [method, ...]`) form via a
-//!   hand-rolled `from_config_json` that flattens `values.flatten`; (2) the
-//!   dispatch is a bare `on_node(kind="send")` (no static method filter),
-//!   mirroring RuboCop's plain `on_send`, so a configured custom method whose
-//!   selector is not in the default set is dispatched and flagged.
+//!   DebuggerMethods/DebuggerRequires are decoded once per investigation.
+//!   murphy-ch9j closed: (1) `DebuggerMethods` accepts both a flat array and
+//!   RuboCop's hash-of-arrays (`category => [method, ...]`) via a hand-rolled
+//!   `from_config_json` that flattens `values.flatten`; (2) all arena sends
+//!   are checked (no static method filter), so configured custom methods
+//!   outside the default set are also flagged.
 //! ```
 //!
 //! `require`s that load one. Defaults mirror RuboCop's `DebuggerMethods`
@@ -63,17 +62,16 @@
 //! - **`DebuggerRequires`** -- replaces the default set of required
 //!   libraries that trigger an offense.
 //!
-//! Options are hand-rolled (see [`Options`]) and read live at dispatch time
-//! via [`Cx::options_or_default`], so a configured
-//! `[cops.rules."Lint/Debugger"]` override (e.g. a custom `DebuggerRequires`
-//! entry, or a hash-of-arrays `DebuggerMethods`) takes effect.
+//! Options are hand-rolled (see [`Options`]) and decoded by the cop macro
+//! for each investigation. A configured `[cops.rules."Lint/Debugger"]` override
+//! (e.g. custom `DebuggerRequires` or hash-of-arrays `DebuggerMethods`) takes
+//! effect without decoding the same options for every send.
 //!
 //! ## Dispatch
 //!
-//! The cop visits every `send` node (`#[on_node(kind = "send")]`), matching
-//! RuboCop's plain `on_send`. There is no static method filter, so a custom
-//! `DebuggerMethods` entry whose selector is outside the default set still
-//! dispatches and is flagged.
+//! The cop checks every arena `send` node once in `#[on_new_investigation]`.
+//! There is no static method filter, so a custom `DebuggerMethods` entry whose
+//! selector is outside the default set still dispatches and is flagged.
 
 use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
@@ -132,8 +130,7 @@ const DEFAULT_DEBUGGER_REQUIRES: &[&str] = &[
     "pry-byebug",
 ];
 
-/// Cop options for [`Debugger`]. Read live at dispatch time via
-/// [`Cx::options_or_default`].
+/// Cop options for [`Debugger`]. Decoded once per investigation by `#[cop]`.
 ///
 /// `DebuggerMethods` is hand-rolled (not `#[derive(CopOptions)]`) so it can
 /// accept RuboCop's two shapes: a flat array (`["debugger", ...]`) **or** a
@@ -252,13 +249,19 @@ impl CopOptions for Options {
     options = Options
 )]
 impl Debugger {
-    // Visit EVERY send, mirroring RuboCop's plain `on_send`. A static method
-    // filter would exclude custom `DebuggerMethods` entries whose selector is
-    // not in the default set; running on all sends lets a configured custom
-    // method (flat array or hash-of-arrays) dispatch through `check_send`
-    // (murphy-ch9j).
-    #[on_node(kind = "send")]
-    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+    // Visit EVERY send: a static selector filter would exclude configured
+    // custom `DebuggerMethods` entries. The macro decodes options just once
+    // for this investigation rather than once per Send.
+    #[on_new_investigation]
+    fn investigate(&self, cx: &Cx<'_>, opts: &Options) {
+        for node in cx.node_ids() {
+            if matches!(cx.kind(node), NodeKind::Send { .. }) {
+                self.check_send(node, cx, opts);
+            }
+        }
+    }
+
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>, opts: &Options) {
         let NodeKind::Send {
             receiver,
             method,
@@ -267,7 +270,6 @@ impl Debugger {
         else {
             return;
         };
-        let opts = cx.options_or_default::<Options>();
         let method_str = cx.symbol_str(method);
 
         // `require '<lib>'` with a Str literal argument.
@@ -315,7 +317,7 @@ impl Debugger {
             // Suppress this match if the parent Send will produce a longer
             // match -- prevents double-flagging e.g. both `Kernel.binding`
             // and `Kernel.binding.irb` when the latter is what is written.
-            if parent_will_match(cx, node, &sig, &opts) {
+            if parent_will_match(cx, node, &sig, opts) {
                 return;
             }
             let src = cx.raw_source(cx.range(node));
@@ -492,6 +494,41 @@ mod tests {
                 require 'my_custom_debug'
                 ^^^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'my_custom_debug'`.
             "#});
+    }
+
+    #[test]
+    fn different_configurations_in_one_process_do_not_reuse_options() {
+        let first = Options {
+            debugger_methods: vec!["first_break".to_string()],
+            debugger_requires: vec!["first/debug".to_string()],
+        };
+        let second = Options {
+            debugger_methods: vec!["second_break".to_string()],
+            debugger_requires: vec!["second/debug".to_string()],
+        };
+
+        test::<Debugger>()
+            .with_options(&first)
+            .expect_offense(indoc! {r#"
+            first_break
+            ^^^^^^^^^^^ Remove debugger entry point `first_break`.
+            require 'first/debug'
+            ^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'first/debug'`.
+        "#});
+        test::<Debugger>()
+            .with_options(&second)
+            .expect_no_offenses("first_break\nrequire 'first/debug'\n");
+        test::<Debugger>()
+            .with_options(&second)
+            .expect_offense(indoc! {r#"
+            second_break
+            ^^^^^^^^^^^^ Remove debugger entry point `second_break`.
+            require 'second/debug'
+            ^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'second/debug'`.
+        "#});
+        test::<Debugger>()
+            .with_options(&first)
+            .expect_no_offenses("second_break\nrequire 'second/debug'\n");
     }
 
     #[test]

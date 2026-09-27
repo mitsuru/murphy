@@ -50,9 +50,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if !matches!(*cx.kind(node), NodeKind::Send { .. }) {
         return;
     }
-    let Some(schema) = cx.rails_schema() else {
-        return;
-    };
     let Some(uniqueness) = uniqueness_part(cx, node) else {
         return;
     };
@@ -63,6 +60,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if condition_part(cx, node, uniqueness) {
         return;
     }
+    let Some(schema) = cx.rails_schema() else {
+        return;
+    };
     let Some(class_node) = find_class_ancestor(cx, node) else {
         return;
     };
@@ -421,6 +421,30 @@ mod tests {
             .with_rails_schema(schema)
             .expect_offense(indoc! {r#"
                 class User
+                  validates :account, uniqueness: true
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Uniqueness validation should have a unique index on the database column.
+                end
+            "#});
+    }
+
+    #[test]
+    fn skips_irrelevant_validations_before_a_uniqueness_candidate() {
+        let schema = r#"
+            ActiveRecord::Schema.define(version: 2020_02_02_075409) do
+              create_table "users", force: :cascade do |t|
+                t.string "account", null: false
+              end
+            end
+        "#;
+        test::<UniqueValidationWithoutIndex>()
+            .with_rails_schema(schema)
+            .expect_offense(indoc! {r#"
+                class User
+                  validates :account, presence: true
+                  validates :account, uniqueness: false
+                  validates :account, uniqueness: nil
+                  validates :account, uniqueness: true, if: -> { enabled? }
+                  validates :account, uniqueness: { conditions: -> { enabled? } }
                   validates :account, uniqueness: true
                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Uniqueness validation should have a unique index on the database column.
                 end
