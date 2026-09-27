@@ -1502,10 +1502,27 @@ fn lint_files_memoized(
     result_cache: Option<&ResultCache>,
 ) -> Vec<Offense> {
     if config.has_cop_path_scopes() {
+        // Cop selection depends on the path, so identical content cannot be
+        // linted once and fanned out. The result cache is keyed by path too,
+        // however, and can still skip dispatch on a per-file hit.
         return sources
             .par_iter()
             .flat_map_iter(|(path, content)| {
-                lint_source(content, path, cops, mruby_cops, config, cache)
+                if let Some(rc) = result_cache {
+                    let hash = content_hash(content.as_bytes());
+                    if let Some(bytes) = rc.lookup(&hash, path)
+                        && let Ok(cached) = serde_json::from_slice::<Vec<Offense>>(&bytes)
+                    {
+                        return cached;
+                    }
+                    let offenses = lint_source(content, path, cops, mruby_cops, config, cache);
+                    if let Ok(bytes) = serde_json::to_vec(&offenses) {
+                        rc.put(&hash, path, &bytes);
+                    }
+                    offenses
+                } else {
+                    lint_source(content, path, cops, mruby_cops, config, cache)
+                }
             })
             .collect();
     }

@@ -3512,8 +3512,15 @@ impl<'a> Cx<'a> {
     /// which can be narrower than the file (leading comments, trailing
     /// whitespace, etc. live outside the root's byte range).
     pub fn source(&self) -> &'a str {
-        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
-        std::str::from_utf8(src).expect("source is valid UTF-8")
+        std::str::from_utf8(self.source_bytes()).expect("source is valid UTF-8")
+    }
+
+    /// The whole file as bytes. Prefer this for byte-offset checks such as
+    /// newline detection: `source()` validates the entire UTF-8 file on each
+    /// call, even when only a short span is needed.
+    pub fn source_bytes(&self) -> &'a [u8] {
+        // Safety: the host keeps the source buffer live for every cop call.
+        unsafe { slice(self.raw.source, self.raw.source_len) }
     }
 
     /// Current source file path, or an empty string if the host cannot expose
@@ -4059,6 +4066,8 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
 
         assert_eq!(cx.root(), root);
+        assert_eq!(cx.source_bytes(), ast.source().as_bytes());
+        assert_eq!(cx.source(), ast.source());
         assert_eq!(*cx.node(root), *ast.node(root));
         assert_eq!(*cx.kind(root), *ast.kind(root));
         assert_eq!(cx.range(root), ast.range(root));
