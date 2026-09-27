@@ -125,7 +125,7 @@ fn same_line(src: &[u8], a: u32, b: u32) -> bool {
 /// Whether a heredoc terminator in the last argument shares the closing
 /// delimiter's line, matching RuboCop's `last_line_heredoc?` guard.
 fn last_line_heredoc(last_arg: NodeId, close_start: u32, cx: &Cx<'_>) -> bool {
-    let src = cx.source().as_bytes();
+    let src = cx.source_bytes();
     let r = cx.range(last_arg);
     cx.tokens_in(r)
         .iter()
@@ -134,9 +134,6 @@ fn last_line_heredoc(last_arg: NodeId, close_start: u32, cx: &Cx<'_>) -> bool {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let opts = cx.options_or_default::<MultilineMethodCallBraceLayoutOptions>();
-    let style = opts.enforced_style;
-
     let args = cx.call_arguments(node);
     // `empty_literal?` — no arguments means no brace layout to enforce.
     if args.is_empty() {
@@ -147,12 +144,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // has no brace pair. `begin()`/`end()` resolve only the argument-list
     // parens, so a paren-less call yields `Range::ZERO`.
     let open = cx.loc(node).begin();
+    if open == Range::ZERO {
+        return;
+    }
     let close = cx.loc(node).end();
-    if open == Range::ZERO || close == Range::ZERO {
+    if close == Range::ZERO {
         return;
     }
 
-    let src = cx.source().as_bytes();
+    let src = cx.source_bytes();
+    // `single_line_ignoring_receiver?` / `single_line?` — compare only the
+    // brace tokens, not the receiver (which may span multiple lines). Most
+    // calls stop here without inspecting heredoc tokens or decoding options.
+    if !spans_newline(src, open.start, close.start) {
+        return;
+    }
 
     let first_arg = args[0];
     let last_arg = args[args.len() - 1];
@@ -163,13 +169,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // `single_line_ignoring_receiver?` / `single_line?` — skip when the brace
-    // pair sits on one physical line. Comparing only the brace tokens (not the
-    // whole-node span) reproduces RuboCop's receiver-ignoring single-line
-    // check.
-    if !spans_newline(src, open.start, close.start) {
-        return;
-    }
+    let style = cx
+        .options_or_default::<MultilineMethodCallBraceLayoutOptions>()
+        .enforced_style;
 
     // `opening_brace_on_same_line?` = `begin.line == children.first.first_line`:
     // no newline between `(` and the first argument's start.
@@ -285,6 +287,24 @@ mod tests {
             foo
               .bar(a, b)
         "});
+    }
+
+    #[test]
+    fn custom_styles_skip_single_line_calls_after_utf8_crlf_prefix() {
+        for ending in ["\n", "\r\n"] {
+            let prefix = format!("# コメント{ending}").repeat(800);
+            let single = format!("{prefix}outer(inner(a)){ending}obj{ending}  .bar(a, b){ending}");
+            test::<MultilineMethodCallBraceLayout>()
+                .with_options(&new_line())
+                .expect_no_offenses(&single);
+            let multiline = format!("{prefix}foo({ending}  a,{ending}  b{ending}){ending}");
+            test::<MultilineMethodCallBraceLayout>()
+                .with_options(&new_line())
+                .expect_no_offenses(&multiline);
+            test::<MultilineMethodCallBraceLayout>()
+                .with_options(&same_line())
+                .expect_no_offenses(&format!("{prefix}foo({ending}  a,{ending}  b){ending}"));
+        }
     }
 
     // new_line -------------------------------------------------------------
