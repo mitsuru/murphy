@@ -15,7 +15,19 @@
 //!   to the caller.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Style/FileOpen` `file_open?` inner is
+// `(const {nil? cbase} :File)` (top-level only). In Murphy `::File` collapses
+// to `Const{scope:None}`: `_` covers bare + `::` + namespaced (all flag,
+// pinned by `boundary_flags_cbase_file_open` +
+// `boundary_flags_namespaced_file_open`), preserving the current gap vs
+// upstream which would not flag namespaced. Predicate-only, no captures,
+// byte-identical offense emission. `Send`-only dispatch stays hand-rolled
+// (`File&.open` silent, pinned by `boundary_accepts_csend_file_open`, gap vs
+// upstream `alias on_csend`). Parenthesized `(File)` unwrapped before the
+// matcher (pinned by `flags_parenthesized_file_receiver`).
+def_node_matcher!(is_file_const, "(const _ :File)");
 
 const MSG: &str =
     "`File.open` without a block may leak a file descriptor; use the block form.";
@@ -40,10 +52,8 @@ impl FileOpen {
             return;
         };
         let recv_id = unwrap_begin(recv_id, cx);
-        let NodeKind::Const { name, .. } = *cx.kind(recv_id) else {
-            return;
-        };
-        if cx.symbol_str(name) != "File" {
+        // `(const _ :File)` — any scope (bare + `::` + namespaced flag).
+        if !is_file_const(recv_id, cx) {
             return;
         }
         if has_block(node, cx) {
@@ -230,6 +240,44 @@ mod tests {
               File.open('file')
             end
         "});
+    }
+
+    // --- Boundary characterization (murphy-ft88.30): pin the exact node set
+    // the hand-rolled `Const{ name == "File" }` guard (any scope, no scope
+    // check) matches, so the verbatim `(const _ :File)` inner refactor can be
+    // proven equivalent. Upstream `file_open?` is
+    // `(send (const {nil? cbase} :File) :open ...)` (top-level only,
+    // send+csend via `alias on_csend`): `_` preserves the current gap
+    // (namespaced `Foo::File` still flags, pinned by
+    // `boundary_flags_namespaced_file_open`), and Murphy stays send-only
+    // (`File&.open` silent, pinned by `boundary_accepts_csend_file_open`,
+    // preserving the gap vs upstream which would flag csend). `::File`
+    // collapses to `Const{scope:None}` so `_` covers bare + `::`.
+
+    #[test]
+    fn boundary_flags_cbase_file_open() {
+        test::<FileOpen>().expect_offense(indoc! {"
+            f = ::File.open('file')
+                ^^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn boundary_flags_namespaced_file_open() {
+        // Hand-rolled has no scope check, so `Foo::File` still flags
+        // (gap vs upstream top-level-only which would not flag).
+        test::<FileOpen>().expect_offense(indoc! {"
+            f = Foo::File.open('file')
+                ^^^^^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn boundary_accepts_csend_file_open() {
+        // Murphy is `Send`-only (`#[on_node(kind = "send")]` +
+        // `NodeKind::Send`); `&.` is `Csend` so it stays silent (gap vs
+        // upstream `alias on_csend` which would flag).
+        test::<FileOpen>().expect_no_offenses("f = File&.open('file')\n");
     }
 }
 murphy_plugin_api::submit_cop!(FileOpen);
