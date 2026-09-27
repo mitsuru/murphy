@@ -775,7 +775,7 @@ fn is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
         return true;
     }
     let src = cx.source();
-    line_of(r.start, src) == line_of(r.end.saturating_sub(1), src)
+    same_line_offsets(src, r.start, r.end.saturating_sub(1))
 }
 
 fn is_braced_hash(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -817,11 +817,8 @@ fn pairs_same_line(a: NodeId, b: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     let src = cx.source();
-    let a_first = line_of(ra.start, src);
-    let a_last = line_of(ra.end.saturating_sub(1), src);
-    let b_first = line_of(rb.start, src);
-    let b_last = line_of(rb.end.saturating_sub(1), src);
-    a_last == b_first || a_first == b_last
+    same_line_offsets(src, ra.end.saturating_sub(1), rb.start)
+        || same_line_offsets(src, ra.start, rb.end.saturating_sub(1))
 }
 
 /// `Util.begins_its_line?`: the node's start is the first non-whitespace
@@ -864,7 +861,7 @@ fn is_value_on_new_line(pair: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     let src = cx.source();
-    line_of(cx.range(key).start, src) != line_of(cx.range(value).start, src)
+    !same_line_offsets(src, cx.range(key).start, cx.range(value).start)
 }
 
 /// Key source length for `max_key_width` (`key.source.length`): for colon
@@ -927,9 +924,12 @@ fn pair_key_end_column(pair: NodeId, cx: &Cx<'_>) -> Option<i32> {
 }
 
 /// 1-based source line number containing byte `offset`.
-fn line_of(offset: u32, src: &str) -> usize {
-    let off = (offset as usize).min(src.len());
-    src.as_bytes()[..off].iter().filter(|&&b| b == b'\n').count() + 1
+/// Equal 1-based lines have no newline between their byte offsets. This
+/// avoids counting the whole source prefix for every pair comparison.
+fn same_line_offsets(src: &str, a: u32, b: u32) -> bool {
+    let start = (a.min(b) as usize).min(src.len());
+    let end = (a.max(b) as usize).min(src.len());
+    !src.as_bytes()[start..end].contains(&b'\n')
 }
 
 /// 0-based column (char count) of `offset` within its source line.
@@ -946,7 +946,10 @@ murphy_plugin_api::submit_cop!(HashAlignment);
 
 #[cfg(test)]
 mod tests {
-    use super::{HashAlignment, HashAlignmentOptions, HashAlignmentStyle, LastArgumentHashStyle};
+    use super::{
+        HashAlignment, HashAlignmentOptions, HashAlignmentStyle, LastArgumentHashStyle,
+        same_line_offsets,
+    };
     use murphy_plugin_api::test_support::{indoc, test};
 
     fn table_opts() -> HashAlignmentOptions {
@@ -963,6 +966,41 @@ mod tests {
             enforced_colon_style: vec![HashAlignmentStyle::Separator],
             enforced_last_argument_hash_style: LastArgumentHashStyle::AlwaysInspect,
         }
+    }
+
+    #[test]
+    fn local_line_comparison_matches_prefix_count_for_byte_offsets() {
+        for source in ["", "abc", "a\nb", "a\r\nb", "é\nΩ\r\nz"] {
+            let bytes = source.as_bytes();
+            for a in 0..=(bytes.len() + 2) {
+                for b in 0..=(bytes.len() + 2) {
+                    let old_a = bytes[..a.min(bytes.len())]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count();
+                    let old_b = bytes[..b.min(bytes.len())]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count();
+                    assert_eq!(
+                        same_line_offsets(source, a as u32, b as u32),
+                        old_a == old_b,
+                        "source={source:?}, a={a}, b={b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aligned_hash_after_large_prefix_stays_clean() {
+        let mut source = String::new();
+        for i in 0..128 {
+            source.push_str(&format!("ordinary_{i} = {i}\n"));
+        }
+        source.push_str("h = {\n  foo: 1,\n  barbaz: 2,\n}\n");
+        test::<HashAlignment>().expect_no_offenses(&source);
+        test::<HashAlignment>().expect_no_offenses(&source.replace('\n', "\r\n"));
     }
 
     #[test]
