@@ -67,10 +67,9 @@ pub struct Options {
     options = Options,
 )]
 impl SignalException {
-    #[on_node(kind = "send")]
+    // Runtime styles only change which of these two methods is preferred.
+    #[on_node(kind = "send", methods = ["fail", "raise"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let opts = cx.options_or_default::<Options>();
-
         let NodeKind::Send { receiver, method, .. } = *cx.kind(node) else {
             return;
         };
@@ -89,6 +88,7 @@ impl SignalException {
                 return;
             }
 
+        let opts = cx.options_or_default::<Options>();
         match opts.enforced_style {
             EnforcedStyle::OnlyRaise => {
                 if is_fail {
@@ -297,6 +297,18 @@ mod tests {
                 Kernel.raise
                        ^^^^^ Always use `fail` to signal exceptions.
             "});
+    }
+
+    #[test]
+    fn unrelated_sends_do_not_hide_custom_style_matches() {
+        test::<SignalException>()
+            .with_options(&only_fail_opts())
+            .expect_offense(indoc! {r#"
+                service.fetch(:item).chain
+                other.raise
+                Kernel.raise
+                       ^^^^^ Always use `fail` to signal exceptions.
+            "#});
     }
 
     #[test]
