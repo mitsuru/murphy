@@ -40,7 +40,7 @@
 //! Upstream ships no autocorrect; adding the missing expectation needs
 //! human judgement about intended behavior.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop, regex::Regex};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -143,9 +143,7 @@ fn includes_expectation(cx: &Cx<'_>, example: NodeId, opts: &NoExpectationExampl
         if is_expectation_name(name) {
             return true;
         }
-        if opts.allowed_patterns.iter().any(|pat| {
-            Regex::new(pat).is_ok_and(|re| re.is_match(name))
-        }) {
+        if cx.matches_any_pattern(name, &opts.allowed_patterns) {
             return true;
         }
     }
@@ -352,6 +350,43 @@ mod tests {
                 it do
                   custom_check
                 end
+            "#});
+    }
+
+    #[test]
+    fn custom_patterns_use_regex_and_do_not_reuse_other_configurations() {
+        let opts = NoExpectationExampleOptions {
+            allowed_patterns: vec!["custom_(check|verify)$".to_owned()],
+        };
+        test::<NoExpectationExample>()
+            .with_options(&opts)
+            .expect_no_offenses("it { before_custom_verify }");
+        test::<NoExpectationExample>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                it { expect_something }
+                ^^^^^^^^^^^^^^^^^^^^^^^ No expectation found in this example.
+            "#});
+        test::<NoExpectationExample>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                it { service.custom_check }
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^ No expectation found in this example.
+            "#});
+        test::<NoExpectationExample>()
+            .expect_no_offenses("it { expect_something }");
+    }
+
+    #[test]
+    fn invalid_allowed_pattern_is_ignored() {
+        let opts = NoExpectationExampleOptions {
+            allowed_patterns: vec!["[".to_owned()],
+        };
+        test::<NoExpectationExample>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                it { custom_check }
+                ^^^^^^^^^^^^^^^^^^^ No expectation found in this example.
             "#});
     }
 }
