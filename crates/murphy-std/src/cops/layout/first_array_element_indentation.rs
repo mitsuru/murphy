@@ -110,55 +110,13 @@ impl FirstArrayElementIndentation {
         cx: &Cx<'_>,
         options: &FirstArrayElementIndentationOptions,
     ) {
-        // Plain array literal: no surrounding `(` to measure against.
-        check(node, None, cx, options);
-    }
-
-    #[on_node(kind = "send")]
-    fn check_send(
-        &self,
-        node: NodeId,
-        cx: &Cx<'_>,
-        options: &FirstArrayElementIndentationOptions,
-    ) {
-        check_call_args(node, cx, options);
-    }
-
-    #[on_node(kind = "csend")]
-    fn check_csend(
-        &self,
-        node: NodeId,
-        cx: &Cx<'_>,
-        options: &FirstArrayElementIndentationOptions,
-    ) {
-        check_call_args(node, cx, options);
-    }
-}
-
-/// RuboCop's `each_argument_node`: for every array argument whose `[` shares a
-/// line with the call's `(`, check it against that `(` column. Such arrays are
-/// then ignored by `on_array` — Murphy approximates by re-running the same
-/// per-array check with the `left_parenthesis` column supplied; the array-only
-/// `on_array` pass produces the identical result for these because the special
-/// rule only changes indentation under `special_inside_parentheses`.
-fn check_call_args(
-    node: NodeId,
-    cx: &Cx<'_>,
-    options: &FirstArrayElementIndentationOptions,
-) {
-    let lparen = cx.loc(node).begin();
-    if lparen == Range::ZERO {
-        return;
-    }
-    for &arg in cx.call_arguments(node) {
-        if !is_square_bracket_array(arg, cx) {
-            continue;
+        if !is_square_bracket_array(node, cx) {
+            return;
         }
-        let lbracket_start = cx.range(arg).start;
-        // The `[` must be on the same line as the `(`.
-        if line_of(cx, lparen.start) == line_of(cx, lbracket_start) {
-            check(arg, Some(lparen.start), cx, options);
-        }
+        // Parenthesized array arguments use the `(` column for the special
+        // style. Inspect their parent here rather than visiting every call.
+        let left_paren_start = parent_call_left_paren(node, cx);
+        check(node, left_paren_start, cx, options);
     }
 }
 
@@ -180,17 +138,6 @@ fn check(
     cx: &Cx<'_>,
     options: &FirstArrayElementIndentationOptions,
 ) {
-    if !is_square_bracket_array(node, cx) {
-        return;
-    }
-    // When called from `on_array`, a same-line parenthesized array is also
-    // covered by `check_call_args`; skip the array-only pass for those so the
-    // offense is not emitted twice. Detect by looking at the immediate parent
-    // being a call whose `(` shares the `[` line.
-    if left_paren_start.is_none() && covered_by_parent_call(node, cx) {
-        return;
-    }
-
     let node_range = cx.range(node);
     let left_bracket_start = node_range.start;
     // `]` is the final byte of the array's source range.
@@ -220,20 +167,22 @@ fn check(
     );
 }
 
-/// True when `node`'s parent is a call whose `(` is on the same line as the
-/// array's `[`, meaning `check_call_args` already handles it.
-fn covered_by_parent_call(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(parent) = cx.parent(node).get() else {
-        return false;
-    };
+/// Find the `(` of a parent call only when this array is its direct argument
+/// and the `(` shares the array's opening line.
+fn parent_call_left_paren(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    let parent = cx.parent(node).get()?;
     if !cx.call_arguments(parent).contains(&node) {
-        return false;
+        return None;
     }
     let lparen = cx.loc(parent).begin();
     if lparen == Range::ZERO {
-        return false;
+        return None;
     }
-    line_of(cx, lparen.start) == line_of(cx, cx.range(node).start)
+    if line_of(cx, lparen.start) == line_of(cx, cx.range(node).start) {
+        Some(lparen.start)
+    } else {
+        None
+    }
 }
 
 /// Check the first element's column against the expected indentation.

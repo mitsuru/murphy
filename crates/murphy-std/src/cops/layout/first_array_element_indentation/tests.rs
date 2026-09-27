@@ -32,6 +32,18 @@ fn default_accepts_special_inside_parentheses() {
 }
 
 #[test]
+fn array_argument_of_csend_uses_parenthesis_indent_once() {
+    for ending in ["\n", "\r\n"] {
+        let prefix = format!("# コメント{ending}").repeat(800);
+        let source = format!("{prefix}obj&.foo([{ending}           :value{ending}         ]){ending}");
+        test::<FirstArrayElementIndentation>().expect_no_offenses(&source);
+    }
+    test::<FirstArrayElementIndentation>()
+        .with_options(&opts(ArrayElementStyle::Consistent))
+        .expect_no_offenses("obj&.foo([\n  :value\n])\n");
+}
+
+#[test]
 fn default_flags_first_element_not_relative_to_paren() {
     test::<FirstArrayElementIndentation>().expect_correction(
         indoc! {r#"
