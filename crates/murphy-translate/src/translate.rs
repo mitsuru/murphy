@@ -1000,7 +1000,19 @@ impl Translator {
         if let Some(assoc) = node.as_assoc_node() {
             // `a: 1` / `:a => 1` 等の連想ペア。key/value はともに非 Option。
             let key = self.translate_node(&assoc.key());
-            let value = self.translate_node(&assoc.value());
+            let value_node = assoc.value();
+            // Shorthand `f(a:)` / `{a:}`: prism wraps the implicit bare
+            // call in `ImplicitNode(CallNode)` (parser-gem: the pair value
+            // is `(send nil :a)`). Translate the inner call so cops observe
+            // the reference (e.g. `RSpec/LetSetup` counting `config:` as a
+            // use of `config`, murphy-bjrg.6). Other implicit shapes keep
+            // the legacy `Unknown` fallback below.
+            let value = match value_node.as_implicit_node() {
+                Some(imp) if imp.value().as_call_node().is_some() => {
+                    self.translate_node(&imp.value())
+                }
+                _ => self.translate_node(&value_node),
+            };
             return self.builder.push(NodeKind::Pair { key, value }, range);
         }
         if let Some(splat) = node.as_assoc_splat_node() {
@@ -3460,6 +3472,33 @@ mod tests {
         match h.kind(kids[1]) {
             NodeKind::Kwsplat(inner) => assert!(inner.get().is_some()),
             other => panic!("expected Kwsplat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_shorthand_kwarg_value_to_bare_send() {
+        // `f(config:)` — prism wraps the implicit call in
+        // `ImplicitNode(CallNode)`; the pair value lowers to a bare
+        // receiver-less zero-arg `Send` (parser-gem shape), not `Unknown`
+        // (murphy-bjrg.6: `RSpec/LetSetup` counts `config:` as a use).
+        let ast = translate("f(config:)", "t.rb");
+        let NodeKind::Send { args, .. } = *ast.kind(ast.root()) else {
+            panic!("expected Send, got {:?}", ast.kind(ast.root()));
+        };
+        assert_eq!(args.len, 1);
+        let hash = ast.children(ast.root()).next().unwrap();
+        assert!(matches!(ast.kind(hash), NodeKind::Hash(_)));
+        let pair = ast.children(hash).next().unwrap();
+        let NodeKind::Pair { key, value } = *ast.kind(pair) else {
+            panic!("expected Pair, got {:?}", ast.kind(pair));
+        };
+        assert!(matches!(ast.kind(key), NodeKind::Sym(_)));
+        match *ast.kind(value) {
+            NodeKind::Send { receiver, args, .. } => {
+                assert!(receiver.get().is_none());
+                assert_eq!(args.len, 0);
+            }
+            other => panic!("expected Send value, got {other:?}"),
         }
     }
 

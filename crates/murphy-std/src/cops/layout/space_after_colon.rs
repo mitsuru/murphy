@@ -43,7 +43,15 @@ impl SpaceAfterColon {
         let NodeKind::Pair { key, value } = *cx.kind(node) else {
             return;
         };
-        // Value omission `{a:}` lowers the value to `Unknown`; RuboCop skips it.
+        // Value omission (`{a:}` / `f(a:)`, murphy-bjrg.6): the pair source
+        // ends with the colon — mirrors RuboCop's `value_omission?`
+        // (`source.end_with?(':')`). Shorthand values lower to a real
+        // `Send` (not `Unknown`), so the source test is the reliable guard.
+        if cx.raw_source(cx.range(node)).ends_with(':') {
+            return;
+        }
+        // Untranslatable values lower to `Unknown`; without source rails
+        // the colon cannot be located, so skip (legacy guard).
         if matches!(cx.kind(value), NodeKind::Unknown) {
             return;
         }
@@ -150,6 +158,16 @@ mod tests {
     #[test]
     fn ignores_value_omission() {
         test::<SpaceAfterColon>().expect_no_offenses("x = 1\n{ x: }\n");
+    }
+
+    #[test]
+    fn ignores_shorthand_kwarg_value_omission() {
+        // Ruby 3.1 call-site shorthand (`f(a:)`, `f(a:, b: 1)`): the pair
+        // source ends with the colon — upstream `value_omission?` skips these
+        // (murphy-bjrg.6: 248 Mastodon hits like `current_account:,`).
+        // Verified vs rubocop 1.91.0 (no offense).
+        test::<SpaceAfterColon>().expect_no_offenses("f(a:, b: 1)\n");
+        test::<SpaceAfterColon>().expect_no_offenses("f(a:)\n");
     }
 
     #[test]

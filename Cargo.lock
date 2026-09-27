@@ -1024,6 +1024,7 @@ name = "murphy-std"
 version = "0.1.0"
 dependencies = [
  "automod",
+ "globset",
  "linkme",
  "murphy-plugin-api",
  "serde_json",
