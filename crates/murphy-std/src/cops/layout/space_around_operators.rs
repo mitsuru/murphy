@@ -161,14 +161,13 @@ impl SpaceAroundOperators {
             return;
         };
 
-        let opts = cx.options_or_default::<SpaceAroundOperatorsOptions>();
-
         // --- Setter-method branch: `x.y = 2` ---
         // RuboCop's `setter_method?` gate: `loc?(:operator)` is set when
         // the call carries a standalone `=` operator token.
         if cx.is_setter_method(node) {
             let op_range = cx.assignment_operator_loc(node);
             if op_range != Range::ZERO {
+                let opts = cx.options_or_default::<SpaceAroundOperatorsOptions>();
                 check_operator(cx, op_range, opts.allow_for_alignment);
             }
             return;
@@ -213,6 +212,9 @@ impl SpaceAroundOperators {
                 return;
             }
         }
+        // Ordinary sends cannot reach an operator check; decode runtime
+        // options only after the setter or binary-operator gates pass.
+        let opts = cx.options_or_default::<SpaceAroundOperatorsOptions>();
         // `**` uses `EnforcedStyleForExponentOperator` (default `no_space`).
         if method_str == "**" {
             if opts.enforced_style_for_exponent_operator == SpaceAroundOperatorsBinaryStyle::NoSpace
@@ -1665,6 +1667,26 @@ mod tests {
             x.y  =  2
                  ^ Operator `=` should be surrounded by a single space.
         "#});
+    }
+
+    #[test]
+    fn ordinary_send_chain_preserves_custom_operator_styles() {
+        let opts = SpaceAroundOperatorsOptions {
+            allow_for_alignment: false,
+            enforced_style_for_exponent_operator: SpaceAroundOperatorsBinaryStyle::Space,
+            enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle::Space,
+        };
+        test::<SpaceAroundOperators>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                service.alpha.beta.gamma.delta
+                x.y=2
+                   ^ Surrounding space missing for operator `=`.
+                a**b
+                 ^^ Surrounding space missing for operator `**`.
+                c/1r
+                 ^ Surrounding space missing for operator `/`.
+            "#});
     }
 
     #[test]
