@@ -147,8 +147,7 @@ fn spans_newline(src: &str, start: u32, end: u32) -> bool {
 
 /// Whether the byte offset is the first non-whitespace byte of its physical
 /// line — RuboCop's `begins_its_line?`.
-fn begins_its_line(offset: u32, src: &str) -> bool {
-    let bytes = src.as_bytes();
+fn begins_its_line(offset: u32, bytes: &[u8]) -> bool {
     let line_start = bytes[..offset as usize]
         .iter()
         .rposition(|&b| b == b'\n')
@@ -159,13 +158,6 @@ fn begins_its_line(offset: u32, src: &str) -> bool {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let opts = cx.options_or_default::<MultilineMethodCallIndentationOptions>();
-    let style = opts.enforced_style;
-    let indentation_width = opts
-        .indentation_width
-        .unwrap_or(cx.indentation_width())
-        .max(0) as usize;
-
     // `relevant_node?` — only method calls with an explicit dot operator.
     let dot = cx.loc(node).dot();
     if dot == Range::ZERO {
@@ -177,12 +169,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let src = cx.source();
-
     // `right_hand_side` — for the leading-dot shapes supported here, the RHS
-    // spans the dot through the selector and must begin its own line.
+    // spans the dot through the selector and must begin its own line. This
+    // byte-only guard needs no whole-file UTF-8 validation or options decode.
     let rhs_start = dot.start;
-    if !begins_its_line(rhs_start, src) {
+    if !begins_its_line(rhs_start, cx.source_bytes()) {
         return;
     }
 
@@ -197,6 +188,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let Some((anchor, base)) = first_dotted_call_in_chain(node, cx) else {
         return;
     };
+    let opts = cx.options_or_default::<MultilineMethodCallIndentationOptions>();
+    let style = opts.enforced_style;
+    let indentation_width = opts
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
+    let src = cx.source();
     let base_range = cx.range(base);
     let actual_column = column_of(dot.start, src);
     let rhs_range = Range {
@@ -406,6 +404,17 @@ mod tests {
     #[test]
     fn accepts_single_line_call() {
         test::<MultilineMethodCallIndentation>().expect_no_offenses("foo.bar.baz\n");
+    }
+
+    #[test]
+    fn custom_style_after_ordinary_calls_with_utf8_crlf_prefix() {
+        for ending in ["\n", "\r\n"] {
+            let prefix = format!("# コメント{ending}").repeat(800);
+            let source = format!("{prefix}single.call(1){ending}foo.bar{ending}    .baz{ending}");
+            test::<MultilineMethodCallIndentation>()
+                .with_options(&indented_with_width(4))
+                .expect_no_offenses(&source);
+        }
     }
 
     #[test]
