@@ -124,6 +124,42 @@ impl DefaultCopsData {
     /// Unrecognised top-level keys are silently ignored.
     /// Parse failures are silently skipped.
     pub fn from_yaml(text: &str) -> Self {
+        Self::from_yaml_inner(text)
+    }
+
+    /// Cached [`from_yaml`](Self::from_yaml) for large bundled yamls
+    /// (murphy-l7i0.3): the 184KB std defaults plus per-pack yamls were
+    /// re-parsed several times per run (config loads per root, three loops
+    /// in `apply_pack_default_layers`). Small texts skip the cache (fast to
+    /// parse; keeps test-only inputs out of the table).
+    pub fn from_yaml_cached(text: &str) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        if text.len() < 4096 {
+            return Self::from_yaml_inner(text);
+        }
+        type DefaultsCache = std::collections::HashMap<u64, (Vec<u8>, DefaultCopsData)>;
+        static CACHE: std::sync::LazyLock<std::sync::Mutex<DefaultsCache>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(DefaultsCache::new()));
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = hasher.finish();
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((bytes, data)) = cache.get(&key)
+            && bytes.as_slice() == text.as_bytes()
+        {
+            return data.clone();
+        }
+        let data = Self::from_yaml_inner(text);
+        // Bound the table: bundled yamls are few and stable; anything beyond
+        // is a pathological caller mixing many large texts.
+        if cache.len() < 16 {
+            cache.insert(key, (text.as_bytes().to_vec(), data.clone()));
+        }
+        data
+    }
+
+    fn from_yaml_inner(text: &str) -> Self {
         use yaml_rust2::Yaml;
 
         let docs = match load_yaml_preserving_regexp(text) {
@@ -1047,7 +1083,7 @@ impl MurphyConfig {
         let parsed = parse_yaml_str(user_yaml)?;
         let parsed = resolve_presets_for_parsed(parsed, cli_preset)?;
         let (mut cfg, saw_include, _saw_exclude) = parsed.into_murphy_config();
-        let defaults = DefaultCopsData::from_yaml(defaults_yaml);
+        let defaults = DefaultCopsData::from_yaml_cached(defaults_yaml);
 
         if !saw_include && !defaults.allcops_include.is_empty() {
             cfg.files.include = defaults.allcops_include.clone();
@@ -1124,7 +1160,7 @@ impl MurphyConfig {
         if !explicit && let Some(detected) = detect_target_ruby_version(root) {
             cfg.target_ruby_version = detected;
         }
-        let defaults = DefaultCopsData::from_yaml(defaults_yaml);
+        let defaults = DefaultCopsData::from_yaml_cached(defaults_yaml);
         if !saw_include && !defaults.allcops_include.is_empty() {
             cfg.files.include = defaults.allcops_include.clone();
         }
@@ -1225,9 +1261,15 @@ impl MurphyConfig {
     /// 3. The `AllCops.ActiveSupportExtensionsEnabled` flag, which the user can
     ///    override (the early-return below).
     pub fn apply_pack_default_layers(&mut self, pack_yamls: &[&str]) {
+        // Parse each pack yaml once (murphy-l7i0.3); the loops below used
+        // to re-parse every yaml three times per run.
+        let parsed: Vec<DefaultCopsData> = pack_yamls
+            .iter()
+            .map(|yaml| DefaultCopsData::from_yaml_cached(yaml))
+            .collect();
         // (1) Per-cop pack defaults — always applied (later layer wins per-field).
-        for yaml in pack_yamls {
-            for (name, pack_rule) in DefaultCopsData::from_yaml(yaml).cop_rules {
+        for data in &parsed {
+            for (name, pack_rule) in data.cop_rules.clone() {
                 let entry = self.base_defaults.cop_rules.entry(name).or_default();
                 merge_default_cop_rule(entry, pack_rule);
             }
@@ -1237,8 +1279,8 @@ impl MurphyConfig {
         // `files.exclude` is recomputed. Must run before the ASE early-return so
         // pack discovery excludes apply even when the user pinned ASE.
         let mut all_excludes = std::mem::take(&mut self.base_defaults.allcops_exclude);
-        for yaml in pack_yamls {
-            all_excludes.extend(DefaultCopsData::from_yaml(yaml).allcops_exclude);
+        for data in &parsed {
+            all_excludes.extend(data.allcops_exclude.iter().cloned());
         }
         self.base_defaults.allcops_exclude = dedup_preserving_order(all_excludes);
         self.finalize_files_exclude();
@@ -1251,10 +1293,8 @@ impl MurphyConfig {
         // false. Reset explicitly so the method is idempotent and does not depend
         // on no prior load path having written the field.
         self.active_support_extensions_enabled = false;
-        for yaml in pack_yamls {
-            if let Some(v) =
-                DefaultCopsData::from_yaml(yaml).allcops_active_support_extensions_enabled
-            {
+        for data in &parsed {
+            if let Some(v) = data.allcops_active_support_extensions_enabled {
                 self.active_support_extensions_enabled = v; // later layer overrides
             }
         }

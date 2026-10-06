@@ -28,10 +28,11 @@
 //! diagnostic to stderr, and continues with the next cop — matching ADR
 //! 0033's per-cop fault isolation contract.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::time::Instant;
 
-use murphy_ast::{Ast, NodeId, NodeKind};
+use murphy_ast::{Ast, NodeId, NodeKind, Symbol};
 use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 use murphy_plugin_api::{
     AllCopsContext, CxRaw, FnTable, NodeKindTag as PluginNodeKindTag,
@@ -181,13 +182,17 @@ unsafe extern "C" fn alloc_node_slice(
 
 /// Per-kind node index over an arena: `nodes_by_kind[tag]` is every node id
 /// whose `NodeKind` discriminant byte is `tag`. Built once per arena.
-pub(crate) struct DispatchIndex {
+pub(crate) struct DispatchIndex<'a> {
     nodes_by_kind: Vec<Vec<NodeId>>,
+    /// Interned method-name text -> `Symbol`, borrowing the arena's interner
+    /// blob (murphy-l7i0.2). Lets the `Send` pre-filter compare `u32` ids
+    /// instead of resolving + byte-comparing strings per node per cop.
+    method_symbols: HashMap<&'a str, Symbol>,
 }
 
-impl DispatchIndex {
+impl<'a> DispatchIndex<'a> {
     /// Walk the arena once, bucketing each node id by its kind tag.
-    pub(crate) fn build(ast: &Ast) -> Self {
+    pub(crate) fn build(ast: &'a Ast) -> Self {
         let mut nodes_by_kind: Vec<Vec<NodeId>> = (0..256).map(|_| Vec::new()).collect();
         let n = ast.len();
         for i in 0..n {
@@ -195,12 +200,33 @@ impl DispatchIndex {
             let tag = PluginNodeKindTag::of(ast.kind(id)).0 as usize;
             nodes_by_kind[tag].push(id);
         }
-        Self { nodes_by_kind }
+        let p = ast.raw_parts();
+        let mut method_symbols = HashMap::with_capacity(p.interner_offsets.len());
+        for (i, r) in p.interner_offsets.iter().enumerate() {
+            // The blob holds valid UTF-8 by construction (`resolve` relies
+            // on the same invariant).
+            let s = unsafe {
+                std::str::from_utf8_unchecked(&p.interner_blob[r.start as usize..r.end as usize])
+            };
+            method_symbols.entry(s).or_insert(Symbol(i as u32));
+        }
+        Self {
+            nodes_by_kind,
+            method_symbols,
+        }
     }
 
     /// Borrow the bucket for `tag`.
     pub(crate) fn nodes_for(&self, tag: PluginNodeKindTag) -> &[NodeId] {
         &self.nodes_by_kind[tag.0 as usize]
+    }
+
+    /// Resolve a pre-filter allow-list entry to its interned `Symbol`
+    /// (`None` when the file never mentions the name — no `Send` can match).
+    pub(crate) fn method_symbol(&self, name: &[u8]) -> Option<Symbol> {
+        std::str::from_utf8(name)
+            .ok()
+            .and_then(|s| self.method_symbols.get(s).copied())
     }
 }
 
@@ -303,14 +329,27 @@ fn build_line_starts(source: &[u8]) -> Vec<u32> {
 /// one of `allow_list`. Used by the host pre-filter (murphy-ip0); a
 /// non-Send node is a category error here and returns `false` (the
 /// dispatch loop only applies this on tags that are known-Send).
-fn send_method_passes(ast: &Ast, node_id: NodeId, allow_list: &[RawSlice]) -> bool {
+/// Resolve a cop's `Send` allow-list to interned `Symbol`s once per file
+/// (murphy-l7i0.2). Names the file never mentions map to nothing: no `Send`
+/// in the arena can carry them, so an empty result skips the cop's `Send`
+/// bucket entirely. `allow_list` items that are not valid UTF-8 likewise
+/// match nothing (method names are interned UTF-8).
+fn resolve_send_methods(index: &DispatchIndex, allow_list: &[RawSlice]) -> Vec<Symbol> {
+    allow_list
+        .iter()
+        .filter_map(|slot| index.method_symbol(unsafe { slot.as_bytes() }))
+        .collect()
+}
+
+/// `true` when `node_id` is a `Send` whose method is in the pre-resolved
+/// `allow` set (murphy-l7i0.2): one `u32` slice scan, no interner resolve,
+/// no UTF-8 validation, no byte compares. Visit order is unchanged (the
+/// caller still walks the arena-order bucket).
+fn send_method_passes(ast: &Ast, node_id: NodeId, allow: &[Symbol]) -> bool {
     let NodeKind::Send { method, .. } = *ast.kind(node_id) else {
         return false;
     };
-    let m_bytes = ast.interner().resolve(method.0).as_bytes();
-    allow_list
-        .iter()
-        .any(|slot| unsafe { slot.as_bytes() } == m_bytes)
+    allow.contains(&method)
 }
 
 /// Run every cop in `cops` over `ast`, recording offenses + edits into
@@ -648,8 +687,21 @@ fn run_cops_inner<O: AsRef<[u8]>>(
                 break;
             }
             let apply_send_filter = !send_methods.is_empty() && tag.0 == SEND_TAG;
+            // Resolve once per cop per file (murphy-l7i0.2), not per node.
+            // An empty result means no `Send` in this file can match, so the
+            // whole bucket is skipped.
+            let allow_symbols;
+            let allow: &[Symbol] = if apply_send_filter {
+                allow_symbols = resolve_send_methods(&index, send_methods);
+                &allow_symbols
+            } else {
+                &[]
+            };
+            if apply_send_filter && allow.is_empty() {
+                continue;
+            }
             for &node_id in index.nodes_for(*tag) {
-                if apply_send_filter && !send_method_passes(ast, node_id, send_methods) {
+                if apply_send_filter && !send_method_passes(ast, node_id, allow) {
                     continue;
                 }
                 let rc = unsafe { (cop.dispatch)(node_id, &base) };
