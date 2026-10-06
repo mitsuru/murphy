@@ -353,6 +353,17 @@ pub struct CxRaw {
     /// ABI v4 lockstep; per project policy the numeric ABI is not bumped
     /// for tail-appended CxRaw fields.
     pub rails_schema_json: RawSlice,
+    /// Byte offsets where each source line starts (`index[0] == 0`), one
+    /// entry per `\n` plus the leading zero — the host-built newline index
+    /// for O(log L) line lookups (murphy-utjl.4). Built once per file by the
+    /// native dispatch host; empty (`null`/`0`) when the host did not thread
+    /// one (e.g. raw-ABI test harnesses, option-only entry points), in which
+    /// case line helpers fall back to byte scans. Offsets fit `u32` by the
+    /// ADR 0001 domain guard. Tail-appended under ABI v4 lockstep; per
+    /// project policy the numeric ABI is not bumped for tail-appended CxRaw
+    /// fields. Read via `Cx::line_starts()`.
+    pub line_starts: *const u32,
+    pub line_starts_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -763,7 +774,11 @@ mod tests {
         // murphy-s0vb: tail-appended RawSlice; starts at 288 (after
         // parse_diagnostics_len at 280, no padding needed).
         assert_eq!(offset_of!(CxRaw, rails_schema_json), 288);
-        assert_eq!(size_of::<CxRaw>(), 304);
+        // murphy-utjl.4: tail-appended pointer+len; starts at 304 (after
+        // rails_schema_json ends at 304, no padding needed).
+        assert_eq!(offset_of!(CxRaw, line_starts), 304);
+        assert_eq!(offset_of!(CxRaw, line_starts_len), 312);
+        assert_eq!(size_of::<CxRaw>(), 320);
     }
 
     #[test]

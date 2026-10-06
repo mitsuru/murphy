@@ -159,6 +159,29 @@ fn line_range(source: &str, offset: usize) -> Range {
     }
 }
 
+/// Whole-line bounds (newline excluded) for the line containing `offset`,
+/// resolved through a newline index in O(log L). `trim_cr` selects the
+/// contract: `source_line_range_without_newline` trims a trailing `\r`,
+/// `range_by_whole_lines` keeps it. Matches the respective scan exactly,
+/// including the phantom trailing line and empty-source edges.
+fn indexed_line_range(index: &[u32], bytes: &[u8], offset: usize, trim_cr: bool) -> Range {
+    let line = index.partition_point(|&s| (s as usize) <= offset);
+    let start = index[line - 1] as usize;
+    // A following line start implies a `\n` terminator right before it, so
+    // the newline-excluded end is one byte earlier; the last line runs to EOF.
+    let mut end = index
+        .get(line)
+        .map(|s| (*s as usize) - 1)
+        .unwrap_or(bytes.len());
+    if trim_cr && end > start && bytes[end - 1] == b'\r' {
+        end -= 1;
+    }
+    Range {
+        start: start as u32,
+        end: end as u32,
+    }
+}
+
 fn clamp_range(range: Range, len: usize) -> Range {
     let start = (range.start as usize).min(len);
     let end = (range.end as usize).min(len).max(start);
@@ -724,7 +747,10 @@ impl<'a> Cx<'a> {
     }
 
     fn source_line_range_without_newline(&self, offset: usize) -> Range {
-        let source = self.source().as_bytes();
+        let source = self.source_bytes();
+        if let Some(index) = self.line_starts() {
+            return indexed_line_range(index, source, offset, true);
+        }
         let start = source[..offset]
             .iter()
             .rposition(|&b| b == b'\n')
@@ -774,7 +800,7 @@ impl<'a> Cx<'a> {
     /// Return the byte offset of the first non-comment token after the leading
     /// comment region. Shebangs, comments, and blank lines are transparent.
     pub fn leading_comment_region_end(&self) -> usize {
-        let source = self.source().as_bytes();
+        let source = self.source_bytes();
         let mut line_start = 0;
         while line_start < source.len() {
             let line_end = source[line_start..]
@@ -805,7 +831,7 @@ impl<'a> Cx<'a> {
     }
 
     fn is_own_line_comment(&self, comment: Comment) -> bool {
-        let source = self.source().as_bytes();
+        let source = self.source_bytes();
         let start = comment.range.start as usize;
         let line_start = source[..start]
             .iter()
@@ -2195,7 +2221,16 @@ impl<'a> Cx<'a> {
     /// (`last_line - first_line + 1`), computed from the expression
     /// range's source text.
     fn line_count(&self, id: NodeId) -> usize {
-        self.raw_source(self.range(id)).matches('\n').count() + 1
+        let range = self.range(id);
+        if let Some(index) = self.line_starts() {
+            // Lines touched by `[start, end)`: `last - first + 1`. Exact twin
+            // of the newline count below — an `end` landing on a line start
+            // still counts that line, just as the `\n` before it does.
+            let first = index.partition_point(|&s| s <= range.start);
+            let last = index.partition_point(|&s| s <= range.end);
+            return last - first + 1;
+        }
+        self.raw_source(range).matches('\n').count() + 1
     }
 
     /// `single_line?` — the node's expression spans exactly one line.
@@ -2888,7 +2923,7 @@ impl<'a> Cx<'a> {
     pub fn magic_comments(&self) -> Vec<MagicComment> {
         let mut comments = Vec::new();
         let leading_comment_region_end = self.leading_comment_region_end();
-        if self.source().as_bytes().starts_with(b"#!") {
+        if self.source_bytes().starts_with(b"#!") {
             comments.push(MagicComment {
                 range: self.source_line_range_without_newline(0),
                 key_range: Range::ZERO,
@@ -3389,9 +3424,28 @@ impl<'a> Cx<'a> {
     /// and `include_final_newline` includes that line's terminating `\n` if
     /// it exists. Results are clamped to the file source range.
     pub fn range_by_whole_lines(&self, range: Range, include_final_newline: bool) -> Range {
-        let source = self.source();
-        let bytes = source.as_bytes();
+        let bytes = self.source_bytes();
         let range = clamp_range(range, bytes.len());
+        if let Some(index) = self.line_starts() {
+            // Indexed twin of the scan below: line start of `range.start`,
+            // terminator of the anchor line (`range.end - 1`, or `range.end`
+            // for an empty range), plus the `\n` itself under the flag —
+            // matching the scan's `end`-on-`\n` re-add exactly.
+            let start = indexed_line_range(index, bytes, range.start as usize, false).start;
+            let end_anchor = if range.end > range.start {
+                range.end as usize - 1
+            } else {
+                range.end as usize
+            };
+            let mut end = indexed_line_range(index, bytes, end_anchor, false).end as usize;
+            if end < bytes.len() && bytes[end] == b'\n' && include_final_newline {
+                end += 1;
+            }
+            return Range {
+                start,
+                end: end as u32,
+            };
+        }
         let start = bytes[..range.start as usize]
             .iter()
             .rposition(|&b| b == b'\n')
@@ -3526,6 +3580,19 @@ impl<'a> Cx<'a> {
     pub fn source_bytes(&self) -> &'a [u8] {
         // Safety: the host keeps the source buffer live for every cop call.
         unsafe { slice(self.raw.source, self.raw.source_len) }
+    }
+
+    /// Host-threaded newline index: byte offsets where each source line
+    /// starts (`index[0] == 0`). `None` when the host did not thread one
+    /// (raw-ABI harnesses that build `CxRaw` by hand); line helpers fall
+    /// back to byte scans then. The native dispatch host builds it once
+    /// per file (murphy-utjl.4), turning per-node line lookups from
+    /// O(offset) scans into O(log L) binary searches.
+    pub fn line_starts(&self) -> Option<&'a [u32]> {
+        if self.raw.line_starts_len == 0 || self.raw.line_starts.is_null() {
+            return None;
+        }
+        unsafe { Some(slice(self.raw.line_starts, self.raw.line_starts_len)) }
     }
 
     /// Current source file path, or an empty string if the host cannot expose
@@ -3681,6 +3748,76 @@ mod tests {
     /// Build a `CxRaw` pointing into `ast`'s backing storage. The returned
     /// `CxRaw` borrows both `ast` and `fns` for `'a` (raw-pointer fields,
     /// not lifetime-tracked — the caller keeps both alive).
+    fn cx_raw_with_line_starts<'a>(
+        ast: &'a Ast,
+        fns: &'a FnTable,
+        line_starts: &'a [u32],
+    ) -> CxRaw {
+        let mut raw = cx_raw_for(ast, fns);
+        raw.line_starts = if line_starts.is_empty() {
+            std::ptr::null()
+        } else {
+            line_starts.as_ptr()
+        };
+        raw.line_starts_len = line_starts.len();
+        raw
+    }
+
+    /// Host-style newline index, mirroring `murphy_core::dispatch::build_line_starts`.
+    fn host_line_starts(source: &str) -> Vec<u32> {
+        let mut out = vec![0u32];
+        for (i, &byte) in source.as_bytes().iter().enumerate() {
+            if byte == b'\n' {
+                out.push((i + 1) as u32);
+            }
+        }
+        out
+    }
+
+    /// murphy-utjl.4 parity guard: indexed line math must match the byte
+    /// scans on every offset, including multibyte, CRLF, empty, and
+    /// missing-trailing-newline edges.
+    #[test]
+    fn indexed_line_range_matches_scan() {
+        for source in [
+            "",
+            "\n",
+            "x = 1\n",
+            "x = 1",
+            "a\r\nb\r\n",
+            "a\r\nb",
+            "日本語\nxx\n",
+            "a\n\n\nb\n",
+            "# c\nfoo(\n1,\n2\n)\n",
+        ] {
+            let bytes = source.as_bytes();
+            let index = host_line_starts(source);
+            for offset in 0..=bytes.len() {
+                // Reference: the pre-index scan body of
+                // `source_line_range_without_newline`.
+                let start = bytes[..offset]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |pos| pos + 1);
+                let mut end = bytes[offset..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(bytes.len(), |pos| offset + pos);
+                if end > start && bytes[end - 1] == b'\r' {
+                    end -= 1;
+                }
+                assert_eq!(
+                    indexed_line_range(&index, bytes, offset, true),
+                    Range {
+                        start: start as u32,
+                        end: end as u32
+                    },
+                    "source={source:?} offset={offset}"
+                );
+            }
+        }
+    }
+
     fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         let p = ast.raw_parts();
         let file_path = ast.path().to_str().unwrap_or("");
@@ -3728,6 +3865,56 @@ mod tests {
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
             rails_schema_json: RawSlice::EMPTY,
+            line_starts: std::ptr::null(),
+            line_starts_len: 0,
+        }
+    }
+
+    /// murphy-utjl.4 parity guard: indexed `Cx` line helpers must agree
+    /// with the scan fallback on every node and a sweep of ranges.
+    #[test]
+    fn indexed_cx_line_helpers_match_fallback() {
+        for source in [
+            "puts 1\n",
+            "# c\nfoo(\n  1,\n  2\n)\n",
+            "x = <<~EOS\n  hi\nEOS\nputs x\n",
+            "a\r\nb\r\n",
+            "日本語 = 1\n",
+        ] {
+            let ast = murphy_translate::translate(source, "t.rb");
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let index = host_line_starts(source);
+            let raw_scan = cx_raw_for(&ast, &fns);
+            let raw_indexed = cx_raw_with_line_starts(&ast, &fns, &index);
+            let scan = unsafe { Cx::from_raw(&raw_scan) };
+            let indexed = unsafe { Cx::from_raw(&raw_indexed) };
+            assert!(indexed.line_starts().is_some());
+            assert!(scan.line_starts().is_none());
+            let n = ast.raw_parts().nodes.len() as u32;
+            for i in 0..n {
+                let id = NodeId(i);
+                assert_eq!(
+                    indexed.is_single_line(id),
+                    scan.is_single_line(id),
+                    "single_line {source:?} node {i}"
+                );
+                assert_eq!(
+                    indexed.is_multiline(id),
+                    scan.is_multiline(id),
+                    "multiline {source:?} node {i}"
+                );
+                let range = scan.range(id);
+                for flag in [false, true] {
+                    assert_eq!(
+                        indexed.range_by_whole_lines(range, flag),
+                        scan.range_by_whole_lines(range, flag),
+                        "whole_lines {source:?} node {i} flag {flag}"
+                    );
+                }
+            }
         }
     }
 

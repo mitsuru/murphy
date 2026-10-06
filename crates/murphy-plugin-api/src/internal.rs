@@ -278,6 +278,8 @@ mod tests {
             parse_diagnostics: std::ptr::null(),
             parse_diagnostics_len: 0,
             rails_schema_json: RawSlice::EMPTY,
+            line_starts: std::ptr::null(),
+            line_starts_len: 0,
         }
     }
 
