@@ -1329,6 +1329,8 @@ fn cx_raw_for(
         },
         parse_diagnostics_len: parse_diagnostics.len(),
         rails_schema_json,
+        line_starts: std::ptr::null(),
+        line_starts_len: 0,
     }
 }
 

@@ -97,6 +97,8 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable, cop_name: RawSlice) -> CxRaw {
         parse_diagnostics: std::ptr::null(),
         parse_diagnostics_len: 0,
         rails_schema_json: murphy_plugin_api::RawSlice::EMPTY,
+        line_starts: std::ptr::null(),
+        line_starts_len: 0,
     }
 }
 
