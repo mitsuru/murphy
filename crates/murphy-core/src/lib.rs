@@ -52,7 +52,8 @@ pub use autocorrect::{
 };
 pub use baseline::{BASELINE_VERSION, Baseline, BaselineError, DEFAULT_BASELINE_FILENAME};
 pub use config::{
-    CopRule, MurphyConfig, PluginConfig, PluginDetailed, migrate_rubocop_yml_to_murphy_yml,
+    CompiledCopScopes, CopRule, MurphyConfig, PluginConfig, PluginDetailed,
+    migrate_rubocop_yml_to_murphy_yml,
 };
 pub use discovery::{ConfigError, discover, discover_with_config};
 pub use explain::{

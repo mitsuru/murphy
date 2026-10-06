@@ -442,6 +442,7 @@ fn is_sequential_assignment_value(cx: &Cx<'_>, value: NodeId) -> bool {
         return false;
     }
     let mut stack = vec![value];
+    let mut kids = Vec::new();
     while let Some(id) = stack.pop() {
         if matches!(
             *cx.kind(id),
@@ -453,7 +454,9 @@ fn is_sequential_assignment_value(cx: &Cx<'_>, value: NodeId) -> bool {
         ) {
             return true;
         }
-        stack.extend(cx.children(id));
+        kids.clear();
+        cx.children_into(id, &mut kids);
+        stack.extend_from_slice(&kids);
     }
     false
 }
@@ -534,11 +537,14 @@ fn regexp_node_for_match(cx: &Cx<'_>, call: NodeId) -> Option<NodeId> {
     }
     // Fallback: first Regexp descendant of the call.
     let mut stack = vec![call];
+    let mut kids = Vec::new();
     while let Some(id) = stack.pop() {
         if matches!(*cx.kind(id), NodeKind::Regexp { .. }) {
             return Some(id);
         }
-        stack.extend(cx.children(id));
+        kids.clear();
+        cx.children_into(id, &mut kids);
+        stack.extend_from_slice(&kids);
     }
     None
 }
@@ -657,11 +663,14 @@ fn chained_inner_nodes(cx: &Cx<'_>, writes: &[Write]) -> std::collections::HashS
         }
         // Collect descendant Lvasgn writes inside the chained value.
         let mut stack = vec![val];
+        let mut kids = Vec::new();
         while let Some(id) = stack.pop() {
             if id != w.node && by_node.contains_key(&id) {
                 ignored.insert(id);
             }
-            stack.extend(cx.children(id));
+            kids.clear();
+            cx.children_into(id, &mut kids);
+            stack.extend_from_slice(&kids);
         }
     }
     ignored
@@ -675,11 +684,14 @@ fn is_chained_value(cx: &Cx<'_>, value: NodeId) -> bool {
         NodeKind::Lvasgn { .. } => true,
         NodeKind::Send { .. } => {
             let mut stack = vec![value];
+            let mut kids = Vec::new();
             while let Some(id) = stack.pop() {
                 if matches!(*cx.kind(id), NodeKind::Lvasgn { .. }) {
                     return true;
                 }
-                stack.extend(cx.children(id));
+                kids.clear();
+                cx.children_into(id, &mut kids);
+                stack.extend_from_slice(&kids);
             }
             false
         }
@@ -690,14 +702,16 @@ fn is_chained_value(cx: &Cx<'_>, value: NodeId) -> bool {
 fn scope_nodes(cx: &Cx<'_>, root: NodeId) -> Vec<NodeId> {
     let mut out = Vec::new();
     let mut stack = vec![root];
+    let mut kids = Vec::new();
     while let Some(node) = stack.pop() {
         out.push(node);
         if node != root && is_scope(cx, node) {
             continue;
         }
-        let mut children = cx.children(node);
-        children.reverse();
-        stack.extend(children);
+        kids.clear();
+        cx.children_into(node, &mut kids);
+        kids.reverse();
+        stack.extend_from_slice(&kids);
     }
     out
 }

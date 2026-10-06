@@ -1027,8 +1027,15 @@ impl<'a> Cx<'a> {
     /// shows it matters.
     pub fn children(&self, id: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
-        collect_children(self.kind(id), self.lists(), &mut out);
+        self.children_into(id, &mut out);
         out
+    }
+
+    /// Direct children of `id`, appended to `out` (which is **not** cleared).
+    /// The buffer-reuse twin of [`Self::children`] (murphy-utjl.5): worklist
+    /// walks hoist one buffer outside the loop instead of allocating per node.
+    pub fn children_into(&self, id: NodeId, out: &mut Vec<NodeId>) {
+        collect_children(self.kind(id), self.lists(), out);
     }
 
     /// Ancestors of `id`, nearest first, up to and including the root.
@@ -1059,21 +1066,30 @@ impl<'a> Cx<'a> {
         })
     }
 
-    /// All descendants of `id` in DFS pre-order, excluding `id`. Allocates
-    /// one `Vec` per call (plus per-node `Vec`s via [`Self::children`]); an
-    /// allocation-free iterator variant could be added later if profiling
-    /// shows it matters.
+    /// All descendants of `id` in DFS pre-order, excluding `id`. One
+    /// allocation total (the returned `Vec`); the walk reuses a single
+    /// stack buffer instead of one `Vec` per node (murphy-utjl.5).
     pub fn descendants(&self, id: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
-        let mut stack = self.children(id);
+        self.descendants_into(id, &mut out);
+        out
+    }
+
+    /// All descendants of `id` in DFS pre-order appended to `out` (which is
+    /// **not** cleared). The buffer-reuse twin of [`Self::descendants`]
+    /// (murphy-utjl.5).
+    pub fn descendants_into(&self, id: NodeId, out: &mut Vec<NodeId>) {
+        let mut stack = Vec::new();
+        self.children_into(id, &mut stack);
         stack.reverse();
+        let mut kids = Vec::new();
         while let Some(n) = stack.pop() {
             out.push(n);
-            let mut kids = self.children(n);
+            kids.clear();
+            self.children_into(n, &mut kids);
             kids.reverse();
-            stack.extend(kids);
+            stack.extend_from_slice(&kids);
         }
-        out
     }
 
     /// Resolve an interner index (`Symbol` / `StringId`) to its string.
@@ -1608,37 +1624,49 @@ impl<'a> Cx<'a> {
     pub fn is_recursive_basic_literal(&self, id: NodeId) -> bool {
         const LITERAL_RECURSIVE_METHODS: &[&str] =
             &["==", "===", "!=", "<=", ">=", ">", "<", "*", "!", "<=>"];
-        match self.kind(id) {
-            NodeKind::Send { .. } | NodeKind::Csend { .. } => {
-                let Some(name) = self.method_name(id) else {
-                    return false;
-                };
-                LITERAL_RECURSIVE_METHODS.contains(&name)
-                    && self
-                        .call_receiver(id)
-                        .get()
-                        .is_some_and(|r| self.is_recursive_basic_literal(r))
-                    && self
-                        .call_arguments(id)
-                        .iter()
-                        .all(|&a| self.is_recursive_basic_literal(a))
+        // Iterative twin of the old recursion (murphy-utjl.5): one reused
+        // buffer instead of a `Vec` per composite node. Conjunctive, so
+        // visit order is irrelevant; short-circuit kept.
+        let mut stack = vec![id];
+        let mut kids = Vec::new();
+        while let Some(n) = stack.pop() {
+            match self.kind(n) {
+                NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+                    let Some(name) = self.method_name(n) else {
+                        return false;
+                    };
+                    if !LITERAL_RECURSIVE_METHODS.contains(&name) {
+                        return false;
+                    }
+                    let Some(r) = self.call_receiver(n).get() else {
+                        return false;
+                    };
+                    stack.push(r);
+                    stack.extend_from_slice(self.call_arguments(n));
+                }
+                NodeKind::And { .. }
+                | NodeKind::Or { .. }
+                | NodeKind::Dstr(..)
+                | NodeKind::Xstr(..)
+                | NodeKind::Dsym(..)
+                | NodeKind::Array(..)
+                | NodeKind::Hash(..)
+                | NodeKind::RangeExpr { .. }
+                | NodeKind::Regexp { .. }
+                | NodeKind::Begin(..)
+                | NodeKind::Pair { .. } => {
+                    kids.clear();
+                    self.children_into(n, &mut kids);
+                    stack.extend_from_slice(&kids);
+                }
+                _ => {
+                    if !self.is_basic_literal(n) {
+                        return false;
+                    }
+                }
             }
-            NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Dstr(..)
-            | NodeKind::Xstr(..)
-            | NodeKind::Dsym(..)
-            | NodeKind::Array(..)
-            | NodeKind::Hash(..)
-            | NodeKind::RangeExpr { .. }
-            | NodeKind::Regexp { .. }
-            | NodeKind::Begin(..)
-            | NodeKind::Pair { .. } => self
-                .children(id)
-                .iter()
-                .all(|&c| self.is_recursive_basic_literal(c)),
-            _ => self.is_basic_literal(id),
         }
+        true
     }
 
     /// `mutable_literal?` — RuboCop's `MUTABLE_LITERALS`
@@ -1687,37 +1715,49 @@ impl<'a> Cx<'a> {
     pub fn is_recursive_literal(&self, id: NodeId) -> bool {
         const LITERAL_RECURSIVE_METHODS: &[&str] =
             &["==", "===", "!=", "<=", ">=", ">", "<", "*", "!", "<=>"];
-        match self.kind(id) {
-            NodeKind::Send { .. } | NodeKind::Csend { .. } => {
-                let Some(name) = self.method_name(id) else {
-                    return false;
-                };
-                LITERAL_RECURSIVE_METHODS.contains(&name)
-                    && self
-                        .call_receiver(id)
-                        .get()
-                        .is_some_and(|r| self.is_recursive_literal(r))
-                    && self
-                        .call_arguments(id)
-                        .iter()
-                        .all(|&a| self.is_recursive_literal(a))
+        // Iterative twin of the old recursion (murphy-utjl.5): one reused
+        // buffer instead of a `Vec` per composite node. Conjunctive, so
+        // visit order is irrelevant; short-circuit kept.
+        let mut stack = vec![id];
+        let mut kids = Vec::new();
+        while let Some(n) = stack.pop() {
+            match self.kind(n) {
+                NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+                    let Some(name) = self.method_name(n) else {
+                        return false;
+                    };
+                    if !LITERAL_RECURSIVE_METHODS.contains(&name) {
+                        return false;
+                    }
+                    let Some(r) = self.call_receiver(n).get() else {
+                        return false;
+                    };
+                    stack.push(r);
+                    stack.extend_from_slice(self.call_arguments(n));
+                }
+                NodeKind::And { .. }
+                | NodeKind::Or { .. }
+                | NodeKind::Dstr(..)
+                | NodeKind::Xstr(..)
+                | NodeKind::Dsym(..)
+                | NodeKind::Array(..)
+                | NodeKind::Hash(..)
+                | NodeKind::RangeExpr { .. }
+                | NodeKind::Regexp { .. }
+                | NodeKind::Begin(..)
+                | NodeKind::Pair { .. } => {
+                    kids.clear();
+                    self.children_into(n, &mut kids);
+                    stack.extend_from_slice(&kids);
+                }
+                _ => {
+                    if !self.is_literal(n) {
+                        return false;
+                    }
+                }
             }
-            NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Dstr(..)
-            | NodeKind::Xstr(..)
-            | NodeKind::Dsym(..)
-            | NodeKind::Array(..)
-            | NodeKind::Hash(..)
-            | NodeKind::RangeExpr { .. }
-            | NodeKind::Regexp { .. }
-            | NodeKind::Begin(..)
-            | NodeKind::Pair { .. } => self
-                .children(id)
-                .iter()
-                .all(|&c| self.is_recursive_literal(c)),
-            _ => self.is_literal(id),
         }
+        true
     }
 
     /// `operator_keyword?` — RuboCop's `OPERATOR_KEYWORDS` (`and`, `or`).
@@ -2063,45 +2103,55 @@ impl<'a> Cx<'a> {
     /// `until_post`/`while_post` are folded into [`NodeKind::Until`]/
     /// [`NodeKind::While`] (a `post` flag), so both forms are covered.
     pub fn is_pure(&self, id: NodeId) -> bool {
-        match self.kind(id) {
-            // Pure value leaves — always pure.
-            NodeKind::Const { .. }
-            | NodeKind::Cvar(..)
-            | NodeKind::Defined(..)
-            | NodeKind::False_
-            | NodeKind::Float(..)
-            | NodeKind::Gvar(..)
-            | NodeKind::Int(..)
-            | NodeKind::Ivar(..)
-            | NodeKind::Lvar(..)
-            | NodeKind::Nil
-            | NodeKind::Str(..)
-            | NodeKind::Sym(..)
-            | NodeKind::True_
-            | NodeKind::Regopt(..) => true,
-            // Composites — pure iff every child node is pure.
-            NodeKind::And { .. }
-            | NodeKind::Or { .. }
-            | NodeKind::Array(..)
-            | NodeKind::Begin(..)
-            | NodeKind::Kwbegin(..)
-            | NodeKind::Case { .. }
-            | NodeKind::Dstr(..)
-            | NodeKind::Dsym(..)
-            | NodeKind::Ensure { .. }
-            | NodeKind::RangeExpr { .. }
-            | NodeKind::FlipFlop { .. }
-            | NodeKind::For { .. }
-            | NodeKind::Hash(..)
-            | NodeKind::If { .. }
-            | NodeKind::Not(..)
-            | NodeKind::Pair { .. }
-            | NodeKind::Regexp { .. }
-            | NodeKind::Until { .. }
-            | NodeKind::When { .. }
-            | NodeKind::While { .. } => self.children(id).iter().all(|&c| self.is_pure(c)),
-            _ => false,
+        // Iterative subtree walk with one reused buffer (murphy-utjl.5):
+        // the recursive form allocated a `Vec` per composite node.
+        // Conjunctive, so visit order is irrelevant; short-circuit kept.
+        let mut stack = vec![id];
+        let mut kids = Vec::new();
+        while let Some(n) = stack.pop() {
+            match self.kind(n) {
+                NodeKind::Const { .. }
+                | NodeKind::Cvar(..)
+                | NodeKind::Defined(..)
+                | NodeKind::False_
+                | NodeKind::Float(..)
+                | NodeKind::Gvar(..)
+                | NodeKind::Int(..)
+                | NodeKind::Ivar(..)
+                | NodeKind::Lvar(..)
+                | NodeKind::Nil
+                | NodeKind::Str(..)
+                | NodeKind::Sym(..)
+                | NodeKind::True_
+                | NodeKind::Regopt(..) => {}
+                NodeKind::And { .. }
+                | NodeKind::Or { .. }
+                | NodeKind::Array(..)
+                | NodeKind::Begin(..)
+                | NodeKind::Kwbegin(..)
+                | NodeKind::Case { .. }
+                | NodeKind::Dstr(..)
+                | NodeKind::Dsym(..)
+                | NodeKind::Ensure { .. }
+                | NodeKind::RangeExpr { .. }
+                | NodeKind::FlipFlop { .. }
+                | NodeKind::For { .. }
+                | NodeKind::Hash(..)
+                | NodeKind::If { .. }
+                | NodeKind::Not(..)
+                | NodeKind::Pair { .. }
+                | NodeKind::Regexp { .. }
+                | NodeKind::Until { .. }
+                | NodeKind::When { .. }
+                | NodeKind::While { .. } => {
+                    kids.clear();
+                    self.children_into(n, &mut kids);
+                    stack.extend_from_slice(&kids);
+                }
+                _ => return false,
+            }
         }
+        true
     }
 
     /// The parser-gem child **slots** of `id` (see
@@ -2111,8 +2161,25 @@ impl<'a> Cx<'a> {
     /// RuboCop's `node.children`.
     pub fn slot_layout(&self, id: NodeId) -> Vec<Option<NodeId>> {
         let mut out = Vec::new();
-        slot_layout(self.kind(id), self.lists(), &mut out);
+        self.slot_layout_into(id, &mut out);
         out
+    }
+
+    /// Parser-gem child **slots** of `id`, appended to `out` (which is
+    /// **not** cleared). The buffer-reuse twin of [`Self::slot_layout`]
+    /// (murphy-utjl.5).
+    pub fn slot_layout_into(&self, id: NodeId, out: &mut Vec<Option<NodeId>>) {
+        slot_layout(self.kind(id), self.lists(), out);
+    }
+
+    /// `Node#sibling_index` with a caller-reused slot buffer (murphy-utjl.5):
+    /// no allocation when `slots` has capacity. Identical result to
+    /// [`Self::sibling_index`].
+    fn sibling_index_with(&self, id: NodeId, slots: &mut Vec<Option<NodeId>>) -> Option<usize> {
+        let parent = self.parent(id).get()?;
+        slots.clear();
+        self.slot_layout_into(parent, slots);
+        slots.iter().position(|slot| *slot == Some(id))
     }
 
     /// `Node#sibling_index` — the zero-based position of `id` within its
@@ -2178,6 +2245,19 @@ impl<'a> Cx<'a> {
     /// [`NodeKind::Until`]; [`NodeKind::FlipFlop`] is a pass-through
     /// container like [`NodeKind::RangeExpr`].
     pub fn is_value_used(&self, id: NodeId) -> bool {
+        // One buffer pair for the whole ancestor walk (murphy-utjl.5):
+        // the recursion below reuses them instead of allocating per step.
+        let mut kids = Vec::new();
+        let mut slots = Vec::new();
+        self.is_value_used_inner(id, &mut kids, &mut slots)
+    }
+
+    fn is_value_used_inner(
+        &self,
+        id: NodeId,
+        kids: &mut Vec<NodeId>,
+        slots: &mut Vec<Option<NodeId>>,
+    ) -> bool {
         let Some(parent) = self.parent(id).get() else {
             return false;
         };
@@ -2197,21 +2277,28 @@ impl<'a> Cx<'a> {
             | NodeKind::Str(..)
             | NodeKind::Sym(..)
             | NodeKind::When { .. }
-            | NodeKind::Xstr(..) => self.is_value_used(parent),
+            | NodeKind::Xstr(..) => self.is_value_used_inner(parent, kids, slots),
             // begin/kwbegin: only the last child's value is the block's value.
             NodeKind::Begin(..) | NodeKind::Kwbegin(..) => {
-                self.children(parent).last() == Some(&id) && self.is_value_used(parent)
+                kids.clear();
+                self.children_into(parent, kids);
+                kids.last() == Some(&id) && self.is_value_used_inner(parent, kids, slots)
             }
             // for var in enum; body; end → the body (index 2) flows to parent;
             // the var/enum (index 0/1) are used by the loop construct.
-            NodeKind::For { .. } if self.sibling_index(id) == Some(2) => self.is_value_used(parent),
+            NodeKind::For { .. } if self.sibling_index_with(id, slots) == Some(2) => {
+                self.is_value_used_inner(parent, kids, slots)
+            }
             NodeKind::For { .. } => true,
             // if/case: the condition (index 0) is used; branches flow to parent.
             NodeKind::If { .. } | NodeKind::Case { .. } => {
-                self.sibling_index(id) == Some(0) || self.is_value_used(parent)
+                self.sibling_index_with(id, slots) == Some(0)
+                    || self.is_value_used_inner(parent, kids, slots)
             }
             // while/until evaluate to nil: only the condition (index 0) is used.
-            NodeKind::While { .. } | NodeKind::Until { .. } => self.sibling_index(id) == Some(0),
+            NodeKind::While { .. } | NodeKind::Until { .. } => {
+                self.sibling_index_with(id, slots) == Some(0)
+            }
             _ => true,
         }
     }
@@ -3915,6 +4002,36 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// murphy-utjl.5 parity guard: buffer-reuse twins must equal the
+    /// allocating originals on every node.
+    #[test]
+    fn into_twins_match_allocating_originals() {
+        let source = "def f(a)\n  foo(a, [1, {b: 2}])\nend\n";
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let n = ast.raw_parts().nodes.len() as u32;
+        let mut kids = Vec::new();
+        let mut desc = Vec::new();
+        let mut slots = Vec::new();
+        for i in 0..n {
+            let id = NodeId(i);
+            kids.clear();
+            cx.children_into(id, &mut kids);
+            assert_eq!(kids, cx.children(id), "children node {i}");
+            desc.clear();
+            cx.descendants_into(id, &mut desc);
+            assert_eq!(desc, cx.descendants(id), "descendants node {i}");
+            slots.clear();
+            cx.slot_layout_into(id, &mut slots);
+            assert_eq!(slots, cx.slot_layout(id), "slot_layout node {i}");
         }
     }
 
