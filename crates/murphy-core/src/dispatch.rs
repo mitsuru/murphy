@@ -204,6 +204,7 @@ fn build_cx_raw(
     config_disabled_cops: &[RawSlice],
     parse_diagnostics: &[WireParseDiagnostic],
     rails_schema_json: &str,
+    line_starts: &[u32],
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -262,7 +263,28 @@ fn build_cx_raw(
                 len: rails_schema_json.len(),
             }
         },
+        line_starts: if line_starts.is_empty() {
+            std::ptr::null()
+        } else {
+            line_starts.as_ptr()
+        },
+        line_starts_len: line_starts.len(),
     }
+}
+
+/// Newline offsets for one file's source, as `u32` line starts
+/// (`out[0] == 0`). Built once per dispatched file (murphy-utjl.4) and
+/// threaded into every cop's `CxRaw` so line helpers resolve in O(log L).
+/// Callers guarantee the source fits the `u32` offset domain (ADR 0001).
+fn build_line_starts(source: &[u8]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(source.len() / 40 + 1);
+    out.push(0);
+    for (i, &byte) in source.iter().enumerate() {
+        if byte == b'\n' {
+            out.push((i + 1) as u32);
+        }
+    }
+    out
 }
 
 /// `true` when `node_id` is a `Send` whose `method` symbol resolves to
@@ -526,6 +548,10 @@ fn run_cops_inner<O: AsRef<[u8]>>(
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
+    // Newline index shared by every cop on this file (murphy-utjl.4):
+    // one O(N) pass here replaces per-node whole-file scans. Lives in
+    // this scope so `base.line_starts` stays valid for the dispatch loop.
+    let line_starts = build_line_starts(ast.source().as_bytes());
     let mut node_slice_arena = NodeSliceArena::default();
     // Wire view borrowing the owned messages. `wire` outlives the dispatch
     // loop below (same function scope), so the `CxRaw` pointer stays valid.
@@ -551,6 +577,7 @@ fn run_cops_inner<O: AsRef<[u8]>>(
         config_disabled_cops,
         &wire,
         rails_schema_json,
+        &line_starts,
     );
     for cop in cops {
         base.cop_name = cop.name;

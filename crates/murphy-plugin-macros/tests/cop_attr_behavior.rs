@@ -75,6 +75,8 @@ fn cx_raw_for<'a>(ast: &'a murphy_ast::Ast, fns: &'a FnTable) -> CxRaw {
         parse_diagnostics: std::ptr::null(),
         parse_diagnostics_len: 0,
         rails_schema_json: murphy_plugin_api::RawSlice::EMPTY,
+        line_starts: std::ptr::null(),
+        line_starts_len: 0,
     }
 }
 
