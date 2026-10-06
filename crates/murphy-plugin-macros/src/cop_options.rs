@@ -6,7 +6,7 @@
 //! ADR 0036.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{ToTokens, quote};
 use syn::{
     Data, DeriveInput, Expr, ExprArray, ExprLit, Fields, GenericArgument, Ident, Lit, Path,
     PathArguments, Type, spanned::Spanned,
@@ -53,10 +53,12 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
 
     let default_impl = generate_default(struct_name, &parsed);
     let copoptions_impl = generate_copoptions(struct_name, &parsed);
+    let clone_impl = generate_clone(struct_name, &parsed);
 
     Ok(quote! {
         #default_impl
         #copoptions_impl
+        #clone_impl
     })
 }
 
@@ -86,6 +88,44 @@ fn generate_unit(name: &Ident) -> TokenStream {
             }
         }
         impl ::murphy_plugin_api::CopOptions for #name {}
+        impl ::core::clone::Clone for #name {
+            fn clone(&self) -> Self {
+                Self
+            }
+        }
+    }
+}
+
+/// `Clone` for an options struct (murphy-l7i0.1): every scalar field type
+/// (`bool`, `i64`, `String`, `Vec<String>`, `Option<…>`) is `Clone`; enum
+/// fields get a `Clone` where-bound so a future non-`Clone` enum is a
+/// compile error at the impl, not silent wrong behavior.
+fn generate_clone(name: &Ident, fields: &[ParsedField]) -> TokenStream {
+    use std::collections::BTreeSet;
+    let mut enums = BTreeSet::new();
+    for f in fields {
+        if let FieldType::Enum(path) = &f.ty {
+            enums.insert(path.to_token_stream().to_string());
+        }
+    }
+    let bounds: Vec<TokenStream> = enums
+        .iter()
+        .map(|e| {
+            let path: Path = syn::parse_str(e).expect("enum path re-parses");
+            quote! { #path: ::core::clone::Clone }
+        })
+        .collect();
+    let clones = fields.iter().map(|f| {
+        let ident = &f.ident;
+        quote! { #ident: self.#ident.clone() }
+    });
+    let where_clause = (!bounds.is_empty()).then(|| quote! { where #(#bounds),* });
+    quote! {
+        impl ::core::clone::Clone for #name #where_clause {
+            fn clone(&self) -> Self {
+                Self { #(#clones),* }
+            }
+        }
     }
 }
 

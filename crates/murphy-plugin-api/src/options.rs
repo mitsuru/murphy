@@ -1,7 +1,56 @@
 //! The `CopOptions` trait: a cop's typed view of its config table.
 
+use std::any::{Any, TypeId};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::abi::OptionSpec;
 use crate::config_error::ConfigError;
+
+/// Thread-local decode cache for cop options (murphy-l7i0.1).
+///
+/// `options_json` bytes are constant per (cop, run) while cops decode them
+/// on every matching node. Keyed by `(TypeId, buffer address, length)` with
+/// the bytes snapshotted for content verification, so a reused address with
+/// different content can never return a stale value.
+struct OptionsCacheEntry {
+    bytes: Vec<u8>,
+    value: Box<dyn Any>,
+}
+
+thread_local! {
+    static OPTIONS_CACHE: RefCell<HashMap<(TypeId, *const u8, usize), OptionsCacheEntry>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Decode cop options with a per-thread cache (murphy-l7i0.1).
+///
+/// The first call for distinct `(T, bytes)` parses via
+/// [`CopOptions::from_config_json`]; repeats after that pay only a map
+/// lookup, a byte compare, and a `Clone` — no serde. Requires `T: Clone`
+/// (emitted automatically by `#[derive(CopOptions)]`; hand-written option
+/// structs need `#[derive(Clone)]` or equivalent).
+pub fn from_config_json_cached<T: CopOptions + Clone>(bytes: &[u8]) -> Result<T, ConfigError> {
+    let key = (TypeId::of::<T>(), bytes.as_ptr(), bytes.len());
+    OPTIONS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(entry) = cache.get(&key)
+            && entry.bytes.as_slice() == bytes
+            && let Some(value) = entry.value.downcast_ref::<T>()
+        {
+            return Ok(value.clone());
+        }
+        let value = T::from_config_json(bytes)?;
+        cache.insert(
+            key,
+            OptionsCacheEntry {
+                bytes: bytes.to_vec(),
+                value: Box::new(value.clone()),
+            },
+        );
+        Ok(value)
+    })
+}
 
 /// A cop's option struct, backing its `[cops.rules."Name"]` table.
 ///

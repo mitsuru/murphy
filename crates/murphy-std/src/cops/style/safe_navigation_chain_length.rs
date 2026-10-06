@@ -52,7 +52,7 @@ use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, cop};
 pub struct SafeNavigationChainLength;
 
 /// Options for `Style/SafeNavigationChainLength`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SafeNavigationChainLengthOptions {
     pub max: i64,
 }
