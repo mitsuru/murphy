@@ -1792,33 +1792,34 @@ fn lint_files_memoized(
                 options,
                 cache,
             );
-            if let Some(rc) = result_cache {
-                let hash = content_hash(content.as_bytes());
-                for &path in &misses {
-                    let owned: Vec<Offense> = base
-                        .iter()
-                        .map(|o| {
-                            let mut c = o.clone();
-                            c.file = path.to_string();
-                            c
-                        })
-                        .collect();
-                    if let Ok(bytes) = serde_json::to_vec(&owned) {
-                        rc.put(&hash, path, &bytes);
-                    }
-                }
+            // Fan-out with one clone set total (murphy-utjl.8): the old code
+            // cloned every offense once per path for the cache write AND
+            // again for the output (~2x). Now the representative's offenses
+            // move untouched (its `file` is already correct; serializing
+            // borrows), and only the other paths clone with `file` rewritten.
+            let content_hash_opt = result_cache.map(|_| content_hash(content.as_bytes()));
+            if let (Some(rc), Some(hash)) = (result_cache, content_hash_opt.as_ref())
+                && let Ok(bytes) = serde_json::to_vec(&base)
+            {
+                rc.put(hash, representative, &bytes);
             }
-            // `base` carries the representative's `file`; rewrite per
-            // miss path (representative itself needs no rewrite).
-            for o in &base {
-                all.push(o.clone());
-            }
+            let base_start = all.len();
+            all.extend(base);
             for &other in &misses[1..] {
-                for o in &base {
-                    let mut cloned = o.clone();
-                    cloned.file = other.to_string();
-                    all.push(cloned);
+                let owned: Vec<Offense> = all[base_start..]
+                    .iter()
+                    .map(|o| {
+                        let mut c = o.clone();
+                        c.file = other.to_string();
+                        c
+                    })
+                    .collect();
+                if let (Some(rc), Some(hash)) = (result_cache, content_hash_opt.as_ref())
+                    && let Ok(bytes) = serde_json::to_vec(&owned)
+                {
+                    rc.put(hash, other, &bytes);
                 }
+                all.extend(owned);
             }
             all
         })
