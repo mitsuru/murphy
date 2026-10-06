@@ -1033,11 +1033,15 @@ struct InlineDirective {
 #[derive(Debug, Clone)]
 struct DirectiveState {
     disable_all: bool,
-    disabled_cops: BTreeSet<String>,
+    // Shared snapshots of the running range-directive sets (murphy-utjl.2):
+    // every line used to deep-clone both sets (O(lines x cops)). The builder
+    // mutates through `Arc::make_mut` (which clones only on directive lines,
+    // when a previous snapshot is shared) and snapshots with O(1) `Arc::clone`.
+    disabled_cops: Arc<BTreeSet<String>>,
     /// Cops re-enabled inside a `disable all` region via `# rubocop:enable <Cop>`.
     /// While `disable_all` is set, an offense is still reported if its cop matches
     /// an entry here, mirroring RuboCop's "disable all, then opt one back in".
-    enabled_exceptions: BTreeSet<String>,
+    enabled_exceptions: Arc<BTreeSet<String>>,
     todo_all: bool,
     todo_cops: BTreeSet<String>,
     /// Next-line suppression from a full-line `# rubocop:disable-next` /
@@ -1130,12 +1134,26 @@ fn directive_states_by_line(
 ) -> Vec<DirectiveState> {
     let mut states = Vec::new();
     let mut disable_all = false;
-    let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
-    let mut enabled_exceptions: BTreeSet<String> = BTreeSet::new();
+    let mut disabled_cops: Arc<BTreeSet<String>> = Arc::new(BTreeSet::new());
+    let mut enabled_exceptions: Arc<BTreeSet<String>> = Arc::new(BTreeSet::new());
     // Full-line `disable-next` / `todo-next` directives collected with their
     // 1-based line numbers; resolved to statement ranges after the loop
     // (RuboCop 1.91 next-statement scope, murphy-bjrg.6).
     let mut next_directives: Vec<(usize, bool, Vec<String>)> = Vec::new();
+
+    // Line index shared by the main loop (comment lookup) and the
+    // next-directive resolution below (murphy-utjl.2): one O(N) build
+    // instead of a linear comment scan per line.
+    let starts = line_starts(source);
+    // 1-based line -> index of the first comment starting on it. `comments`
+    // arrive in source order, so the first write wins; lookup is O(1).
+    let mut first_comment_on_line: Vec<Option<usize>> = vec![None; starts.len() + 1];
+    for (idx, range) in comments.iter().enumerate() {
+        let line = line_of(&starts, range.start as usize);
+        if first_comment_on_line[line].is_none() {
+            first_comment_on_line[line] = Some(idx);
+        }
+    }
 
     let mut offset = 0usize;
     let mut line_no = 0usize;
@@ -1148,9 +1166,7 @@ fn directive_states_by_line(
 
         // Only a real comment token on this line can carry a directive — a `#`
         // inside a string/heredoc is not a comment and must be ignored.
-        let comment = comments
-            .iter()
-            .find(|r| (r.start as usize) >= line_start && (r.start as usize) < line_end);
+        let comment = first_comment_on_line[line_no].map(|idx| &comments[idx]);
         let directive =
             comment.and_then(|r| parse_inline_directive(&source[r.start as usize..r.end as usize]));
 
@@ -1171,16 +1187,16 @@ fn directive_states_by_line(
             match (&directive.kind, is_full_line, all) {
                 (InlineDirectiveKind::Enable, _, true) => {
                     disable_all = false;
-                    disabled_cops.clear();
-                    enabled_exceptions.clear();
+                    Arc::make_mut(&mut disabled_cops).clear();
+                    Arc::make_mut(&mut enabled_exceptions).clear();
                 }
                 (InlineDirectiveKind::Enable, _, false) => {
                     for cop in &directive.cops {
-                        disabled_cops.remove(cop);
+                        Arc::make_mut(&mut disabled_cops).remove(cop);
                         // Re-enabling inside a `disable all` region opts this cop
                         // back in even though the blanket disable stays active.
                         if disable_all {
-                            enabled_exceptions.insert(cop.clone());
+                            Arc::make_mut(&mut enabled_exceptions).insert(cop.clone());
                         }
                     }
                 }
@@ -1189,13 +1205,13 @@ fn directive_states_by_line(
                 (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, true, true) => {
                     disable_all = true;
                     // A fresh blanket disable resets prior per-cop opt-ins.
-                    enabled_exceptions.clear();
+                    Arc::make_mut(&mut enabled_exceptions).clear();
                 }
                 (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, true, false) => {
                     for cop in &directive.cops {
-                        enabled_exceptions.remove(cop);
+                        Arc::make_mut(&mut enabled_exceptions).remove(cop);
                     }
-                    disabled_cops.extend(directive.cops);
+                    Arc::make_mut(&mut disabled_cops).extend(directive.cops);
                 }
                 // A trailing `disable`/`todo` (code before the `#`) scopes to its
                 // own line only; the line-local channel reuses the `todo_*` fields.
@@ -1223,8 +1239,8 @@ fn directive_states_by_line(
 
         states.push(DirectiveState {
             disable_all,
-            disabled_cops: disabled_cops.clone(),
-            enabled_exceptions: enabled_exceptions.clone(),
+            disabled_cops: Arc::clone(&disabled_cops),
+            enabled_exceptions: Arc::clone(&enabled_exceptions),
             todo_all,
             todo_cops,
             next_all: false,
@@ -1240,9 +1256,11 @@ fn directive_states_by_line(
     // directive (stacked directives share it); a blank line or EOF detaches
     // (suppresses nothing). The range covers the whole statement starting
     // on that line, mirroring RuboCop 1.91 `DisableNext`.
-    let starts = line_starts(source);
+    // (`starts` is the index hoisted above for the main loop.)
     for (dir_line, all, cops) in next_directives {
-        let Some(code_line) = attached_code_line(&starts, source, comments, dir_line) else {
+        let Some(code_line) =
+            attached_code_line(&starts, source, comments, &first_comment_on_line, dir_line)
+        else {
             continue;
         };
         let end_line = statement_end_line(code_line, ast, &starts);
@@ -1292,18 +1310,22 @@ fn is_blank_line(source: &str, starts: &[usize], line: usize) -> bool {
 
 /// True when 1-based `line` holds only whitespace plus a real comment token
 /// (a `#` inside a string/heredoc is not a comment and never counts).
-fn is_comment_only_line(source: &str, comments: &[Range], starts: &[usize], line: usize) -> bool {
+/// `first_comment_on_line` is the murphy-utjl.2 index (1-based line ->
+/// first comment index); the per-line slice scan is gone.
+fn is_comment_only_line(
+    source: &str,
+    comments: &[Range],
+    first_comment_on_line: &[Option<usize>],
+    starts: &[usize],
+    line: usize,
+) -> bool {
     let Some(&ls) = starts.get(line - 1) else {
         return false;
     };
-    let le = starts.get(line).copied().unwrap_or(source.len());
-    let Some(first) = comments
-        .iter()
-        .find(|r| (r.start as usize) >= ls && (r.start as usize) < le)
-        .map(|r| r.start as usize)
-    else {
+    let Some(&idx) = first_comment_on_line.get(line).and_then(|o| o.as_ref()) else {
         return false;
     };
+    let first = comments[idx].start as usize;
     source.as_bytes()[ls..first]
         .iter()
         .all(u8::is_ascii_whitespace)
@@ -1316,6 +1338,7 @@ fn attached_code_line(
     starts: &[usize],
     source: &str,
     comments: &[Range],
+    first_comment_on_line: &[Option<usize>],
     dir_line: usize,
 ) -> Option<usize> {
     let mut line = dir_line + 1;
@@ -1323,7 +1346,7 @@ fn attached_code_line(
         if line > starts.len() {
             return None;
         }
-        if is_comment_only_line(source, comments, starts, line) {
+        if is_comment_only_line(source, comments, first_comment_on_line, starts, line) {
             line += 1;
             continue;
         }
@@ -1398,32 +1421,41 @@ fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
         return false;
     }
     let start = offense.range.start_offset as usize;
-    for state in states {
-        if start >= state.line_start && start < state.line_end {
-            // A blanket `disable all` suppresses everything except cops that were
-            // explicitly opted back in with a later `# rubocop:enable <Cop>`.
-            let blanket_disabled =
-                state.disable_all && !cop_set_matches(&state.enabled_exceptions, &offense.cop_name);
-            return blanket_disabled
-                || cop_set_matches(&state.disabled_cops, &offense.cop_name)
-                || state.todo_all
-                || cop_set_matches(&state.todo_cops, &offense.cop_name)
-                || state.next_all
-                || cop_set_matches(&state.next_cops, &offense.cop_name);
-        }
+    // States are built in line order with contiguous ranges (murphy-utjl.2),
+    // so the containing line is a binary search, not a scan: O(log L) per
+    // offense instead of O(L).
+    let idx = states.partition_point(|state| state.line_start <= start);
+    let Some(state) = idx.checked_sub(1).and_then(|i| states.get(i)) else {
+        return false;
+    };
+    if !(start >= state.line_start && start < state.line_end) {
+        return false;
     }
-    false
+    // The department fragment is hoisted: `cop_set_matches` split it once
+    // per set (up to 4x per offense) before.
+    let department = offense.cop_name.split('/').next();
+    // A blanket `disable all` suppresses everything except cops that were
+    // explicitly opted back in with a later `# rubocop:enable <Cop>`.
+    let blanket_disabled = state.disable_all
+        && !cop_set_matches(&state.enabled_exceptions, &offense.cop_name, department);
+    blanket_disabled
+        || cop_set_matches(&state.disabled_cops, &offense.cop_name, department)
+        || state.todo_all
+        || cop_set_matches(&state.todo_cops, &offense.cop_name, department)
+        || state.next_all
+        || cop_set_matches(&state.next_cops, &offense.cop_name, department)
 }
 
 /// True when `cops` disables `cop_name`, either by an exact cop-name entry or by
 /// a RuboCop **department** entry. A slashless entry (e.g. `Lint`) is a
-/// department: it matches every cop whose name is `<Department>/...` (e.g.
-/// `Lint/Debugger`), mirroring `# rubocop:disable Lint`.
-fn cop_set_matches(cops: &BTreeSet<String>, cop_name: &str) -> bool {
+/// department: it matches every cop whose /// True when `cops` disables `cop_name`, either by an exact cop-name entry or by
+/// a RuboCop **department** entry (a slashless entry matches a whole department).
+/// `department` is the precomputed `cop_name.split('/').next()` so the
+/// per-offense lookup path splits the cop name once, not once per set.
+fn cop_set_matches(cops: &BTreeSet<String>, cop_name: &str, department: Option<&str>) -> bool {
     if cops.contains(cop_name) {
         return true;
     }
-    let department = cop_name.split('/').next();
     cops.iter()
         .any(|entry| !entry.contains('/') && department == Some(entry.as_str()))
 }
