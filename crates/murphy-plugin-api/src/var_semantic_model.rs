@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use murphy_ast::{Ast, NodeId, NodeKind, Symbol};
+use murphy_ast::{Ast, NodeId, NodeKind, Symbol, collect_children};
 
 const SIGNATURE_HASH_OFFSET: u64 = 0xcbf29ce484222325;
 const SIGNATURE_HASH_PRIME: u64 = 0x100000001b3;
@@ -100,6 +100,156 @@ pub struct Reference {
 
 // ── Branch-aware dominance analysis ──────────────────────────────────────────
 
+/// Fill branch chains for one scope's assignments and references with a
+/// single DFS from the scope root (murphy-utjl.9).
+///
+/// `asgn_chains[i]` / `ref_chains[i]` receive the exact value
+/// [`barrier_chain`] would compute: pairs `(barrier, child-on-path)` for
+/// every branch barrier strictly between the scope root and the node,
+/// outermost-first. The scope root itself never contributes a pair
+/// (mirroring `barrier_chain`'s `parent == root` stop). Slots for nodes
+/// outside the scope subtree are left `None` — the caller falls back to
+/// `barrier_chain` for those (defensive; attribution keeps them inside).
+/// A branch-barrier chain: `(barrier, child-on-path)` pairs from the
+/// scope root down, outermost-first. Alias keeps the analysis signatures
+/// readable (murphy-utjl.9).
+type BranchChain = Vec<(NodeId, NodeId)>;
+
+/// Ancestor predicates for one assignment node, all derivable from a
+/// single root-down walk (murphy-utjl.9). Matches `is_in_loop_body` /
+/// `is_in_captured_block` / `is_in_protected_begin_body` exactly: the
+/// scope root itself never decides (their `parent == root` early-out).
+#[derive(Clone, Copy, Default)]
+struct AncestorFacts {
+    in_loop: bool,
+    captured: bool,
+    protected_begin: bool,
+}
+
+fn fill_scope_branch_chains(
+    ast: &Ast,
+    scope_root: NodeId,
+    variables: &[Variable],
+    all_asgn_chains: &mut [Vec<Option<BranchChain>>],
+    all_ref_chains: &mut [Vec<Option<BranchChain>>],
+    all_asgn_facts: &mut [Vec<AncestorFacts>],
+) {
+    // Node -> (variable, assignment-or-reference, index) needing its chain.
+    let mut targets: HashMap<NodeId, Vec<(usize, bool, usize)>> = HashMap::new();
+    for (vi, var) in variables.iter().enumerate() {
+        for (i, a) in var.assignments.iter().enumerate() {
+            targets.entry(a.node_id).or_default().push((vi, true, i));
+        }
+        for (i, r) in var.references.iter().enumerate() {
+            targets.entry(r.node_id).or_default().push((vi, false, i));
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+    let lists = ast.raw_parts().node_lists;
+    enum Frame {
+        Visit(NodeId),
+        Descend {
+            barrier: NodeId,
+            child: NodeId,
+        },
+        Unwind {
+            chain_pushed: bool,
+            facts: AncestorFacts,
+        },
+    }
+    let mut chain: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut facts = AncestorFacts::default();
+    let mut stack = vec![Frame::Visit(scope_root)];
+    let mut kids: Vec<NodeId> = Vec::new();
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Visit(node) => {
+                if let Some(ts) = targets.get(&node) {
+                    for &(vi, is_asgn, i) in ts {
+                        if is_asgn {
+                            all_asgn_chains[vi][i] = Some(chain.clone());
+                            all_asgn_facts[vi][i] = facts;
+                        } else {
+                            all_ref_chains[vi][i] = Some(chain.clone());
+                        }
+                    }
+                }
+                kids.clear();
+                collect_children(ast.kind(node), lists, &mut kids);
+                for &child in kids.iter().rev() {
+                    stack.push(Frame::Descend {
+                        barrier: node,
+                        child,
+                    });
+                }
+            }
+            Frame::Descend { barrier, child } => {
+                // The scope root never decides — exactly the `parent == root`
+                // early-out shared by `barrier_chain` and the three ancestor
+                // predicates below.
+                let prev = facts;
+                let mut chain_pushed = false;
+                if barrier != scope_root {
+                    if is_branch_barrier(ast, barrier) {
+                        chain.push((barrier, child));
+                        chain_pushed = true;
+                    }
+                    match *ast.kind(barrier) {
+                        NodeKind::While { body, .. } | NodeKind::Until { body, .. }
+                            if body.get() == Some(child) =>
+                        {
+                            facts.in_loop = true;
+                        }
+                        NodeKind::For { body, .. } if body.get() == Some(child) => {
+                            facts.in_loop = true;
+                        }
+                        NodeKind::Block { call, .. } if child != call => {
+                            facts.captured = true;
+                        }
+                        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. }
+                            if child != send =>
+                        {
+                            facts.captured = true;
+                        }
+                        NodeKind::Lambda => {
+                            facts.captured = true;
+                        }
+                        NodeKind::Def { .. }
+                        | NodeKind::Defs { .. }
+                        | NodeKind::Class { .. }
+                        | NodeKind::Module { .. }
+                        | NodeKind::Sclass { .. } => {
+                            facts.captured = false;
+                        }
+                        NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. }
+                            if body.get() == Some(child) =>
+                        {
+                            facts.protected_begin = true;
+                        }
+                        _ => {}
+                    }
+                }
+                stack.push(Frame::Unwind {
+                    chain_pushed,
+                    facts: prev,
+                });
+                stack.push(Frame::Visit(child));
+            }
+            Frame::Unwind {
+                chain_pushed,
+                facts: prev,
+            } => {
+                if chain_pushed {
+                    chain.pop();
+                }
+                facts = prev;
+            }
+        }
+    }
+}
+
 /// Walk up from `node` to `root` via `ast.parent()`, collecting
 /// `(parent, child)` pairs at each branch-introducing ancestor.
 /// Returns the chain reversed (outermost first).
@@ -179,31 +329,6 @@ fn barrier_condition_is_compatible(ast: &Ast, barrier: NodeId, a: NodeId, b: Nod
         NodeKind::Rescue { body, .. } => body.get() == Some(a) || body.get() == Some(b),
         _ => false,
     }
-}
-
-/// Returns `true` if `node` is inside the `body` arm of an enclosing `Rescue`
-/// or `Ensure`. Writes here can be interrupted by exceptions, so they don't
-/// dominate later writes.
-fn is_in_protected_begin_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
-    let mut current = node;
-    while let Some(parent) = ast.parent(current).get() {
-        if parent == root {
-            return false;
-        }
-        let parent_kind = *ast.kind(parent);
-        let body = match parent_kind {
-            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body,
-            _ => {
-                current = parent;
-                continue;
-            }
-        };
-        if body.get() == Some(current) {
-            return true;
-        }
-        current = parent;
-    }
-    false
 }
 
 /// Which arm of an enclosing `Rescue` a node sits in.
@@ -573,34 +698,6 @@ fn node_in_subtree(ast: &Ast, ancestor: NodeId, node: NodeId) -> bool {
     }
 }
 
-/// Returns `true` if `node` is inside the loop body of an enclosing `While`,
-/// `Until`, or `For`. Assignments here are conservatively marked as referenced
-/// since the next loop iteration may read them.
-fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
-    let mut current = node;
-    loop {
-        let parent = match ast.parent(current).get() {
-            Some(p) => p,
-            None => return false,
-        };
-        if parent == root {
-            return false;
-        }
-        match *ast.kind(parent) {
-            NodeKind::While { body, .. } | NodeKind::Until { body, .. }
-                if body.get() == Some(current) =>
-            {
-                return true;
-            }
-            NodeKind::For { body, .. } if body.get() == Some(current) => {
-                return true;
-            }
-            _ => {}
-        }
-        current = parent;
-    }
-}
-
 /// Returns `true` if `node` is inside a `Rescue` whose resbody subtree contains
 /// a `Retry` and the variable has a read somewhere in that rescue. RuboCop
 /// treats such a `begin..rescue..end` as a loop (`process_rescue` ->
@@ -665,50 +762,6 @@ fn subtree_contains_retry(ast: &Ast, node: NodeId) -> bool {
         || ast.children(node).any(|c| subtree_contains_retry(ast, c))
 }
 
-/// Returns `true` if `node` sits inside a block/lambda body that is nested
-/// *within* the variable's declaring scope (`scope_root`) — i.e. the
-/// assignment writes a variable captured from an enclosing scope.
-///
-/// RuboCop's `Lint/UselessAssignment` never flags such a write: the block may
-/// run zero or many times, so the value is indeterminate and the write cannot
-/// be proven dead (matches `Variable#captured_by_block?`). Verified against
-/// standalone rubocop 1.87.0.
-///
-/// The walk stops (returning `false`) at a `Def`/`Defs`/`Class`/`Module`/
-/// `Sclass` boundary: Ruby locals do not cross those, so a same-named variable
-/// resolved across one is a (pre-existing) resolution artifact, not a real
-/// capture — we must not force-mark it referenced and thereby mask a genuine
-/// offense inside the nested method/class body.
-fn is_in_captured_block(ast: &Ast, scope_root: NodeId, node: NodeId) -> bool {
-    let mut current = node;
-    while let Some(parent) = ast.parent(current).get() {
-        if parent == scope_root {
-            return false;
-        }
-        match *ast.kind(parent) {
-            // Only the deferred block BODY captures the variable. The block's
-            // receiver call and its arguments (`items.each(n = 1) { … }`) run in
-            // the parent scope at the call site, so an assignment reached via the
-            // `call`/`send` child is NOT captured — fall through and keep walking
-            // outward.
-            NodeKind::Block { call, .. } if current != call => return true,
-            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } if current != send => {
-                return true;
-            }
-            NodeKind::Lambda => return true,
-            // Hard local-scope boundary: stop without claiming capture.
-            NodeKind::Def { .. }
-            | NodeKind::Defs { .. }
-            | NodeKind::Class { .. }
-            | NodeKind::Module { .. }
-            | NodeKind::Sclass { .. } => return false,
-            _ => {}
-        }
-        current = parent;
-    }
-    false
-}
-
 /// Compute `is_referenced` for every `Assignment` in `scope` once the DFS
 /// has fully populated the scope's variables, assignments, and references.
 fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeInfo) {
@@ -717,17 +770,53 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
     // most one run per `Rescue` node across every variable/assignment in the
     // scope. Keyed by `Rescue` `NodeId`, which is stable for the scope's lifetime.
     let mut retry_cache: HashMap<NodeId, bool> = HashMap::new();
-    for var in &mut scope.variables {
-        // Pre-compute branch chains for all assignments and references.
-        let asgn_chains: Vec<Vec<(NodeId, NodeId)>> = var
+    // Branch chains for every assignment/reference in the scope, computed in
+    // ONE DFS from the scope root (murphy-utjl.9): the old code walked each
+    // chain's ancestors independently (O(targets x depth) parent steps plus
+    // a Vec per chain). Values are identical to `barrier_chain`.
+    let mut all_asgn_chains: Vec<Vec<Option<BranchChain>>> = scope
+        .variables
+        .iter()
+        .map(|var| vec![None; var.assignments.len()])
+        .collect();
+    let mut all_ref_chains: Vec<Vec<Option<BranchChain>>> = scope
+        .variables
+        .iter()
+        .map(|var| vec![None; var.references.len()])
+        .collect();
+    let mut all_asgn_facts: Vec<Vec<AncestorFacts>> = scope
+        .variables
+        .iter()
+        .map(|var| vec![AncestorFacts::default(); var.assignments.len()])
+        .collect();
+    fill_scope_branch_chains(
+        ast,
+        scope_root,
+        &scope.variables,
+        &mut all_asgn_chains,
+        &mut all_ref_chains,
+        &mut all_asgn_facts,
+    );
+    for (vi, var) in scope.variables.iter_mut().enumerate() {
+        let asgn_chains: Vec<BranchChain> = var
             .assignments
             .iter()
-            .map(|a| barrier_chain(ast, scope_root, a.node_id))
+            .enumerate()
+            .map(|(i, a)| {
+                all_asgn_chains[vi][i]
+                    .take()
+                    .unwrap_or_else(|| barrier_chain(ast, scope_root, a.node_id))
+            })
             .collect();
-        let ref_chains: Vec<Vec<(NodeId, NodeId)>> = var
+        let ref_chains: Vec<BranchChain> = var
             .references
             .iter()
-            .map(|r| barrier_chain(ast, scope_root, r.node_id))
+            .enumerate()
+            .map(|(i, r)| {
+                all_ref_chains[vi][i]
+                    .take()
+                    .unwrap_or_else(|| barrier_chain(ast, scope_root, r.node_id))
+            })
             .collect();
 
         for i in 0..var.assignments.len() {
@@ -737,7 +826,7 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             // Ordinary loop bodies remain conservative. In a retry-rescue,
             // keep a write only when this variable has a read inside the loop;
             // the read may precede the write in source order on another pass.
-            if is_in_loop_body(ast, scope_root, asgn_node)
+            if all_asgn_facts[vi][i].in_loop
                 || is_in_retry_rescue(
                     ast,
                     scope_root,
@@ -758,7 +847,7 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             // since `Block` is a branch barrier and `chain_is_prefix` rejects a
             // deeper chain — so outer dataflow (e.g. `n = 0` killed by an outer
             // `n = 1`) is unaffected.
-            if is_in_captured_block(ast, scope_root, asgn_node) {
+            if all_asgn_facts[vi][i].captured {
                 var.assignments[i].is_referenced = true;
                 continue;
             }
@@ -783,7 +872,7 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
                 .enumerate()
                 .filter(|(j, w)| *j != i && w.end > asgn_end)
                 .filter(|(j, _)| chain_is_prefix(&asgn_chains[*j], &asgn_chains[i]))
-                .filter(|(_, w)| !is_in_protected_begin_body(ast, scope_root, w.node_id))
+                .filter(|(j, _)| !all_asgn_facts[vi][*j].protected_begin)
                 .min_by_key(|(_, w)| w.end);
 
             var.assignments[i].is_referenced = match (next_read_pos, dominating_overwrite) {
