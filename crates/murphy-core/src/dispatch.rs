@@ -118,9 +118,21 @@ unsafe extern "C" fn host_emit_offense(sink_ptr: *mut c_void, o_ptr: *const RawO
     let message = String::from_utf8_lossy(unsafe { o.message.as_bytes() }).into_owned();
     let range = convert_range(o.range);
     let severity = decode_severity(o.severity);
-    let file = sink.file.clone();
-    sink.offenses
-        .push(Offense::new(&file, &cop_name, range, severity, &message));
+    // Direct struct literal (murphy-utjl.7): `Offense::new` takes `&str and
+    // re-clones into owned `String`s, doubling every emit to six
+    // allocations. The in-crate literal moves the three Strings once (three
+    // allocations total); field-identical to `new` (all extend-only `None`s).
+    sink.offenses.push(Offense {
+        file: sink.file.clone(),
+        cop_name,
+        range,
+        severity,
+        message,
+        autocorrect: None,
+        documentation_url: None,
+        rationale: None,
+        fix_example: None,
+    });
 }
 
 /// Host callback for `FnTable::emit_edit`. Attaches the edit to the most
