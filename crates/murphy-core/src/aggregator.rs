@@ -60,18 +60,27 @@ pub fn aggregate(mut offenses: Vec<Offense>) -> Vec<Offense> {
     // Order-preserving dedupe on the 4-tuple (file, cop_name, range, message).
     // The DESC severity sort term above already makes the first duplicate the
     // survivor ADR 0011 wants, so the seen set only tracks offense identity.
+    // Two phases (murphy-utjl.8): the borrowed key set dies before any move,
+    // so dedupe clones zero Strings (the old code cloned three per offense).
+    let mut keep = vec![true; offenses.len()];
+    {
+        let mut seen: HashSet<(&str, &str, u32, u32, &str)> =
+            HashSet::with_capacity(offenses.len());
+        for (i, o) in offenses.iter().enumerate() {
+            if !seen.insert((
+                o.file.as_str(),
+                o.cop_name.as_str(),
+                o.range.start_offset,
+                o.range.end_offset,
+                o.message.as_str(),
+            )) {
+                keep[i] = false;
+            }
+        }
+    }
     let mut kept: Vec<Offense> = Vec::with_capacity(offenses.len());
-    let mut seen: HashSet<(String, String, u32, u32, String)> =
-        HashSet::with_capacity(offenses.len());
-    for o in offenses {
-        let key = (
-            o.file.clone(),
-            o.cop_name.clone(),
-            o.range.start_offset,
-            o.range.end_offset,
-            o.message.clone(),
-        );
-        if seen.insert(key) {
+    for (i, o) in offenses.into_iter().enumerate() {
+        if keep[i] {
             kept.push(o);
         }
     }
