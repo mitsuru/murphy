@@ -7,7 +7,7 @@
 
 mod translate;
 
-pub use translate::translate;
+pub use translate::{SyntaxError, translate, try_translate};
 
 /// 翻訳層のバージョン。prism→arena 変換の挙動 (どの prism ノードが
 /// どの [`murphy_ast::NodeKind`] にマップされるか) が変わるたびに **手動で
