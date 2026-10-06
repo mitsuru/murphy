@@ -37,7 +37,7 @@ const MSG_FOR_COPS: &str = "RuboCop disable/enable directives for %s are not per
 #[derive(Default)]
 pub struct DisableCopsWithinSourceCodeDirective;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct DisableCopsOptions {
     pub allowed_cops: Vec<String>,
 }

@@ -3619,8 +3619,13 @@ impl<'a> Cx<'a> {
     }
 
     /// Decode the current cop's runtime options, falling back to defaults.
-    pub fn options_or_default<T: CopOptions>(&self) -> T {
-        self.options::<T>().unwrap_or_default()
+    ///
+    /// Decodes once per distinct options payload per thread and serves
+    /// repeats from a cache (murphy-l7i0.1): per-node callers pay a map
+    /// lookup plus a `Clone`, never a second serde parse.
+    pub fn options_or_default<T: CopOptions + Clone>(&self) -> T {
+        crate::options::from_config_json_cached::<T>(unsafe { self.raw.options_json.as_bytes() })
+            .unwrap_or_default()
     }
 
     /// True if `name` matches any of `patterns` as an unanchored RE2 regex.
@@ -4389,7 +4394,7 @@ mod tests {
         assert!(cx.encoding_comment().is_none());
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct TestOptions {
         style: String,
     }

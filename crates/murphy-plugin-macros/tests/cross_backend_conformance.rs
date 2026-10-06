@@ -4171,7 +4171,7 @@ fn assert_c_matches_with_params(
 /// `#[derive(CopOptions)]` macro's implicit `Default` impl. `CopOptions` is
 /// hand-rolled below — small enough to read at a glance, and side-steps the
 /// derive-vs-derive `Default` collision the proc macro would otherwise cause.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TestOpts {
     method: String,
     methods: Vec<String>,

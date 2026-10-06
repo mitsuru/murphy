@@ -37,7 +37,7 @@ const MSG: &str = "Missing top-level documentation comment for `%type %name`.";
 #[derive(Default)]
 pub struct Documentation;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct DocumentationOptions {
     pub allowed_constants: Vec<String>,
 }

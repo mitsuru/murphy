@@ -77,7 +77,7 @@ const COERCION_MSG: &str = "Do not use `#to_datetime`.";
 pub struct DateTime;
 
 /// Configuration options for Style/DateTime.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct DateTimeOptions {
     /// When true, `something.to_datetime` is accepted.
     pub allow_coercion: bool,
