@@ -41,7 +41,7 @@ mod since;
 mod watch;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use murphy_ast::{Ast, NodeId, NodeKind, content_hash};
+use murphy_ast::{Ast, NodeId, NodeKind, collect_children, content_hash};
 use murphy_cache::{Cache, ResultCache};
 #[cfg(feature = "mruby-user-cops")]
 use murphy_core::{AstContext, run_mruby_cop_isolated};
@@ -1257,13 +1257,21 @@ fn directive_states_by_line(
     // (suppresses nothing). The range covers the whole statement starting
     // on that line, mirroring RuboCop 1.91 `DisableNext`.
     // (`starts` is the index hoisted above for the main loop.)
+    // One statement index for all next-directives (murphy-utjl.3); built
+    // lazily since most files have no next-directives at all.
+    let stmt_index = ast
+        .filter(|_| !next_directives.is_empty())
+        .map(|ast| build_stmt_index(ast, &starts));
     for (dir_line, all, cops) in next_directives {
         let Some(code_line) =
             attached_code_line(&starts, source, comments, &first_comment_on_line, dir_line)
         else {
             continue;
         };
-        let end_line = statement_end_line(code_line, ast, &starts);
+        let end_line = match &stmt_index {
+            Some(index) => statement_end_line_indexed(code_line, index, &starts),
+            None => statement_end_line(code_line, ast, &starts),
+        };
         let n = states.len();
         for state in states
             .iter_mut()
@@ -1355,6 +1363,78 @@ fn attached_code_line(
         }
         return Some(line);
     }
+}
+
+/// Per-file statement index for `disable-next`/`todo-next` resolution
+/// (murphy-utjl.3).
+///
+/// The old path scanned the whole arena per directive (O(directives x nodes))
+/// plus a descendants walk per hit. This builds once per file — and only when
+/// at least one next-directive exists — with a single pass: the widest
+/// non-`Begin` statement per start line, plus each node's subtree max end
+/// (heredoc tails etc.) via one children-before-parents sweep.
+struct StmtIndex {
+    /// 1-based start line -> (widest end offset, statement node).
+    widest_by_start_line: Vec<Option<(u32, NodeId)>>,
+    /// Indexed by `NodeId.0`: max end over the node's subtree (valid ranges only).
+    subtree_max_end: Vec<u32>,
+}
+
+fn build_stmt_index(ast: &Ast, starts: &[usize]) -> StmtIndex {
+    let parts = ast.raw_parts();
+    // Pre-order from the root; reversed, descendants precede ancestors in a
+    // tree, so one reversed pass computes every subtree maximum.
+    let mut order = Vec::with_capacity(parts.nodes.len());
+    let mut stack = vec![ast.root()];
+    let mut kids_buf = Vec::new();
+    while let Some(id) = stack.pop() {
+        order.push(id);
+        kids_buf.clear();
+        collect_children(ast.kind(id), parts.node_lists, &mut kids_buf);
+        stack.extend_from_slice(&kids_buf);
+    }
+    let mut widest_by_start_line: Vec<Option<(u32, NodeId)>> = vec![None; starts.len() + 1];
+    let mut subtree_max_end = vec![0u32; parts.nodes.len()];
+    for id in order.iter().rev() {
+        let range = ast.range(*id);
+        let mut max_end = if range.start < range.end {
+            range.end
+        } else {
+            0
+        };
+        kids_buf.clear();
+        collect_children(ast.kind(*id), parts.node_lists, &mut kids_buf);
+        for &child in &kids_buf {
+            max_end = max_end.max(subtree_max_end[child.0 as usize]);
+        }
+        subtree_max_end[id.0 as usize] = max_end;
+        if range.start < range.end && !matches!(ast.kind(*id), NodeKind::Begin(_)) {
+            let line = line_of(starts, range.start as usize);
+            // Strict `>` keeps the first (lowest `NodeId`) on ties,
+            // mirroring the old full-scan comparison.
+            if widest_by_start_line[line].is_none_or(|(end, _)| range.end > end) {
+                widest_by_start_line[line] = Some((range.end, *id));
+            }
+        }
+    }
+    StmtIndex {
+        widest_by_start_line,
+        subtree_max_end,
+    }
+}
+
+/// Indexed [`statement_end_line`]: O(1) per directive after one
+/// [`build_stmt_index`] pass. Identical result to the full scan.
+fn statement_end_line_indexed(code_line: usize, index: &StmtIndex, starts: &[usize]) -> usize {
+    let Some(&(_, stmt)) = index
+        .widest_by_start_line
+        .get(code_line)
+        .and_then(|o| o.as_ref())
+    else {
+        return code_line;
+    };
+    let end = index.subtree_max_end[stmt.0 as usize] as usize;
+    line_of(starts, end.saturating_sub(1)).max(code_line)
 }
 
 /// 1-based end line of the statement starting on 1-based `code_line`: the
@@ -3018,6 +3098,36 @@ mod tests {
             dispatch: noop_dispatch,
             send_methods_ptr: std::ptr::null(),
             send_methods_len: 0,
+        }
+    }
+
+    /// murphy-utjl.3 parity guard: the indexed statement-end lookup must
+    /// agree with the full arena scan on every line, including heredocs,
+    /// multiline calls, and empty sources.
+    #[test]
+    fn stmt_index_matches_full_scan() {
+        let sources = [
+            "puts 1\n",
+            "foo(\n  1,\n  2\n)\n",
+            "x = <<~EOS\n  hi #{1 +\n    2}\nEOS\nputs x\n",
+            "begin\n  a\nrescue\n  b\nend\n",
+            "case x\nwhen 1\n  a\nelse\n  b\nend\n",
+            "def f\n  1\nend\n",
+            "\n\n\n",
+            "# only a comment\n",
+            "a = 1; b = 2\n",
+        ];
+        for src in sources {
+            let ast = murphy_core::parse(src, "t.rb").expect("parses");
+            let starts = line_starts(src);
+            let index = build_stmt_index(&ast, &starts);
+            for code_line in 1..=starts.len() + 1 {
+                assert_eq!(
+                    statement_end_line(code_line, Some(&ast), &starts),
+                    statement_end_line_indexed(code_line, &index, &starts),
+                    "src={src:?} line={code_line}"
+                );
+            }
         }
     }
 
