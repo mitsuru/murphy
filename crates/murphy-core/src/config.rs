@@ -1273,16 +1273,60 @@ impl MurphyConfig {
             })
     }
 
-    pub fn cop_applies_to_file(&self, name: &str, file: &Path) -> bool {
-        let file = file.strip_prefix(".").unwrap_or(file);
-
+    /// Resolved per-cop path-scope pattern lists after user/default
+    /// layering (murphy-utjl.6): `(include, exclude)`, each `None` when
+    /// unconstrained. Shared by [`Self::cop_applies_to_file`] and the
+    /// precompiled [`CompiledCopScopes`].
+    pub fn cop_scope_patterns(&self, name: &str) -> (Option<Vec<String>>, Option<Vec<String>>) {
         let rule = self.cops.rules.get(name);
         let default_rule = self.base_defaults.cop_rules.get(name);
 
         // Resolve Include and Exclude independently: user setting wins per-field
         // unless that key is listed in the cop's `inherit_mode.merge`.
-        let include = resolve_cop_scope_list(rule, default_rule, "Include");
-        let exclude = resolve_cop_scope_list(rule, default_rule, "Exclude");
+        (
+            resolve_cop_scope_list(rule, default_rule, "Include"),
+            resolve_cop_scope_list(rule, default_rule, "Exclude"),
+        )
+    }
+
+    /// Precompile this cop's path scopes into matcher sets, once per lint
+    /// run (murphy-utjl.6). `None` = unconstrained. A pattern list that
+    /// fails to build (unreachable for validated configs) becomes an empty
+    /// set, matching nothing — mirroring [`globset_matches`]'s failure
+    /// semantics (include-failure excludes the cop, exclude-failure keeps it).
+    pub fn compile_cop_scopes(&self, name: &str) -> CompiledCopScopes {
+        let (include, exclude) = self.cop_scope_patterns(name);
+        CompiledCopScopes {
+            include: compile_scope_list(include),
+            exclude: compile_scope_list(exclude),
+        }
+    }
+
+    /// Test a precompiled [`CompiledCopScopes`] against a file: the hot
+    /// per-file check (murphy-utjl.6). Pure `is_match` calls — no map
+    /// lookups, no glob compilation, no pattern cloning.
+    pub fn scopes_apply(scopes: &CompiledCopScopes, file: &Path) -> bool {
+        let file = file.strip_prefix(".").unwrap_or(file);
+        let matches_include = scopes.include.as_ref().is_none_or(|set| set.is_match(file));
+        let matches_exclude = scopes
+            .exclude
+            .as_ref()
+            .is_some_and(|set| set.is_match(file));
+        matches_include && !matches_exclude
+    }
+
+    /// Whether this cop has any path scope after layering (murphy-utjl.6):
+    /// cops without scopes apply to every file with no per-file check.
+    pub fn cop_has_path_scope(&self, name: &str) -> bool {
+        let (include, exclude) = self.cop_scope_patterns(name);
+        include.as_deref().is_some_and(|inc| !inc.is_empty())
+            || exclude.as_deref().is_some_and(|exc| !exc.is_empty())
+    }
+
+    pub fn cop_applies_to_file(&self, name: &str, file: &Path) -> bool {
+        let file = file.strip_prefix(".").unwrap_or(file);
+
+        let (include, exclude) = self.cop_scope_patterns(name);
 
         let matches_include = match include.as_deref() {
             Some(inc) if !inc.is_empty() => globset_matches(inc, file),
@@ -1971,6 +2015,37 @@ fn globset_matches(patterns: &[String], path: &Path) -> bool {
         };
         set.is_match(path)
     })
+}
+
+/// Precompiled per-cop `Include`/`Exclude` matchers for one lint run
+/// (murphy-utjl.6). `None` = unconstrained for that side.
+#[derive(Debug, Clone, Default)]
+pub struct CompiledCopScopes {
+    /// `None` matches every file; `Some(set)` only matching files.
+    /// An empty set matches nothing (build-failure fallback, mirroring
+    /// [`globset_matches`]).
+    pub include: Option<globset::GlobSet>,
+    /// `None` excludes nothing; `Some(set)` excludes matching files.
+    pub exclude: Option<globset::GlobSet>,
+}
+
+/// Compile one scope side: empty/missing patterns stay unconstrained
+/// (`None`); otherwise build once, skipping invalid patterns exactly like
+/// [`globset_matches`]. A failed build yields an empty match-nothing set.
+fn compile_scope_list(patterns: Option<Vec<String>>) -> Option<globset::GlobSet> {
+    let patterns = patterns.filter(|list| !list.is_empty())?;
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in &patterns {
+        let Ok(glob) = globset::Glob::new(pattern) else {
+            continue;
+        };
+        builder.add(glob);
+    }
+    Some(builder.build().unwrap_or_else(|_| {
+        globset::GlobSetBuilder::new()
+            .build()
+            .expect("empty GlobSetBuilder builds")
+    }))
 }
 
 fn validate_glob_patterns(patterns: &[String]) -> Result<(), ConfigError> {

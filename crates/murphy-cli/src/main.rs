@@ -46,12 +46,12 @@ use murphy_cache::{Cache, ResultCache};
 #[cfg(feature = "mruby-user-cops")]
 use murphy_core::{AstContext, run_mruby_cop_isolated};
 use murphy_core::{
-    Baseline, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
-    aggregate_with_config, ast_to_sexp, discover_with_config, dispatch, lint_fingerprint,
-    migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
+    Baseline, CompiledCopScopes, CopRegistry, FixpointStatus, MurphyConfig, Offense,
+    SYNTAX_COP_NAME, Severity, aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
+    lint_fingerprint, migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
 use murphy_plugin_api::{
-    PluginCopV1, PluginRegistration, Range, RawSlice, SourceToken, SourceTokenKind,
+    AllCopsContext, PluginCopV1, PluginRegistration, Range, RawSlice, SourceToken, SourceTokenKind,
     tristate_from_wire,
 };
 use murphy_reporting::{OutputFormat, format_lint_output};
@@ -755,13 +755,14 @@ fn lint_source(
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
     let options = prepare_cop_options(cops, config);
-    lint_source_with_options(source, file, cops, mruby_cops, config, &options, cache)
+    let run_cops = partition_cops_for_run(cops, config);
+    lint_source_with_options(source, file, &run_cops, mruby_cops, config, &options, cache)
 }
 
 fn lint_source_with_options(
     source: &str,
     file: &str,
-    cops: &[&PluginCopV1],
+    run_cops: &RunCops,
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     options: &CopOptionsJson,
@@ -770,18 +771,18 @@ fn lint_source_with_options(
     match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            let scoped_cops = scoped_native_cops(cops, config, file);
-            // Borrows config-owned cop-name strings; must outlive the dispatch call.
-            let disabled_names: Vec<RawSlice> = config
-                .disabled_cop_names()
-                .map(RawSlice::borrowed)
-                .collect();
+            // Run-level partition (murphy-utjl.6): enablement, scope
+            // compilation, and dispatch context were computed once in
+            // `partition_cops_for_run`; per-file work is only the
+            // precompiled scope match below.
+            let mut scoped_cops = Vec::new();
+            scoped_native_cops_into(run_cops, file, &mut scoped_cops);
             dispatch::run_cops_with_options_and_context_and_schema(
                 &ast,
                 &scoped_cops,
                 &mut sink,
-                config.allcops_context(),
-                &disabled_names,
+                run_cops.ctx,
+                &run_cops.disabled_names,
                 rails_schema_json_cached(),
                 |name| cop_options_bytes(options, name),
             );
@@ -862,27 +863,90 @@ fn run_mruby_user_cops_profiled(
     (Vec::new(), Vec::new())
 }
 
+/// Run-level cop selection, computed once per lint run (murphy-utjl.6).
+///
+/// The old path re-checked enablement, rebuilt `disabled_cop_names` /
+/// `AllCopsContext`, and re-resolved + recompiled path scopes for every
+/// cop on every file. Now: enablement, scope compilation, and the shared
+/// dispatch context happen once here; per-file work is only the precompiled
+/// `is_match` for the (usually few) scoped cops — unscoped cops apply to
+/// every file with no per-file check at all.
+/// One enabled cop in a [`RunCops`] partition, in registry order.
+enum RunCop<'a> {
+    /// No path scopes: applies to every file with no per-file check.
+    Always(&'a PluginCopV1),
+    /// Path scopes with precompiled matchers: per-file `is_match` only.
+    Scoped(&'a PluginCopV1, CompiledCopScopes),
+}
+
+struct RunCops<'a> {
+    /// Enabled cops in registry order (dispatch order is observable through
+    /// per-cop fault-isolation diagnostics, so the partition preserves it).
+    cops: Vec<RunCop<'a>>,
+    /// Config-disabled cop names, borrowed from the config (outlives the run).
+    disabled_names: Vec<RawSlice>,
+    /// Run-wide dispatch context scalars.
+    ctx: AllCopsContext,
+}
+
+fn partition_cops_for_run<'a>(cops: &[&'a PluginCopV1], config: &'a MurphyConfig) -> RunCops<'a> {
+    let mut run = RunCops {
+        cops: Vec::with_capacity(cops.len()),
+        disabled_names: config
+            .disabled_cop_names()
+            .map(RawSlice::borrowed)
+            .collect(),
+        ctx: config.allcops_context(),
+    };
+    for &cop in cops {
+        let name = plugin_cop_name(cop);
+        // Re-check enablement post-layer: the registry's dispatch view is
+        // filtered at discovery time, BEFORE `apply_pack_default_layers`
+        // folds pack-bundled `Enabled: false` opt-outs (e.g. the rails
+        // pack's `Rails/DefaultScope`) into the config. Without this,
+        // pack-default opt-outs never take effect in real runs
+        // (murphy-bjrg.3, murphy-4gd.1.15 audit). Layer 3 falls back to
+        // the cop's own ABI default, mirroring discovery-time filtering.
+        let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
+        if !config.cop_enabled_with_cop_default(name, cop_default) {
+            continue;
+        }
+        if config.cop_has_path_scope(name) {
+            run.cops
+                .push(RunCop::Scoped(cop, config.compile_cop_scopes(name)));
+        } else {
+            run.cops.push(RunCop::Always(cop));
+        }
+    }
+    run
+}
+
+/// Per-file cop selection from a [`RunCops`] partition: unscoped cops plus
+/// scoped cops whose precompiled matchers hit `file`. Buffer-reuse twin of
+/// the old per-file filter (murphy-utjl.6).
+fn scoped_native_cops_into<'a>(run: &RunCops<'a>, file: &str, out: &mut Vec<&'a PluginCopV1>) {
+    out.clear();
+    out.reserve(run.cops.len());
+    let path = Path::new(file);
+    out.extend(run.cops.iter().filter_map(|entry| match entry {
+        RunCop::Always(cop) => Some(*cop),
+        RunCop::Scoped(cop, scopes) => MurphyConfig::scopes_apply(scopes, path).then_some(*cop),
+    }));
+}
+
+/// Test-only compatibility wrapper (production paths partition once via
+/// [`partition_cops_for_run`] and select per file with
+/// [`scoped_native_cops_into`]).
+#[cfg(test)]
 fn scoped_native_cops<'a>(
     cops: &'a [&'a PluginCopV1],
-    config: &MurphyConfig,
+    config: &'a MurphyConfig,
     file: &str,
 ) -> Vec<&'a PluginCopV1> {
-    cops.iter()
-        .copied()
-        .filter(|cop| {
-            let name = plugin_cop_name(cop);
-            // Re-check enablement post-layer: the registry's dispatch view is
-            // filtered at discovery time, BEFORE `apply_pack_default_layers`
-            // folds pack-bundled `Enabled: false` opt-outs (e.g. the rails
-            // pack's `Rails/DefaultScope`) into the config. Without this,
-            // pack-default opt-outs never take effect in real runs
-            // (murphy-bjrg.3, murphy-4gd.1.15 audit). Layer 3 falls back to
-            // the cop's own ABI default, mirroring discovery-time filtering.
-            let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
-            config.cop_enabled_with_cop_default(name, cop_default)
-                && config.cop_applies_to_file(name, Path::new(file))
-        })
-        .collect()
+    let run = partition_cops_for_run(cops, config);
+    let mut out = Vec::new();
+    scoped_native_cops_into(&run, file, &mut out);
+    out
 }
 
 fn plugin_cop_name(cop: &PluginCopV1) -> &str {
@@ -964,7 +1028,7 @@ struct TimedOffenses {
 fn lint_source_timed(
     source: &str,
     file: &str,
-    cops: &[&PluginCopV1],
+    run_cops: &RunCops,
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     options: &CopOptionsJson,
@@ -977,18 +1041,14 @@ fn lint_source_timed(
     let offenses = match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            let scoped_cops = scoped_native_cops(cops, config, file);
-            // Borrows config-owned cop-name strings; must outlive the dispatch call.
-            let disabled_names: Vec<RawSlice> = config
-                .disabled_cop_names()
-                .map(RawSlice::borrowed)
-                .collect();
+            let mut scoped_cops = Vec::new();
+            scoped_native_cops_into(run_cops, file, &mut scoped_cops);
             dispatch::run_cops_with_options_and_context_and_schema(
                 &ast,
                 &scoped_cops,
                 &mut sink,
-                config.allcops_context(),
-                &disabled_names,
+                run_cops.ctx,
+                &run_cops.disabled_names,
                 rails_schema_json_cached(),
                 |name| cop_options_bytes(options, name),
             );
@@ -1605,13 +1665,14 @@ fn write_back_atomic(target: &Path, corrected: &str) -> Result<(), AppError> {
 fn lint_closure_edits<'a>(
     source: &str,
     file: &'a str,
-    cops: &'a [&'a PluginCopV1],
+    run_cops: &RunCops<'a>,
     mruby_cops: &'a [MrubyCopSource],
     config: &'a MurphyConfig,
     options: &'a CopOptionsJson,
     cache: Option<&'a Cache>,
 ) -> Vec<murphy_core::Edit> {
-    let offenses = lint_source_with_options(source, file, cops, mruby_cops, config, options, cache);
+    let offenses =
+        lint_source_with_options(source, file, run_cops, mruby_cops, config, options, cache);
     aggregate_with_config(offenses, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
@@ -1645,7 +1706,7 @@ struct FileDebugInfo {
 /// shares an entry.
 fn lint_files_memoized(
     sources: &[(String, String)],
-    cops: &[&PluginCopV1],
+    run_cops: &RunCops,
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     options: &CopOptionsJson,
@@ -1667,7 +1728,7 @@ fn lint_files_memoized(
                         return cached;
                     }
                     let offenses = lint_source_with_options(
-                        content, path, cops, mruby_cops, config, options, cache,
+                        content, path, run_cops, mruby_cops, config, options, cache,
                     );
                     if let Ok(bytes) = serde_json::to_vec(&offenses) {
                         rc.put(&hash, path, &bytes);
@@ -1675,7 +1736,7 @@ fn lint_files_memoized(
                     offenses
                 } else {
                     lint_source_with_options(
-                        content, path, cops, mruby_cops, config, options, cache,
+                        content, path, run_cops, mruby_cops, config, options, cache,
                     )
                 }
             })
@@ -1725,7 +1786,7 @@ fn lint_files_memoized(
             let base = lint_source_with_options(
                 content,
                 representative,
-                cops,
+                run_cops,
                 mruby_cops,
                 config,
                 options,
@@ -1770,7 +1831,7 @@ fn lint_files_memoized(
 
 fn lint_files_memoized_debug(
     sources: &[(String, String)],
-    cops: &[&PluginCopV1],
+    run_cops: &RunCops,
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     options: &CopOptionsJson,
@@ -1782,7 +1843,7 @@ fn lint_files_memoized_debug(
     let mut all: Vec<Offense> = Vec::new();
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
     for (path, content) in sources {
-        let t = lint_source_timed(content, path, cops, mruby_cops, config, options, cache);
+        let t = lint_source_timed(content, path, run_cops, mruby_cops, config, options, cache);
         timings.push((path.clone(), t.parse_micros, t.cops_micros));
         all.extend(t.offenses);
     }
@@ -1803,7 +1864,7 @@ struct ProfiledFile {
 fn lint_source_profiled(
     source: &str,
     file: &str,
-    cops: &[&PluginCopV1],
+    run_cops: &RunCops,
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     options: &CopOptionsJson,
@@ -1815,18 +1876,14 @@ fn lint_source_profiled(
     match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            let scoped_cops = scoped_native_cops(cops, config, file);
-            // Borrows config-owned cop-name strings; must outlive the dispatch call.
-            let disabled_names: Vec<RawSlice> = config
-                .disabled_cop_names()
-                .map(RawSlice::borrowed)
-                .collect();
+            let mut scoped_cops = Vec::new();
+            scoped_native_cops_into(run_cops, file, &mut scoped_cops);
             let timings = dispatch::run_cops_with_options_context_and_diagnostics_timed_and_schema(
                 &ast,
                 &scoped_cops,
                 &mut sink,
-                config.allcops_context(),
-                &disabled_names,
+                run_cops.ctx,
+                &run_cops.disabled_names,
                 &[],
                 rails_schema_json_cached(),
                 |name| cop_options_bytes(options, name),
@@ -1876,7 +1933,7 @@ fn lint_source_profiled(
 /// `(parse, cops)` totals mirror the `--debug` shape for combined runs.
 fn lint_files_profiled(
     sources: &[(String, String)],
-    cops: &[&PluginCopV1],
+    run_cops: &RunCops,
     mruby_cops: &[MrubyCopSource],
     config: &MurphyConfig,
     options: &CopOptionsJson,
@@ -1893,7 +1950,8 @@ fn lint_files_profiled(
     let files: Vec<FileProfile> = sources
         .par_iter()
         .map(|(path, content)| {
-            let t = lint_source_profiled(content, path, cops, mruby_cops, config, options, cache);
+            let t =
+                lint_source_profiled(content, path, run_cops, mruby_cops, config, options, cache);
             FileProfile {
                 path: path.clone(),
                 offenses: t.offenses,
@@ -2360,9 +2418,10 @@ fn lint_and_print_watch_pass(
     // replaces the whole session between passes).
     let cops_vec = session.registry.cops();
     let cops: &[&PluginCopV1] = &cops_vec;
+    let run_cops = partition_cops_for_run(cops, &session.config);
     let flat = lint_files_memoized(
         sources,
-        cops,
+        &run_cops,
         &session.mruby_cops,
         &session.config,
         &session.options,
@@ -2820,6 +2879,10 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     let cops_vec = registry.cops();
     let cops: &[&PluginCopV1] = &cops_vec;
     let options = prepare_cop_options(cops, &config);
+    // Run-level cop partition (murphy-utjl.6): enablement, scope
+    // compilation, and dispatch context computed once; per-file selection
+    // below is only precompiled scope matches.
+    let run_cops = partition_cops_for_run(cops, &config);
     #[cfg(feature = "mruby-user-cops")]
     let mruby_cop_sources = load_mruby_cop_sources(registry.mruby_cop_paths())?;
     #[cfg(not(feature = "mruby-user-cops"))]
@@ -2875,6 +2938,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     if let Some(fix_mode) = fix_mode {
         let fix_cops = cops_for_fix_mode(cops, fix_mode);
         let fix_cops: &[&PluginCopV1] = &fix_cops;
+        let fix_run_cops = partition_cops_for_run(fix_cops, &config);
         if debug {
             eprintln!(
                 "murphy: debug: fixpoint start elapsed_ms={}",
@@ -2885,7 +2949,17 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         for (path, source) in &sources_for_lint {
             let outcome = run_to_fixpoint(
                 source,
-                |s| lint_closure_edits(s, path, fix_cops, mruby_cops, &config, &options, cache_ref),
+                |s| {
+                    lint_closure_edits(
+                        s,
+                        path,
+                        &fix_run_cops,
+                        mruby_cops,
+                        &config,
+                        &options,
+                        cache_ref,
+                    )
+                },
                 MAX_FIX_ITERATIONS,
             );
             if outcome.corrected != *source {
@@ -2929,7 +3003,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     let flat_offenses: Vec<Offense> = if args.profile {
         let (offenses, summary, timings) = lint_files_profiled(
             &sources_for_lint,
-            cops,
+            &run_cops,
             mruby_cops,
             &config,
             &options,
@@ -2948,7 +3022,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     } else if debug {
         let (offenses, timings) = lint_files_memoized_debug(
             &sources_for_lint,
-            cops,
+            &run_cops,
             mruby_cops,
             &config,
             &options,
@@ -2964,7 +3038,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     } else {
         lint_files_memoized(
             &sources_for_lint,
-            cops,
+            &run_cops,
             mruby_cops,
             &config,
             &options,
@@ -3156,6 +3230,40 @@ mod tests {
             1
         );
         assert!(scoped_native_cops(&cops, &cfg, "app/models/user.rb").is_empty());
+    }
+
+    const SCOPED_COP: PluginCopV1 = test_cop("Test/Scoped", TRISTATE_UNSET);
+    const PLAIN_COP: PluginCopV1 = test_cop("Test/Plain", TRISTATE_UNSET);
+
+    /// murphy-utjl.6 parity guard: the run-level partition plus per-file
+    /// precompiled match must select exactly the cops the old per-file
+    /// enablement + `cop_applies_to_file` filter selected.
+    #[test]
+    fn run_partition_matches_per_file_filter() {
+        let cfg = MurphyConfig::from_yaml_str(
+            "Test/Scoped:
+  Include: ['spec/**/*.rb']\nTest/Plain:\n  Exclude: ['gen/**/*.rb']\n",
+        )
+        .expect("config parses");
+        let cops = [&SCOPED_COP, &PLAIN_COP, &SAFE_FIX_COP];
+        let run = partition_cops_for_run(&cops, &cfg);
+        for file in [
+            "spec/models/user_spec.rb",
+            "app/models/user.rb",
+            "gen/auto.rb",
+        ] {
+            let mut got = Vec::new();
+            scoped_native_cops_into(&run, file, &mut got);
+            let got_names: Vec<&str> = got.iter().map(|c| plugin_cop_name(c)).collect();
+            let mut want = Vec::new();
+            for &cop in &cops {
+                let name = plugin_cop_name(cop);
+                if cfg.cop_enabled(name) && cfg.cop_applies_to_file(name, Path::new(file)) {
+                    want.push(name);
+                }
+            }
+            assert_eq!(got_names, want, "file {file}");
+        }
     }
 
     #[test]
