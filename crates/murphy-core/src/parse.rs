@@ -1,4 +1,4 @@
-//! Parse adapter: thin wrapper around [`murphy_translate::translate`].
+//! Parse adapter: thin wrapper around [`murphy_translate::try_translate`].
 //!
 //! Returns an owned [`murphy_ast::Ast`] arena (ADR 0037); there is no
 //! lifetime parameter on the success type — the host owns the source +
@@ -9,11 +9,9 @@
 //! prism is error-tolerant: a malformed source yields a partial tree
 //! plus a non-empty error list. Murphy reports the *first* error as a
 //! single `Murphy/Syntax` offense (design §6); the file does not run
-//! cops. To keep that contract, this function re-parses with prism
-//! solely to harvest the first error before delegating to translate.
-//! prism parse cost is well below dispatch cost on every Ruby corpus we
-//! profile against, so re-parsing twice is acceptable; surfacing errors
-//! through translate is a follow-up (out of murphy-9cr.22 scope).
+//! cops. Error harvest and translation share a single
+//! `parse_with_tokens` result inside `try_translate`, so each cache miss
+//! parses exactly once (murphy-utjl.1).
 
 use murphy_ast::{Ast, content_hash};
 use murphy_cache::Cache;
@@ -110,14 +108,16 @@ pub fn parse(source: &str, path: impl Into<PathBuf>) -> Result<Ast, ParseError> 
         });
     }
 
-    if let Some(first) = collect_parse_diagnostics(source).into_iter().next() {
-        return Err(ParseError {
-            message: first.message,
-            range: first.range,
-        });
+    match murphy_translate::try_translate(source, path) {
+        Ok(ast) => Ok(ast),
+        Err(err) => Err(ParseError {
+            message: err.message,
+            range: Range {
+                start_offset: err.start,
+                end_offset: err.end,
+            },
+        }),
     }
-
-    Ok(murphy_translate::translate(source, path))
 }
 
 /// Parse Ruby `source` (from `path`) into an arena [`Ast`], consulting an
@@ -155,15 +155,21 @@ pub fn parse_with_cache(
         ast.set_source_path(path);
         return Ok(ast);
     }
-    // Miss: harvest the first prism error so a syntax-error file degrades
-    // through the Murphy/Syntax path (ADR 0006) rather than getting cached.
-    if let Some(first) = collect_parse_diagnostics(source).into_iter().next() {
-        return Err(ParseError {
-            message: first.message,
-            range: first.range,
-        });
-    }
-    let ast = murphy_translate::translate(source, path);
+    // Miss: single parse surfaces the first prism error so a syntax-error
+    // file degrades through the Murphy/Syntax path (ADR 0006) rather than
+    // getting cached.
+    let ast = match murphy_translate::try_translate(source, path) {
+        Ok(ast) => ast,
+        Err(err) => {
+            return Err(ParseError {
+                message: err.message,
+                range: Range {
+                    start_offset: err.start,
+                    end_offset: err.end,
+                },
+            });
+        }
+    };
     cache.put(&hash, &ast);
     Ok(ast)
 }
@@ -272,6 +278,23 @@ mod tests {
         assert!(!diags.is_empty(), "broken source yields diagnostics");
         assert_eq!(diags[0].message, err.message);
         assert_eq!(diags[0].range, err.range);
+    }
+
+    #[test]
+    fn single_parse_error_matches_ruby_harvest_across_broken_sources() {
+        // murphy-utjl.1 parity guard: parse() now harvests via the murphy
+        // fork (single parse_with_tokens) while collect_parse_diagnostics
+        // uses upstream ruby-prism. Both must agree on first message+range.
+        for src in ["def (\n", "x = \n", "class\n", "[1,\n", "def f(\nend\n"] {
+            let err = parse(src, "t.rb").unwrap_err();
+            let diags = collect_parse_diagnostics(src);
+            assert!(
+                !diags.is_empty(),
+                "broken source yields diagnostics for {src:?}"
+            );
+            assert_eq!(diags[0].message, err.message, "message parity for {src:?}");
+            assert_eq!(diags[0].range, err.range, "range parity for {src:?}");
+        }
     }
 
     #[test]

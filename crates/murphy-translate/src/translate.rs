@@ -11,8 +11,53 @@ use std::path::PathBuf;
 ///
 /// prism は total・panic-free なので本関数も常に成功する。prism の借用ツリーは
 /// 本関数内で drop され、ライフタイムは外へ漏れない。
+///
+/// 構文エラー時は部分木を翻訳する（呼び出し側がエラーを先に弾く想定）。
+/// エラー検査込みの単一 parse が要る場合は [`try_translate`] を使う。
 pub fn translate(source: &str, path: impl Into<PathBuf>) -> Ast {
     let result = prism::parse_with_tokens(source.as_bytes());
+    translate_from_result(source, path, &result)
+}
+
+/// 構文エラー時の構造化失敗。`message` は prism の verbatim テキスト、
+/// `start`/`end` はソースへのバイトオフセット（u32 ドメイン内を想定）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxError {
+    /// prism の verbatim エラーメッセージ。
+    pub message: String,
+    /// エラー箇所の開始バイトオフセット。
+    pub start: u32,
+    /// エラー箇所の終了バイトオフセット（exclusive）。
+    pub end: u32,
+}
+
+/// Ruby ソースを prism で **1 回だけ** parse し、成功時は arena [`Ast`]、
+/// 構文エラー時は先頭エラーを返す。
+///
+/// 従来 `murphy-core::parse` はエラー採取用の `prism::parse` と翻訳用の
+/// `parse_with_tokens` を毎ファイル2回走らせていた。本関数は1回の
+/// `parse_with_tokens` 結果からエラー検査と翻訳の両方を行う。
+/// prism の借用ツリーは本関数内で drop され、ライフタイムは外へ漏れない。
+pub fn try_translate(source: &str, path: impl Into<PathBuf>) -> Result<Ast, SyntaxError> {
+    let result = prism::parse_with_tokens(source.as_bytes());
+    if let Some(err) = result.parse().errors().next() {
+        let loc = err.location();
+        return Err(SyntaxError {
+            message: err.message().to_owned(),
+            start: loc.start_offset() as u32,
+            end: loc.end_offset() as u32,
+        });
+    }
+    Ok(translate_from_result(source, path, &result))
+}
+
+/// 単一 `parse_with_tokens` 結果からの翻訳本体。[`translate`] と
+/// [`try_translate`] で共有し、prism parse を重ねない。
+fn translate_from_result(
+    source: &str,
+    path: impl Into<PathBuf>,
+    result: &prism::ParseResultWithTokens<'_>,
+) -> Ast {
     let mut t = Translator {
         builder: AstBuilder::new(source, path),
     };
@@ -2673,7 +2718,7 @@ impl Translator {
 
 #[cfg(test)]
 mod tests {
-    use super::translate;
+    use super::{translate, try_translate};
     use murphy_ast::{MagicCommentKind, NodeKind};
 
     fn with_deep_translation_stack(run: impl FnOnce() + Send + 'static) {
@@ -5494,6 +5539,36 @@ mod tests {
                 "chain must terminate at the base constant"
             );
         });
+    }
+
+    #[test]
+    fn try_translate_ok_matches_translate() {
+        for src in [
+            "puts 1\n",
+            "x = 1\n",
+            "def f(a, *b, c: 1) = a\n",
+            "class A < B\nend\n",
+        ] {
+            let a = translate(src, "t.rb");
+            let b = try_translate(src, "t.rb").expect("valid source translates");
+            assert_eq!(a, b, "try_translate must equal translate for {src:?}");
+        }
+    }
+
+    #[test]
+    fn try_translate_err_is_first_error_in_bounds() {
+        for src in ["def (\n", "x = \n", "class\n", "[1,\n"] {
+            let err = try_translate(src, "t.rb").unwrap_err();
+            assert!(
+                !err.message.is_empty(),
+                "error carries a message for {src:?}"
+            );
+            assert!(err.start <= err.end, "range ordered for {src:?}");
+            assert!(
+                (err.end as usize) <= src.len(),
+                "range inside source for {src:?}"
+            );
+        }
     }
 
     #[test]
